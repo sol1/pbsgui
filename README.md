@@ -55,21 +55,40 @@ docs                   architecture and design notes
 
 ## Building
 
-Prerequisites: a recent stable Rust toolchain, Node is not required (the UI is
-static for now), and on Windows the WebView2 runtime (preinstalled on current
-Windows) plus the Tauri CLI (`cargo install tauri-cli --version '^2'`).
+Prerequisites: a recent stable Rust toolchain. The UI is static (no Node build
+step). On Windows you also need NASM on `PATH` (the `ring` crypto library needs
+it), the WebView2 runtime (preinstalled on current Windows), and the Tauri CLI
+(`npm install -g @tauri-apps/cli@^2`).
 
 ```sh
 # the cross-platform crates (CI checks these on Linux too)
-cargo test -p pbs-client
-cargo build -p pbsgui-engine
+cargo test -p pbs-client -p pbsgui-ipc -p pbsgui-engine
 
-# the full desktop app (Windows; needs icons, see src-tauri/icons/README.md)
-cargo tauri build
+# the full desktop app (Windows)
+cargo build -p pbsgui-engine   # so the GUI can launch it from the same directory
+tauri dev                      # or: tauri build
 ```
 
-Code signing of release binaries is deferred for now; installers will be unsigned
-until a signing identity is in place.
+When the GUI starts it tries to launch the engine sitting next to it. If it is
+not found, start it yourself in another terminal:
+
+```sh
+cargo run -p pbsgui-engine -- serve
+```
+
+Then enter a PBS repository, API token secret, server fingerprint, and a file to
+back up, and click "Back up". Progress and logs stream from the engine.
+
+## Continuous integration and installer
+
+`.github/workflows/ci.yml` lints and tests the cross-platform crates on Linux,
+and on Windows builds the engine, stages it as a Tauri sidecar, and produces an
+NSIS installer (uploaded as the `pbsgui-nsis-installer` artifact). The installer
+bundles both the GUI and the engine.
+
+Code signing is deferred for now (Azure Trusted Signing is not available to
+Australian entities), so installers are unsigned until a signing identity is in
+place. Windows will show a SmartScreen warning until then.
 
 ## License
 

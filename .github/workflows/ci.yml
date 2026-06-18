@@ -23,24 +23,38 @@ jobs:
       # The cross-platform crates. src-tauri needs system webview libraries and is
       # built on Windows below.
       - name: clippy
-        run: cargo clippy -p pbs-client -p pbsgui-engine -- -D warnings
+        run: cargo clippy -p pbs-client -p pbsgui-ipc -p pbsgui-engine --all-targets -- -D warnings
       - name: test
-        run: cargo test -p pbs-client -p pbsgui-engine
+        run: cargo test -p pbs-client -p pbsgui-ipc -p pbsgui-engine
 
-  build-engine-windows:
-    name: Build engine (Windows)
+  build-windows:
+    name: Build app + installer (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: build engine
+      - name: Install NASM (needed to build ring)
+        uses: ilammy/setup-nasm@v1
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+      - name: Build engine
         run: cargo build -p pbsgui-engine --release
-
-  # The full Tauri bundle (signed installer) is added once application icons and a
-  # signing identity are in place. Outline:
-  #   - uses: actions/checkout@v4
-  #   - uses: dtolnay/rust-toolchain@stable
-  #   - run: cargo install tauri-cli --version '^2' --locked
-  #   - run: cargo tauri build
-  #   (signing is deferred; see docs and the research notes.)
+      - name: Stage engine as a Tauri sidecar
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Copy-Item target/release/pbsgui-engine.exe `
+            src-tauri/binaries/pbsgui-engine-x86_64-pc-windows-msvc.exe
+      - name: Build app and NSIS installer
+        # The windows config adds the engine as a bundled sidecar; the base config
+        # stays free of it so `tauri dev` does not require the staged binary.
+        run: tauri build --config src-tauri/tauri.windows.conf.json
+      # Signing is deferred (Azure Trusted Signing is unavailable to AU entities);
+      # the installer is unsigned for now.
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: pbsgui-nsis-installer
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error

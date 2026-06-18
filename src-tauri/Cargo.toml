@@ -17,10 +17,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+pbsgui-ipc = { path = "../crates/pbsgui-ipc" }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-
-# Added as the GUI gains features:
-#   tauri-plugin-shell  to launch the engine sidecar
-#   tokio + an interprocess pipe client to talk to the engine
+tokio.workspace = true

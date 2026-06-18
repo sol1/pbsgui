@@ -15,6 +15,9 @@ dist/
 # Tauri build output
 src-tauri/target/
 
+# Engine binary staged as a sidecar during the Windows build (produced by CI)
+src-tauri/binaries/
+
 # Editor / OS
 .DS_Store
 Thumbs.db
