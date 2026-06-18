@@ -3,19 +3,24 @@
 use std::time::Duration;
 
 use pbsgui_ipc::transport::{self, Responder};
-use pbsgui_ipc::{BackupKind, BackupRequest, PbsDestination, Reply, Request, Target};
+use pbsgui_ipc::{Job, PbsDestination, Reply, Request, Schedule};
 
 async fn demo_handler(request: Request, mut responder: Responder) {
     match request {
         Request::Ping => {
             let _ = responder.send(&Reply::Pong).await;
         }
-        Request::StartBackup { .. } => {
-            let _ = responder
-                .send(&Reply::Accepted {
-                    job_id: "job-1".into(),
-                })
-                .await;
+        Request::ListJobs => {
+            let _ = responder.send(&Reply::Jobs { jobs: vec![] }).await;
+        }
+        Request::SaveJob { job, .. } => {
+            let _ = responder.send(&Reply::Saved { id: job.id }).await;
+        }
+        Request::DeleteJob { .. } => {
+            let _ = responder.send(&Reply::Deleted).await;
+        }
+        Request::RunJob { id } => {
+            let _ = responder.send(&Reply::Accepted { job_id: id }).await;
             let _ = responder
                 .send(&Reply::Progress {
                     fraction: 0.5,
@@ -33,7 +38,6 @@ async fn demo_handler(request: Request, mut responder: Responder) {
 }
 
 async fn collect(base: &str, request: Request) -> Vec<Reply> {
-    // Retry connect until the listener is up.
     let mut last_err = None;
     for _ in 0..50 {
         let name = transport::socket_name(base).unwrap();
@@ -49,6 +53,26 @@ async fn collect(base: &str, request: Request) -> Vec<Reply> {
     panic!("could not connect: {last_err:?}");
 }
 
+fn sample_job() -> Job {
+    Job {
+        id: "job-1".into(),
+        name: "Docs".into(),
+        destination: PbsDestination {
+            repository: "u@pbs!t@host:8007:store".into(),
+            fingerprint: "ab".repeat(32),
+            backup_id: "myhost".into(),
+        },
+        sources: vec!["C:/data".into()],
+        excludes: vec![],
+        schedule: Schedule::Daily {
+            hour: 2,
+            minute: 30,
+        },
+        last_run: None,
+        last_status: None,
+    }
+}
+
 #[tokio::test]
 async fn ping_pong() {
     let base = "pbsgui-test-ping";
@@ -56,40 +80,32 @@ async fn ping_pong() {
     tokio::spawn(async move {
         let _ = transport::serve(name, demo_handler).await;
     });
-
-    let replies = collect(base, Request::Ping).await;
-    assert_eq!(replies, vec![Reply::Pong]);
+    assert_eq!(collect(base, Request::Ping).await, vec![Reply::Pong]);
 }
 
 #[tokio::test]
-async fn backup_streams_progress_then_finished() {
-    let base = "pbsgui-test-backup";
+async fn save_then_run_streams_progress() {
+    let base = "pbsgui-test-jobs";
     let name = transport::socket_name(base).unwrap();
     tokio::spawn(async move {
         let _ = transport::serve(name, demo_handler).await;
     });
 
-    let request = Request::StartBackup {
-        destination: PbsDestination {
-            repository: "u@pbs!t@host:8007:store".into(),
-            secret: "s".into(),
-            fingerprint: "ab".repeat(32),
-            backup_id: "myhost".into(),
+    let saved = collect(
+        base,
+        Request::SaveJob {
+            job: sample_job(),
+            secret: Some("s".into()),
         },
-        job: BackupRequest {
-            target: Target::Filesystem {
-                paths: vec!["C:/data".into()],
-            },
-            kind: BackupKind::FilesystemFull,
-            copy_only: false,
-        },
-    };
+    )
+    .await;
+    assert_eq!(saved, vec![Reply::Saved { id: "job-1".into() }]);
 
-    let replies = collect(base, request).await;
-    assert!(matches!(replies.first(), Some(Reply::Accepted { .. })));
-    assert!(replies.iter().any(|r| matches!(r, Reply::Progress { .. })));
+    let run = collect(base, Request::RunJob { id: "job-1".into() }).await;
+    assert!(matches!(run.first(), Some(Reply::Accepted { .. })));
+    assert!(run.iter().any(|r| matches!(r, Reply::Progress { .. })));
     assert!(matches!(
-        replies.last(),
+        run.last(),
         Some(Reply::Finished { success: true, .. })
     ));
 }

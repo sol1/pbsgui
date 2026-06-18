@@ -1,68 +1,124 @@
 //! The pbsgui desktop application.
 //!
-//! This is the unprivileged control and monitor UI. It does not perform backups
-//! itself: it connects to the `pbsgui-engine` over a local socket (a named pipe
-//! on Windows), sends requests, and forwards the engine's progress and log
-//! replies to the frontend over a Tauri channel.
-//!
-//! For now the GUI makes a best effort to launch the engine sitting next to it;
-//! if that is not found it assumes the engine was started separately
-//! (`pbsgui-engine serve`). A bundled service is a later step.
+//! Unprivileged control/monitor UI. It connects to `pbsgui-engine` over a local
+//! socket (a named pipe on Windows), exposes job CRUD/run commands plus a native
+//! folder picker, and forwards run progress to the frontend over a channel. It
+//! best-effort launches the engine sitting next to it; otherwise the engine must
+//! be started separately (`pbsgui-engine serve`).
 
 use std::time::Duration;
 
-use pbsgui_ipc::{
-    BackupKind, BackupRequest, PbsDestination, Reply, Request, Target, DEFAULT_SOCKET,
-};
-use serde::Deserialize;
+use pbsgui_ipc::{Job, Reply, Request, DEFAULT_SOCKET};
 use tauri::ipc::Channel;
 
-/// Backup form input from the frontend.
-#[derive(Debug, Deserialize)]
-struct BackupConfig {
-    repository: String,
-    secret: String,
-    fingerprint: String,
-    backup_id: String,
-    path: String,
-}
-
-/// Check (and if needed start) the engine, reporting a simple status string.
+/// Check (and if needed start) the engine.
 #[tauri::command]
 async fn engine_ping() -> Result<String, String> {
     ensure_engine().await?;
     Ok("connected".to_string())
 }
 
-/// Run a filesystem backup, streaming engine replies to the frontend channel.
+/// List saved jobs.
 #[tauri::command]
-async fn run_backup(config: BackupConfig, on_event: Channel<Reply>) -> Result<(), String> {
+async fn list_jobs() -> Result<Vec<Job>, String> {
+    let replies = request_all(Request::ListJobs).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Jobs { jobs } => Some(jobs),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return a job list".to_string())
+}
+
+/// Create or update a job. `secret` is stored only when present.
+#[tauri::command]
+async fn save_job(job: Job, secret: Option<String>) -> Result<String, String> {
+    let replies = request_all(Request::SaveJob { job, secret }).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Saved { id } => Some(id),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not confirm the save".to_string())
+}
+
+/// Delete a job and its stored secret.
+#[tauri::command]
+async fn delete_job(id: String) -> Result<(), String> {
+    let replies = request_all(Request::DeleteJob { id }).await?;
+    match first_error(&replies) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// Run a job, streaming engine replies to the frontend channel.
+#[tauri::command]
+async fn run_job(id: String, on_event: Channel<Reply>) -> Result<(), String> {
     ensure_engine().await?;
     let name = pbsgui_ipc::socket_name(DEFAULT_SOCKET).map_err(|e| e.to_string())?;
-    let request = Request::StartBackup {
-        destination: PbsDestination {
-            repository: config.repository,
-            secret: config.secret,
-            fingerprint: config.fingerprint,
-            backup_id: config.backup_id,
-        },
-        job: BackupRequest {
-            target: Target::Filesystem {
-                paths: vec![config.path],
-            },
-            kind: BackupKind::FilesystemFull,
-            copy_only: false,
-        },
-    };
-    pbsgui_ipc::send_request(name, &request, move |reply| {
+    pbsgui_ipc::send_request(name, &Request::RunJob { id }, move |reply| {
         let _ = on_event.send(reply);
     })
     .await
     .map_err(|e| e.to_string())
 }
 
+/// Native folder picker; returns selected paths.
+#[tauri::command]
+async fn pick_folders() -> Vec<String> {
+    pick(true).await
+}
+
+/// Native file picker; returns selected paths.
+#[tauri::command]
+async fn pick_files() -> Vec<String> {
+    pick(false).await
+}
+
+async fn pick(folders: bool) -> Vec<String> {
+    tokio::task::spawn_blocking(move || {
+        let dialog = rfd::FileDialog::new();
+        let picked = if folders {
+            dialog.pick_folders()
+        } else {
+            dialog.pick_files()
+        };
+        picked
+            .map(|paths| paths.iter().map(|p| p.display().to_string()).collect())
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+async fn request_all(request: Request) -> Result<Vec<Reply>, String> {
+    ensure_engine().await?;
+    let name = pbsgui_ipc::socket_name(DEFAULT_SOCKET).map_err(|e| e.to_string())?;
+    let mut replies = Vec::new();
+    pbsgui_ipc::send_request(name, &request, |reply| replies.push(reply))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(replies)
+}
+
+fn first_error(replies: &[Reply]) -> Option<String> {
+    replies.iter().find_map(|r| match r {
+        Reply::Error { message } => Some(message.clone()),
+        _ => None,
+    })
+}
+
 /// Ensure the engine is reachable: ping it, and if that fails, try to launch the
-/// engine binary next to us and retry.
+/// engine next to us and retry.
 async fn ensure_engine() -> Result<(), String> {
     if ping_once().await.unwrap_or(false) {
         return Ok(());
@@ -93,7 +149,6 @@ async fn ping_once() -> Result<bool, String> {
     Ok(got_pong)
 }
 
-/// Best-effort launch of the engine binary sitting next to the app.
 fn spawn_engine() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -117,7 +172,15 @@ fn spawn_engine() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![engine_ping, run_backup])
+        .invoke_handler(tauri::generate_handler![
+            engine_ping,
+            list_jobs,
+            save_job,
+            delete_job,
+            run_job,
+            pick_folders,
+            pick_files
+        ])
         .run(tauri::generate_context!())
         .expect("error while running pbsgui");
 }

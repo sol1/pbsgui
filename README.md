@@ -93,6 +93,24 @@ It builds the engine, copies it into `src-tauri\binaries\` with the target-tripl
 name Tauri expects, then runs `tauri build --config src-tauri\engine-sidecar.conf.json`.
 The installer lands in `target\release\bundle\nsis\`.
 
+## Backup jobs
+
+The GUI manages named backup jobs. A job has a PBS destination (repository,
+fingerprint, backup id), source folders/files chosen with a native picker,
+optional glob excludes, and a schedule (manual, every N minutes, or daily at a
+local time). The engine stores jobs as JSON in its config directory
+(`%ProgramData%\pbsgui` on Windows) and runs due jobs while it is running;
+unattended scheduling that survives logoff/reboot arrives with the Windows
+service.
+
+Backups are deduplicated: a job's sources are archived and split into
+content-defined chunks, and each run uploads only the chunks that changed since
+the previous snapshot, so repeated backups are fast and small.
+
+Secrets are not written to the config file. The PBS API token secret is kept in
+the OS credential store (Windows Credential Manager), keyed by job id; a job
+record never contains it.
+
 ## Continuous integration and installer
 
 `.github/workflows/ci.yml` lints and tests the cross-platform crates on Linux,

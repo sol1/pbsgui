@@ -671,14 +671,27 @@ pub struct BackupStats {
 /// Back up a file as a deduplicated dynamic-index archive, then finish the
 /// snapshot. With `dedup_with_previous`, the previous snapshot's chunk list is
 /// fetched and unchanged chunks are skipped (only changed chunks are uploaded).
-///
-/// Chunking and hashing run on a blocking thread; uploads run on this task.
 pub async fn backup_dynamic_file(
     params: &SessionParams,
     archive_name: &str,
     path: &Path,
     dedup_with_previous: bool,
 ) -> Result<BackupStats> {
+    backup_dynamic_file_with_progress(params, archive_name, path, dedup_with_previous, |_, _| {})
+        .await
+}
+
+/// Like [`backup_dynamic_file`] but reports progress as `(bytes_done, total_bytes)`
+/// after each chunk. Chunking and hashing run on a blocking thread; uploads run
+/// on this task.
+pub async fn backup_dynamic_file_with_progress(
+    params: &SessionParams,
+    archive_name: &str,
+    path: &Path,
+    dedup_with_previous: bool,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<BackupStats> {
+    let total_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut writer = BackupWriter::connect(params).await?;
 
     let mut known: HashSet<[u8; DIGEST_LEN]> = HashSet::new();
@@ -727,6 +740,7 @@ pub async fn backup_dynamic_file(
             uploaded += 1;
         }
         builder.push(end_offset, digest);
+        on_progress(end_offset, total_bytes);
         batch_digests.push(digest);
         batch_offsets.push(end_offset);
         if batch_digests.len() >= APPEND_BATCH {

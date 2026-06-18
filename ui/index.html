@@ -14,47 +14,80 @@
     </header>
 
     <main class="content">
-      <section class="card">
-        <h1>Back up to Proxmox Backup Server</h1>
-        <p class="muted">
-          Streams a file to PBS as a fixed-index image. The engine must be
-          reachable (the app tries to start it automatically).
-        </p>
+      <section id="jobs-view">
+        <div class="section-head">
+          <h1>Backup jobs</h1>
+          <button id="new-job" class="primary" type="button">New job</button>
+        </div>
+        <div id="jobs-list"></div>
+      </section>
 
-        <form id="backup-form" autocomplete="off">
+      <section id="editor" class="hidden">
+        <h2 id="editor-title">New job</h2>
+        <form id="job-form" autocomplete="off">
+          <label>Name
+            <input id="f-name" type="text" required placeholder="Daily documents" />
+          </label>
           <label>Repository
-            <input id="repository" type="text" required
+            <input id="f-repository" type="text" required
                    placeholder="user@pbs!token@host:8007:datastore" />
           </label>
           <label>API token secret
-            <input id="secret" type="password" required placeholder="token secret" />
-          </label>
-          <label>Server fingerprint (SHA-256)
-            <input id="fingerprint" type="text" required placeholder="AA:BB:..:FF" />
+            <input id="f-secret" type="password" placeholder="token secret" />
+            <span id="secret-note" class="muted"></span>
           </label>
           <div class="row">
-            <label>Backup id
-              <input id="backup_id" type="text" required value="pbsgui-host" />
+            <label>Server fingerprint (SHA-256)
+              <input id="f-fingerprint" type="text" required placeholder="AA:BB:..:FF" />
             </label>
-            <label>File to back up
-              <input id="path" type="text" required placeholder="C:\\path\\to\\file" />
+            <label>Backup id
+              <input id="f-backup-id" type="text" required value="pbsgui-host" />
+            </label>
+          </div>
+
+          <div class="sources-head">
+            <span>Sources</span>
+            <span class="spacer"></span>
+            <button id="add-folders" type="button">Add folder</button>
+            <button id="add-files" type="button">Add files</button>
+          </div>
+          <div id="sources"></div>
+
+          <label>Excludes (glob, one per line)
+            <textarea id="f-excludes" rows="3" placeholder="*.tmp"></textarea>
+          </label>
+
+          <label>Schedule
+            <select id="f-schedule-kind">
+              <option value="manual">Manual (on demand)</option>
+              <option value="interval">Every N minutes</option>
+              <option value="daily">Daily at a time</option>
+            </select>
+          </label>
+          <div id="interval-fields" class="hidden">
+            <label>Every (minutes)
+              <input id="f-interval" type="number" min="1" value="60" />
+            </label>
+          </div>
+          <div id="daily-fields" class="hidden">
+            <label>At (local time)
+              <input id="f-daily-time" type="time" value="02:00" />
             </label>
           </div>
 
           <div class="actions">
-            <button type="button" id="test-btn">Test engine</button>
-            <button type="submit" id="backup-btn" class="primary">Back up</button>
+            <button type="submit" class="primary">Save</button>
+            <button id="cancel-edit" type="button">Cancel</button>
           </div>
         </form>
+      </section>
 
+      <section id="run" class="hidden">
+        <h2 id="run-title">Running</h2>
         <div class="progress-wrap">
           <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
           <span id="progress-label" class="muted">idle</span>
         </div>
-      </section>
-
-      <section class="card">
-        <h2>Log</h2>
         <pre id="log" class="log"></pre>
       </section>
     </main>

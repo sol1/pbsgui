@@ -9,5 +9,5 @@
 pub mod protocol;
 pub mod transport;
 
-pub use protocol::{BackupKind, BackupRequest, PbsDestination, Reply, Request, Target};
+pub use protocol::{Job, PbsDestination, Reply, Request, Schedule};
 pub use transport::{send_request, serve, socket_name, Responder, DEFAULT_SOCKET};

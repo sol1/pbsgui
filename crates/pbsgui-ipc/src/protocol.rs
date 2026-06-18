@@ -2,64 +2,79 @@
 //!
 //! The GUI sends one [`Request`] per connection; the engine replies with a
 //! stream of [`Reply`] messages (newline-delimited JSON), ending in a terminal
-//! one ([`Reply::Pong`], [`Reply::Finished`], or [`Reply::Error`]), then closes.
+//! one (see [`Reply::is_terminal`]), then closes.
+//!
+//! Secret handling: a [`Job`] never carries the PBS token secret. The secret
+//! travels only on [`Request::SaveJob`] and is stored by the engine in the OS
+//! credential store; [`Reply::Jobs`] returns jobs without it.
 
 use serde::{Deserialize, Serialize};
 
-/// Where a backup is sent: the PBS connection and snapshot identity.
+/// Where a backup is sent: the PBS connection and snapshot identity. No secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PbsDestination {
     /// Full repository string, e.g. `user@pbs!token@host:8007:datastore`.
     pub repository: String,
-    /// API token secret.
-    pub secret: String,
     /// Expected server certificate SHA-256 fingerprint.
     pub fingerprint: String,
     /// Backup id (the snapshot group id).
     pub backup_id: String,
 }
 
-/// The kind of backup to take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BackupKind {
-    SqlFull,
-    SqlDifferential,
-    SqlLog,
-    FilesystemFull,
+/// When a job runs automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Schedule {
+    /// Only on demand.
+    Manual,
+    /// Every `minutes` minutes.
+    Interval { minutes: u32 },
+    /// Every day at the given local time.
+    Daily { hour: u8, minute: u8 },
 }
 
-/// What to back up.
+/// A persisted backup job. Never contains the token secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "target", rename_all = "snake_case")]
-pub enum Target {
-    /// A SQL Server database on a named instance.
-    SqlDatabase { instance: String, database: String },
-    /// A set of filesystem paths.
-    Filesystem { paths: Vec<String> },
-}
-
-/// A request to run a backup.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackupRequest {
-    pub target: Target,
-    pub kind: BackupKind,
-    /// Take a COPY_ONLY backup (required for full backups on an AG secondary).
+pub struct Job {
+    pub id: String,
+    pub name: String,
+    pub destination: PbsDestination,
+    /// Files and folders to back up.
+    pub sources: Vec<String>,
+    /// Optional glob patterns to exclude.
     #[serde(default)]
-    pub copy_only: bool,
+    pub excludes: Vec<String>,
+    pub schedule: Schedule,
+    /// Last run time, unix seconds.
+    #[serde(default)]
+    pub last_run: Option<i64>,
+    /// Outcome of the last run ("ok" or an error message).
+    #[serde(default)]
+    pub last_status: Option<String>,
 }
 
 /// A message from the GUI to the engine.
+// SaveJob carries a whole Job, so the enum's largest variant dominates its size.
+// These messages are sent once per connection, so the size is not a concern.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
     /// Liveness check.
     Ping,
-    /// Start a backup; the engine streams [`Reply`] progress until it finishes.
-    StartBackup {
-        destination: PbsDestination,
-        job: BackupRequest,
+    /// List all saved jobs (without secrets).
+    ListJobs,
+    /// Create or update a job (matched by id). If `secret` is `Some`, it is
+    /// stored in the credential store; if `None`, any existing secret is kept.
+    SaveJob {
+        job: Job,
+        #[serde(default)]
+        secret: Option<String>,
     },
+    /// Delete a job and its stored secret.
+    DeleteJob { id: String },
+    /// Run a saved job now; the engine streams progress until it finishes.
+    RunJob { id: String },
 }
 
 /// A message from the engine to the GUI.
@@ -68,13 +83,19 @@ pub enum Request {
 pub enum Reply {
     /// Reply to [`Request::Ping`].
     Pong,
-    /// A backup was accepted; progress follows.
+    /// Reply to [`Request::ListJobs`].
+    Jobs { jobs: Vec<Job> },
+    /// Reply to [`Request::SaveJob`].
+    Saved { id: String },
+    /// Reply to [`Request::DeleteJob`].
+    Deleted,
+    /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
     Progress { fraction: f32, message: String },
     /// A line of log output.
     Log { line: String },
-    /// Terminal: the job finished.
+    /// Terminal: a job run finished.
     Finished { success: bool, message: String },
     /// Terminal: the request failed.
     Error { message: String },
@@ -85,7 +106,12 @@ impl Reply {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Reply::Pong | Reply::Finished { .. } | Reply::Error { .. }
+            Reply::Pong
+                | Reply::Jobs { .. }
+                | Reply::Saved { .. }
+                | Reply::Deleted
+                | Reply::Finished { .. }
+                | Reply::Error { .. }
         )
     }
 }
