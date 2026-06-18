@@ -18,6 +18,9 @@ src-tauri/target/
 # Engine binary staged as a sidecar during the Windows build (produced by CI)
 src-tauri/binaries/
 
+# Tauri-generated capability/permission schemas
+src-tauri/gen/
+
 # Editor / OS
 .DS_Store
 Thumbs.db
