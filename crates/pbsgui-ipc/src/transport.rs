@@ -15,7 +15,11 @@ use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ListenerOpt
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// Default socket base name (the engine and GUI must agree on it).
-pub const DEFAULT_SOCKET: &str = "pbsgui-engine";
+///
+/// The `-v<N>` suffix is the IPC protocol version: bump it on any incompatible
+/// change to [`crate::protocol`]. A new GUI then uses a new pipe name, so it can
+/// never silently connect to a leftover engine speaking the old protocol.
+pub const DEFAULT_SOCKET: &str = "pbsgui-engine-v2";
 
 /// Build a platform-appropriate socket name from a base string.
 ///
