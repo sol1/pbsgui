@@ -29,6 +29,7 @@
 //! clients) uses AES-256-GCM with a key derived for the datastore.
 
 pub mod blob;
+pub mod chunker;
 pub mod error;
 pub mod index;
 pub mod manifest;
@@ -42,7 +43,7 @@ pub mod session;
 // pub mod api_types; // serde types mirrored from the documented PBS API
 
 pub use error::{PbsError, Result};
-pub use index::{FixedIndex, FixedIndexBuilder};
+pub use index::{DynamicIndex, DynamicIndexBuilder, FixedIndex, FixedIndexBuilder};
 pub use manifest::BackupManifest;
 pub use repository::Repository;
-pub use session::{BackupWriter, ReaderClient, SessionParams};
+pub use session::{backup_dynamic_file, BackupStats, BackupWriter, ReaderClient, SessionParams};

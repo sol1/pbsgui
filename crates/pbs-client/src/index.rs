@@ -175,6 +175,170 @@ impl FixedIndex {
     }
 }
 
+/// Dynamic index magic.
+pub const DYNAMIC_MAGIC: [u8; 8] = [28, 145, 78, 165, 25, 186, 179, 205];
+
+/// On-disk size of one dynamic index entry: end-offset (u64) + digest.
+const DYNAMIC_ENTRY_LEN: usize = 8 + DIGEST_LEN;
+
+/// Builds a dynamic index from variable-size (content-defined) chunks.
+///
+/// Each entry records a chunk's cumulative end offset and its digest. The csum
+/// is a SHA-256 over each (end-offset little-endian, digest) pair.
+#[derive(Debug, Clone)]
+pub struct DynamicIndexBuilder {
+    pub ctime: i64,
+    pub uuid: [u8; 16],
+    entries: Vec<(u64, [u8; DIGEST_LEN])>,
+}
+
+impl DynamicIndexBuilder {
+    pub fn new(ctime: i64, uuid: [u8; 16]) -> Self {
+        Self {
+            ctime,
+            uuid,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Append a chunk by its cumulative end offset and digest.
+    pub fn push(&mut self, end_offset: u64, digest: [u8; DIGEST_LEN]) {
+        self.entries.push((end_offset, digest));
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Total archive size: the last chunk's end offset.
+    pub fn total_size(&self) -> u64 {
+        self.entries.last().map(|(end, _)| *end).unwrap_or(0)
+    }
+
+    pub fn index_csum(&self) -> [u8; DIGEST_LEN] {
+        let mut hasher = Sha256::new();
+        for (end, digest) in &self.entries {
+            hasher.update(end.to_le_bytes());
+            hasher.update(digest);
+        }
+        hasher.finalize().into()
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out = vec![0u8; HEADER_LEN + self.entries.len() * DYNAMIC_ENTRY_LEN];
+        out[0..8].copy_from_slice(&DYNAMIC_MAGIC);
+        out[8..24].copy_from_slice(&self.uuid);
+        out[24..32].copy_from_slice(&self.ctime.to_le_bytes());
+        out[32..64].copy_from_slice(&self.index_csum());
+        let mut pos = HEADER_LEN;
+        for (end, digest) in &self.entries {
+            out[pos..pos + 8].copy_from_slice(&end.to_le_bytes());
+            out[pos + 8..pos + DYNAMIC_ENTRY_LEN].copy_from_slice(digest);
+            pos += DYNAMIC_ENTRY_LEN;
+        }
+        out
+    }
+}
+
+/// A parsed dynamic index (as returned by the reader `/download`).
+#[derive(Debug, Clone)]
+pub struct DynamicIndex {
+    pub ctime: i64,
+    pub uuid: [u8; 16],
+    pub index_csum: [u8; DIGEST_LEN],
+    /// (cumulative end offset, digest) per chunk, in order.
+    pub entries: Vec<(u64, [u8; DIGEST_LEN])>,
+}
+
+impl DynamicIndex {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < HEADER_LEN {
+            return Err(PbsError::Protocol(
+                "dynamic index shorter than its header".into(),
+            ));
+        }
+        if bytes[0..8] != DYNAMIC_MAGIC {
+            return Err(PbsError::Protocol("not a dynamic index (bad magic)".into()));
+        }
+        let uuid: [u8; 16] = bytes[8..24].try_into().unwrap();
+        let ctime = i64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let index_csum: [u8; DIGEST_LEN] = bytes[32..64].try_into().unwrap();
+
+        let body = &bytes[HEADER_LEN..];
+        if body.len() % DYNAMIC_ENTRY_LEN != 0 {
+            return Err(PbsError::Protocol(
+                "dynamic index body is not a whole number of entries".into(),
+            ));
+        }
+        let entries = body
+            .chunks_exact(DYNAMIC_ENTRY_LEN)
+            .map(|e| {
+                let end = u64::from_le_bytes(e[0..8].try_into().unwrap());
+                let digest: [u8; DIGEST_LEN] = e[8..DYNAMIC_ENTRY_LEN].try_into().unwrap();
+                (end, digest)
+            })
+            .collect();
+        Ok(Self {
+            ctime,
+            uuid,
+            index_csum,
+            entries,
+        })
+    }
+
+    /// The chunk digests in order.
+    pub fn digests(&self) -> impl Iterator<Item = &[u8; DIGEST_LEN]> {
+        self.entries.iter().map(|(_, digest)| digest)
+    }
+
+    pub fn total_size(&self) -> u64 {
+        self.entries.last().map(|(end, _)| *end).unwrap_or(0)
+    }
+
+    pub fn verify_csum(&self) -> bool {
+        let mut hasher = Sha256::new();
+        for (end, digest) in &self.entries {
+            hasher.update(end.to_le_bytes());
+            hasher.update(digest);
+        }
+        let computed: [u8; DIGEST_LEN] = hasher.finalize().into();
+        computed == self.index_csum
+    }
+}
+
+#[cfg(test)]
+mod dynamic_tests {
+    use super::*;
+
+    #[test]
+    fn build_serialize_parse_round_trip() {
+        let mut b = DynamicIndexBuilder::new(1_700_000_000, [9u8; 16]);
+        b.push(100, [1u8; DIGEST_LEN]);
+        b.push(250, [2u8; DIGEST_LEN]);
+        b.push(400, [3u8; DIGEST_LEN]);
+        assert_eq!(b.entry_count(), 3);
+        assert_eq!(b.total_size(), 400);
+
+        let bytes = b.serialize();
+        assert_eq!(bytes.len(), HEADER_LEN + 3 * DYNAMIC_ENTRY_LEN);
+
+        let parsed = DynamicIndex::parse(&bytes).unwrap();
+        assert_eq!(parsed.ctime, 1_700_000_000);
+        assert_eq!(parsed.uuid, [9u8; 16]);
+        assert_eq!(parsed.total_size(), 400);
+        assert_eq!(parsed.entries, b.entries);
+        assert_eq!(parsed.index_csum, b.index_csum());
+        assert!(parsed.verify_csum());
+    }
+
+    #[test]
+    fn rejects_bad_magic() {
+        let mut bytes = vec![0u8; HEADER_LEN];
+        bytes[0] = 1;
+        assert!(DynamicIndex::parse(&bytes).is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

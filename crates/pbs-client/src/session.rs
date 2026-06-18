@@ -14,6 +14,8 @@
 //! (backup and restore). Dedup against a previous snapshot, dynamic indexes, and
 //! client side encryption are future work.
 
+use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -30,8 +32,12 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use crate::blob;
+use crate::chunker;
 use crate::error::{PbsError, Result};
-use crate::index::{self, FixedIndex, FixedIndexBuilder, DEFAULT_CHUNK_SIZE, DIGEST_LEN};
+use crate::index::{
+    self, DynamicIndex, DynamicIndexBuilder, FixedIndex, FixedIndexBuilder, DEFAULT_CHUNK_SIZE,
+    DIGEST_LEN,
+};
 use crate::manifest::{self, BackupManifest, FileEntry};
 use crate::repository::Repository;
 
@@ -475,6 +481,100 @@ impl BackupWriter {
         ensure_ok(status, &body)
     }
 
+    /// Create a dynamic-index writer; returns the writer id (wid).
+    pub async fn create_dynamic_index(&mut self, archive_name: &str) -> Result<u64> {
+        let q = format!("/dynamic_index?archive-name={}", enc(archive_name));
+        let (status, body) = self.conn.request(Method::POST, &q, None, None).await?;
+        ensure_ok(status, &body)?;
+        unwrap_data(&body)?
+            .as_u64()
+            .ok_or_else(|| PbsError::Protocol("dynamic_index did not return a wid".into()))
+    }
+
+    /// Upload one chunk (its DataBlob bytes) for a dynamic-index writer.
+    pub async fn upload_dynamic_chunk(
+        &mut self,
+        wid: u64,
+        digest: &[u8; DIGEST_LEN],
+        plaintext_len: u64,
+        encoded: &[u8],
+    ) -> Result<()> {
+        let q = format!(
+            "/dynamic_chunk?wid={}&digest={}&size={}&encoded-size={}",
+            wid,
+            hex::encode(digest),
+            plaintext_len,
+            encoded.len()
+        );
+        let (status, body) = self
+            .conn
+            .request(
+                Method::POST,
+                &q,
+                Some("application/octet-stream"),
+                Some(Bytes::copy_from_slice(encoded)),
+            )
+            .await?;
+        ensure_ok(status, &body)
+    }
+
+    /// Append a batch of chunk references (cumulative end offsets) to a dynamic index.
+    pub async fn append_dynamic_index(
+        &mut self,
+        wid: u64,
+        digests: &[[u8; DIGEST_LEN]],
+        end_offsets: &[u64],
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "wid": wid,
+            "digest-list": digests.iter().map(hex::encode).collect::<Vec<_>>(),
+            "offset-list": end_offsets,
+        });
+        let bytes = serde_json::to_vec(&body)
+            .map_err(|e| PbsError::Protocol(format!("encoding append body: {e}")))?;
+        let (status, rbody) = self
+            .conn
+            .request(
+                Method::PUT,
+                "/dynamic_index",
+                Some("application/json"),
+                Some(Bytes::from(bytes)),
+            )
+            .await?;
+        ensure_ok(status, &rbody)
+    }
+
+    /// Close (commit) a dynamic index.
+    pub async fn close_dynamic_index(
+        &mut self,
+        wid: u64,
+        chunk_count: u64,
+        size: u64,
+        csum: &[u8; DIGEST_LEN],
+    ) -> Result<()> {
+        let q = format!(
+            "/dynamic_close?wid={}&chunk-count={}&size={}&csum={}",
+            wid,
+            chunk_count,
+            size,
+            hex::encode(csum)
+        );
+        let (status, body) = self.conn.request(Method::POST, &q, None, None).await?;
+        ensure_ok(status, &body)
+    }
+
+    /// Download the previous snapshot's index for an archive, if any. Used to
+    /// build the known-chunk set so unchanged chunks are not re-uploaded.
+    pub async fn download_previous(&mut self, archive_name: &str) -> Result<Option<Vec<u8>>> {
+        let q = format!("/previous?archive-name={}", enc(archive_name));
+        let (status, body) = self.conn.request(Method::GET, &q, None, None).await?;
+        if status.is_success() {
+            Ok(Some(body))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Commit the snapshot and end the session.
     pub async fn finish(&mut self) -> Result<()> {
         let (status, body) = self
@@ -553,6 +653,131 @@ pub async fn backup_fixed_image(
     Ok(csum)
 }
 
+/// Outcome of a deduplicated dynamic backup.
+#[derive(Debug, Clone)]
+pub struct BackupStats {
+    /// Total chunks in the archive.
+    pub chunks: u64,
+    /// Chunks already present on the server (re-referenced, not uploaded).
+    pub reused: u64,
+    /// Chunks uploaded this run.
+    pub uploaded: u64,
+    /// Total archive bytes.
+    pub bytes: u64,
+    /// Archive index csum.
+    pub csum: [u8; DIGEST_LEN],
+}
+
+/// Back up a file as a deduplicated dynamic-index archive, then finish the
+/// snapshot. With `dedup_with_previous`, the previous snapshot's chunk list is
+/// fetched and unchanged chunks are skipped (only changed chunks are uploaded).
+///
+/// Chunking and hashing run on a blocking thread; uploads run on this task.
+pub async fn backup_dynamic_file(
+    params: &SessionParams,
+    archive_name: &str,
+    path: &Path,
+    dedup_with_previous: bool,
+) -> Result<BackupStats> {
+    let mut writer = BackupWriter::connect(params).await?;
+
+    let mut known: HashSet<[u8; DIGEST_LEN]> = HashSet::new();
+    if dedup_with_previous {
+        if let Some(prev) = writer.download_previous(archive_name).await? {
+            if let Ok(index) = DynamicIndex::parse(&prev) {
+                known.extend(index.digests().copied());
+            }
+        }
+    }
+
+    let wid = writer.create_dynamic_index(archive_name).await?;
+
+    let path_buf = path.to_path_buf();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<([u8; DIGEST_LEN], Vec<u8>)>(8);
+    let chunker_task = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let file = std::fs::File::open(&path_buf)?;
+        for chunk in chunker::chunk_reader(file) {
+            let data = chunk?;
+            let digest = index::chunk_digest(&data);
+            if tx.blocking_send((digest, data)).is_err() {
+                break;
+            }
+        }
+        Ok(())
+    });
+
+    let mut builder = DynamicIndexBuilder::new(params.backup_time, random_uuid());
+    let mut batch_digests: Vec<[u8; DIGEST_LEN]> = Vec::new();
+    let mut batch_offsets: Vec<u64> = Vec::new();
+    let mut end_offset = 0u64;
+    let mut chunks = 0u64;
+    let mut reused = 0u64;
+    let mut uploaded = 0u64;
+
+    while let Some((digest, data)) = rx.recv().await {
+        end_offset += data.len() as u64;
+        chunks += 1;
+        if known.contains(&digest) {
+            reused += 1;
+        } else {
+            let encoded = blob::encode_uncompressed(&data);
+            writer
+                .upload_dynamic_chunk(wid, &digest, data.len() as u64, &encoded)
+                .await?;
+            uploaded += 1;
+        }
+        builder.push(end_offset, digest);
+        batch_digests.push(digest);
+        batch_offsets.push(end_offset);
+        if batch_digests.len() >= APPEND_BATCH {
+            writer
+                .append_dynamic_index(wid, &batch_digests, &batch_offsets)
+                .await?;
+            batch_digests.clear();
+            batch_offsets.clear();
+        }
+    }
+    if !batch_digests.is_empty() {
+        writer
+            .append_dynamic_index(wid, &batch_digests, &batch_offsets)
+            .await?;
+    }
+
+    chunker_task
+        .await
+        .map_err(|e| PbsError::Protocol(format!("chunker task failed: {e}")))??;
+
+    let size = builder.total_size();
+    let csum = builder.index_csum();
+    writer
+        .close_dynamic_index(wid, builder.entry_count() as u64, size, &csum)
+        .await?;
+
+    let entry = FileEntry::new(archive_name, size, &csum);
+    let backup_manifest = BackupManifest::new(
+        &params.backup_type,
+        &params.backup_id,
+        params.backup_time,
+        vec![entry],
+    );
+    let manifest_json = backup_manifest
+        .to_json_bytes()
+        .map_err(|e| PbsError::Protocol(format!("encoding manifest: {e}")))?;
+    let manifest_blob = blob::encode_uncompressed(&manifest_json);
+    writer
+        .upload_blob(manifest::MANIFEST_BLOB_NAME, &manifest_blob)
+        .await?;
+    writer.finish().await?;
+
+    Ok(BackupStats {
+        chunks,
+        reused,
+        uploaded,
+        bytes: size,
+        csum,
+    })
+}
+
 /// A reader session for restoring from a snapshot.
 pub struct ReaderClient {
     conn: H2Conn,
@@ -599,6 +824,23 @@ impl ReaderClient {
         }
         image.truncate(fixed.size as usize);
         Ok(image)
+    }
+
+    /// Download a dynamic-index archive and reassemble the original bytes.
+    pub async fn restore_dynamic_archive(&mut self, archive_name: &str) -> Result<Vec<u8>> {
+        let index_bytes = self.download(archive_name).await?;
+        let index = DynamicIndex::parse(&index_bytes)?;
+        if !index.verify_csum() {
+            return Err(PbsError::Protocol(
+                "downloaded dynamic index failed its csum check".into(),
+            ));
+        }
+        let mut out = Vec::with_capacity(index.total_size() as usize);
+        for digest in index.digests() {
+            let chunk_blob = self.download_chunk(digest).await?;
+            out.extend_from_slice(&blob::decode(&chunk_blob)?);
+        }
+        Ok(out)
     }
 }
 

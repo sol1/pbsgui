@@ -23,14 +23,19 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
-    /// A fixed-index image entry for an unencrypted backup.
-    pub fn fixed_image(filename: impl Into<String>, size: u64, index_csum: &[u8; 32]) -> Self {
+    /// An unencrypted archive entry (size and the archive's index csum).
+    pub fn new(filename: impl Into<String>, size: u64, index_csum: &[u8; 32]) -> Self {
         Self {
             filename: filename.into(),
             crypt_mode: "none".to_string(),
             size,
             csum: hex::encode(index_csum),
         }
+    }
+
+    /// A fixed-index image entry for an unencrypted backup.
+    pub fn fixed_image(filename: impl Into<String>, size: u64, index_csum: &[u8; 32]) -> Self {
+        Self::new(filename, size, index_csum)
     }
 }
 

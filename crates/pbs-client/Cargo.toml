@@ -20,6 +20,7 @@ sha2 = "0.10"
 crc32fast = "1.4"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
+fastcdc = "3"
 
 # Backup / reader session transport
 h2 = "0.4"
