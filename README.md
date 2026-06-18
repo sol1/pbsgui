@@ -64,9 +64,9 @@ it), the WebView2 runtime (preinstalled on current Windows), and the Tauri CLI
 # the cross-platform crates (CI checks these on Linux too)
 cargo test -p pbs-client -p pbsgui-ipc -p pbsgui-engine
 
-# the full desktop app (Windows)
+# run the desktop app in development
 cargo build -p pbsgui-engine   # so the GUI can launch it from the same directory
-tauri dev                      # or: tauri build
+tauri dev
 ```
 
 When the GUI starts it tries to launch the engine sitting next to it. If it is
@@ -78,6 +78,20 @@ cargo run -p pbsgui-engine -- serve
 
 Then enter a PBS repository, API token secret, server fingerprint, and a file to
 back up, and click "Back up". Progress and logs stream from the engine.
+
+### Building the Windows installer locally
+
+Plain `tauri build` produces a GUI-only installer. To build the full installer
+that bundles the engine as a sidecar, the engine has to be staged first; the
+helper script does that for you (run it from the repository root):
+
+```bat
+scripts\build-windows-installer.bat
+```
+
+It builds the engine, copies it into `src-tauri\binaries\` with the target-triple
+name Tauri expects, then runs `tauri build --config src-tauri\engine-sidecar.conf.json`.
+The installer lands in `target\release\bundle\nsis\`.
 
 ## Continuous integration and installer
 

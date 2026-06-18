@@ -53,7 +53,7 @@ jobs:
       - name: Build app and NSIS installer
         # The windows config adds the engine as a bundled sidecar; the base config
         # stays free of it so `tauri dev` does not require the staged binary.
-        run: tauri build --config src-tauri/tauri.windows.conf.json
+        run: tauri build --config src-tauri/engine-sidecar.conf.json
       # Signing is deferred (Azure Trusted Signing is unavailable to AU entities);
       # the installer is unsigned for now.
       - name: Upload installer
