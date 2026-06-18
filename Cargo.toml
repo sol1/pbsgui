@@ -1,0 +1,35 @@
+# Cargo workspace for pbsgui.
+#
+# Members:
+#   crates/pbs-client    clean-room Rust client for the Proxmox Backup Server protocol
+#   crates/pbsgui-engine the privileged backup engine (PBS client + SQL + VSS + IPC + service)
+#   src-tauri            the unprivileged Tauri desktop GUI (control / monitor)
+[workspace]
+resolver = "2"
+members = [
+    "crates/pbs-client",
+    "crates/pbsgui-engine",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Sol1 <https://sol1.com.au>"]
+repository = "https://github.com/sol1/pbsgui"
+rust-version = "1.82"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+strip = true
+lto = "thin"

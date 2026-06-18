@@ -1,0 +1,26 @@
+[package]
+name = "pbsgui"
+description = "pbsgui desktop GUI: control and monitor backups to Proxmox Backup Server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# The library holds the app so it can be shared with mobile targets if ever needed.
+[lib]
+name = "pbsgui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+# Added as the GUI gains features:
+#   tauri-plugin-shell  to launch the engine sidecar
+#   tokio + an interprocess pipe client to talk to the engine

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-test:
+    name: Lint and test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      # The cross-platform crates. src-tauri needs system webview libraries and is
+      # built on Windows below.
+      - name: clippy
+        run: cargo clippy -p pbs-client -p pbsgui-engine -- -D warnings
+      - name: test
+        run: cargo test -p pbs-client -p pbsgui-engine
+
+  build-engine-windows:
+    name: Build engine (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build engine
+        run: cargo build -p pbsgui-engine --release
+
+  # The full Tauri bundle (signed installer) is added once application icons and a
+  # signing identity are in place. Outline:
+  #   - uses: actions/checkout@v4
+  #   - uses: dtolnay/rust-toolchain@stable
+  #   - run: cargo install tauri-cli --version '^2' --locked
+  #   - run: cargo tauri build
+  #   (signing is deferred; see docs and the research notes.)

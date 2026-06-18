@@ -1,0 +1,30 @@
+# Research, context and background material (local reference only, not for public repo)
+/research/
+
+# Rust / Cargo
+/target/
+**/target/
+Cargo.lock.orig
+
+# Node / Tauri frontend
+node_modules/
+dist/
+.vite/
+*.local
+
+# Tauri build output
+src-tauri/target/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Secrets / signing material (never commit)
+*.pem
+*.pfx
+*.key
+.env
+.env.*

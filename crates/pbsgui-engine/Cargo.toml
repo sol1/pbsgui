@@ -1,0 +1,33 @@
+[package]
+name = "pbsgui-engine"
+description = "pbsgui privileged backup engine: PBS client, SQL Server VDI, VSS, scheduler, IPC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pbsgui-engine"
+path = "src/main.rs"
+
+[dependencies]
+pbs-client = { path = "../pbs-client" }
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+
+# Enabled as the SQL module is implemented (cross platform TDS driver):
+# tiberius = { version = "0.12", default-features = false, features = ["tds73", "rustls", "sql-browser-tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+# Enabled as the Windows specific modules are implemented:
+#   windows         COM bindings for SQLVDI.dll (VDI streaming) and VSS
+#   windows-service registering and running as a Windows Service
+# windows = { version = "0.58", features = ["Win32_System_Com", "Win32_Storage_Vss"] }
+# windows-service = "0.8"

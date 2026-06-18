@@ -1,0 +1,21 @@
+[package]
+name = "pbs-client"
+description = "Clean-room Rust client for the Proxmox Backup Server backup protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+# The following are added as the protocol client is implemented (see src/lib.rs):
+#   hyper / h2        HTTP/2 session with the "proxmox-backup-protocol-v1" upgrade
+#   rustls            TLS, with server certificate fingerprint pinning
+#   aes-gcm / openssl AES-256-GCM client side encryption
+#   sha2, zstd        chunk digests and compression

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pbsgui</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">pbsgui</div>
+        <nav>
+          <button class="nav-item active" data-view="connection">Connection</button>
+          <button class="nav-item" data-view="targets">Targets</button>
+          <button class="nav-item" data-view="jobs">Jobs</button>
+          <button class="nav-item" data-view="restore">Restore</button>
+          <button class="nav-item" data-view="logs">Logs</button>
+        </nav>
+      </aside>
+
+      <main class="content">
+        <section class="view active" id="view-connection">
+          <h1>Proxmox Backup Server</h1>
+          <p class="muted">Configure the datastore this machine backs up to.</p>
+          <label>Repository
+            <input type="text" placeholder="user@pam@pbs.example.com:8007:datastore" />
+          </label>
+          <label>Fingerprint (SHA-256)
+            <input type="text" placeholder="AA:BB:CC:..." />
+          </label>
+          <button class="primary" disabled>Test connection</button>
+        </section>
+
+        <section class="view" id="view-targets">
+          <h1>Backup targets</h1>
+          <p class="muted">Detected SQL Server instances and selected folders.</p>
+          <div class="placeholder">SQL instance detection lands with the engine.</div>
+        </section>
+
+        <section class="view" id="view-jobs">
+          <h1>Jobs</h1>
+          <p class="muted">Running and scheduled backups.</p>
+          <div class="placeholder">No jobs yet.</div>
+        </section>
+
+        <section class="view" id="view-restore">
+          <h1>Restore</h1>
+          <p class="muted">Browse snapshots and restore databases or files.</p>
+          <div class="placeholder">Browse and restore lands after backup works.</div>
+        </section>
+
+        <section class="view" id="view-logs">
+          <h1>Logs</h1>
+          <pre id="log-output" class="logs"></pre>
+        </section>
+      </main>
+    </div>
+
+    <footer class="statusbar">
+      <span>Engine: <strong id="engine-status">checking...</strong></span>
+      <span class="spacer"></span>
+      <span id="version"></span>
+    </footer>
+
+    <script src="main.js"></script>
+  </body>
+</html>
