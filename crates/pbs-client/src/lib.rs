@@ -28,18 +28,21 @@
 //! Client side encryption (optional, a differentiator over existing Windows
 //! clients) uses AES-256-GCM with a key derived for the datastore.
 
+pub mod blob;
 pub mod error;
+pub mod index;
+pub mod manifest;
 pub mod repository;
+pub mod session;
 
-// Implemented incrementally as the protocol client comes online. Each module is
-// declared here so the public surface and the design are visible from day one.
+// Implemented incrementally as the protocol client comes online:
 //
-// pub mod session;   // HTTP/2 backup + reader session, auth, fingerprint pinning
 // pub mod chunker;   // Buzhash content-defined chunking for dynamic indexes
-// pub mod index;     // fixed (.fidx) and dynamic (.didx) index readers / writers
-// pub mod blob;      // DataBlob (.blob) framing
 // pub mod crypto;    // AES-256-GCM client side encryption and key handling
 // pub mod api_types; // serde types mirrored from the documented PBS API
 
 pub use error::{PbsError, Result};
+pub use index::{FixedIndex, FixedIndexBuilder};
+pub use manifest::BackupManifest;
 pub use repository::Repository;
+pub use session::{BackupWriter, ReaderClient, SessionParams};

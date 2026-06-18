@@ -13,9 +13,22 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+tokio.workspace = true
 
-# The following are added as the protocol client is implemented (see src/lib.rs):
-#   hyper / h2        HTTP/2 session with the "proxmox-backup-protocol-v1" upgrade
-#   rustls            TLS, with server certificate fingerprint pinning
-#   aes-gcm / openssl AES-256-GCM client side encryption
-#   sha2, zstd        chunk digests and compression
+# Wire formats
+sha2 = "0.10"
+crc32fast = "1.4"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+# Backup / reader session transport
+h2 = "0.4"
+http = "1"
+bytes = "1"
+percent-encoding = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = "1"
+
+# Added when client side encryption lands:
+#   aes-gcm or openssl (AES-256-GCM), zstd (compressed blobs)
