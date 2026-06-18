@@ -10,7 +10,7 @@ env:
 
 jobs:
   lint-and-test:
-    name: Lint and test (Linux)
+    name: Lint, test, build (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,14 +18,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # WebKitGTK is Tauri's Linux webview; this lets the fast Linux job compile
+      # the GUI too, so build breaks surface here instead of only on Windows.
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev
       - name: rustfmt
         run: cargo fmt --all -- --check
-      # The cross-platform crates. src-tauri needs system webview libraries and is
-      # built on Windows below.
-      - name: clippy
-        run: cargo clippy -p pbs-client -p pbsgui-ipc -p pbsgui-engine --all-targets -- -D warnings
+      - name: clippy (whole workspace, including the Tauri app)
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test -p pbs-client -p pbsgui-ipc -p pbsgui-engine
+        run: cargo test --workspace
 
   build-windows:
     name: Build app + installer (Windows)
