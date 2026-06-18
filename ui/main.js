@@ -75,7 +75,8 @@ async function runBackup(event) {
   };
 
   try {
-    await invoke("run_backup", { config, on_event: channel });
+    // Tauri maps camelCase arg keys to the snake_case Rust parameter (on_event).
+    await invoke("run_backup", { config, onEvent: channel });
   } catch (err) {
     appendLog("error: " + err);
     setProgress(0, "failed");
