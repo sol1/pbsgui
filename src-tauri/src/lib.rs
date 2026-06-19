@@ -242,7 +242,6 @@ fn show_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    use tauri::Manager;
 
     let show = MenuItemBuilder::with_id("show", "Show pbsgui").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
