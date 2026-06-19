@@ -136,8 +136,15 @@ async fn list_files(
         backup_time,
     )?;
     let mut reader = ReaderClient::connect(&params).await?;
-    let bytes = reader.restore_dynamic_archive(ARCHIVE_NAME).await?;
-    restore::list_tar(&bytes)
+    // Prefer the small catalog blob; fall back to listing the full archive for
+    // snapshots made before the catalog existed.
+    match reader.download_blob("catalog.json.blob").await {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(_) => {
+            let archive = reader.restore_dynamic_archive(ARCHIVE_NAME).await?;
+            restore::list_tar(&archive)
+        }
+    }
 }
 
 async fn restore_job(

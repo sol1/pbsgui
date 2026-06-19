@@ -679,8 +679,15 @@ pub async fn backup_dynamic_file(
     path: &Path,
     dedup_with_previous: bool,
 ) -> Result<BackupStats> {
-    backup_dynamic_file_with_progress(params, archive_name, path, dedup_with_previous, |_, _| {})
-        .await
+    backup_dynamic_file_with_progress(
+        params,
+        archive_name,
+        path,
+        dedup_with_previous,
+        None,
+        |_, _| {},
+    )
+    .await
 }
 
 /// Like [`backup_dynamic_file`] but reports progress as `(bytes_done, total_bytes)`
@@ -691,6 +698,7 @@ pub async fn backup_dynamic_file_with_progress(
     archive_name: &str,
     path: &Path,
     dedup_with_previous: bool,
+    catalog: Option<(String, Vec<u8>)>,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Result<BackupStats> {
     let total_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -770,6 +778,14 @@ pub async fn backup_dynamic_file_with_progress(
         .close_dynamic_index(wid, builder.entry_count() as u64, size, &csum)
         .await?;
 
+    // Optional catalog blob (e.g. a file listing) so browsing does not require
+    // downloading the whole archive. Stored alongside the archive; not in the
+    // manifest (the reader serves it by name regardless).
+    if let Some((name, content)) = &catalog {
+        let catalog_blob = blob::encode_uncompressed(content);
+        writer.upload_blob(name, &catalog_blob).await?;
+    }
+
     let entry = FileEntry::new(archive_name, size, &csum);
     let backup_manifest = BackupManifest::new(
         &params.backup_type,
@@ -822,6 +838,12 @@ impl ReaderClient {
         let (status, body) = self.conn.request(Method::GET, &q, None, None).await?;
         ensure_ok(status, &body)?;
         Ok(body)
+    }
+
+    /// Download a named blob and return its decoded contents.
+    pub async fn download_blob(&mut self, file_name: &str) -> Result<Vec<u8>> {
+        let raw = self.download(file_name).await?;
+        blob::decode(&raw)
     }
 
     /// Download a fixed-index archive and reassemble the original image bytes.

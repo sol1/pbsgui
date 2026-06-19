@@ -2,7 +2,7 @@
 
 use pbs_client::session::{backup_dynamic_file_with_progress, SessionParams};
 use pbs_client::Repository;
-use pbsgui_ipc::{Job, Reply};
+use pbsgui_ipc::{FileInfo, Job, Reply};
 use tokio::sync::mpsc::Sender;
 
 use crate::archive;
@@ -29,9 +29,20 @@ pub async fn run_job(job: &Job, secret: &str, events: Sender<Reply>) -> anyhow::
     let sources = job.sources.clone();
     let excludes = job.excludes.clone();
     let tmp_path = tmp.clone();
-    tokio::task::spawn_blocking(move || archive::build_tar(&sources, &excludes, &tmp_path))
-        .await
-        .map_err(|e| anyhow::anyhow!("archive task failed: {e}"))??;
+    let entries =
+        tokio::task::spawn_blocking(move || archive::build_tar(&sources, &excludes, &tmp_path))
+            .await
+            .map_err(|e| anyhow::anyhow!("archive task failed: {e}"))??;
+
+    // A catalog of the files in the archive, stored so browsing a snapshot does
+    // not need to download the whole archive.
+    let catalog_files: Vec<FileInfo> = entries
+        .into_iter()
+        .map(|(path, size)| FileInfo { path, size })
+        .collect();
+    let catalog = serde_json::to_vec(&catalog_files)
+        .map(|json| ("catalog.json.blob".to_string(), json))
+        .ok();
 
     let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
     let _ = events
@@ -51,8 +62,13 @@ pub async fn run_job(job: &Job, secret: &str, events: Sender<Reply>) -> anyhow::
     )?;
 
     let progress = events.clone();
-    let result =
-        backup_dynamic_file_with_progress(&params, ARCHIVE_NAME, &tmp, true, move |done, total| {
+    let result = backup_dynamic_file_with_progress(
+        &params,
+        ARCHIVE_NAME,
+        &tmp,
+        true,
+        catalog,
+        move |done, total| {
             let fraction = if total > 0 {
                 done as f32 / total as f32
             } else {
@@ -62,8 +78,9 @@ pub async fn run_job(job: &Job, secret: &str, events: Sender<Reply>) -> anyhow::
                 fraction,
                 message: format!("{done}/{total} bytes"),
             });
-        })
-        .await;
+        },
+    )
+    .await;
 
     let _ = std::fs::remove_file(&tmp);
     let stats = result?;

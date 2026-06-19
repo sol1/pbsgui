@@ -27,6 +27,10 @@ function escapeHtml(s) {
   );
 }
 
+function loadingHtml(text) {
+  return `<div class="loading"><span class="spinner"></span>${escapeHtml(text)}</div>`;
+}
+
 function mkbtn(text, cls, fn) {
   const b = document.createElement("button");
   b.type = "button";
@@ -302,7 +306,7 @@ async function loadSnapshots() {
   const jobId = el("browse-job").value;
   if (!jobId) return alert("Create a job first, then browse its snapshots.");
   el("files-panel").classList.add("hidden");
-  el("snapshots-list").innerHTML = '<div class="muted">loading...</div>';
+  el("snapshots-list").innerHTML = loadingHtml("loading snapshots...");
   let snaps;
   try {
     snaps = await invoke("list_snapshots", { jobId });
@@ -334,7 +338,7 @@ async function loadFiles(jobId, backupTime, label) {
   el("files-panel").classList.remove("hidden");
   el("files-title").textContent =
     "Files in " + new Date(label * 1000).toLocaleString();
-  el("files-list").innerHTML = '<div class="muted">loading (downloading archive)...</div>';
+  el("files-list").innerHTML = loadingHtml("loading files...");
   let files;
   try {
     files = await invoke("list_files", { jobId, backupTime });

@@ -9,14 +9,20 @@ use std::path::Path;
 
 use glob::Pattern;
 
-/// Write a tar of `sources` (minus `excludes`) to `out`.
-pub fn build_tar(sources: &[String], excludes: &[String], out: &Path) -> anyhow::Result<()> {
+/// Write a tar of `sources` (minus `excludes`) to `out`, returning the
+/// (archive path, size) of each file added so a catalog can be stored.
+pub fn build_tar(
+    sources: &[String],
+    excludes: &[String],
+    out: &Path,
+) -> anyhow::Result<Vec<(String, u64)>> {
     let patterns: Vec<Pattern> = excludes
         .iter()
         .filter_map(|e| Pattern::new(e).ok())
         .collect();
     let file = std::fs::File::create(out)?;
     let mut builder = tar::Builder::new(std::io::BufWriter::new(file));
+    let mut entries = Vec::new();
 
     for source in sources {
         let root = Path::new(source);
@@ -28,7 +34,10 @@ pub fn build_tar(sources: &[String], excludes: &[String], out: &Path) -> anyhow:
                     continue;
                 }
                 if entry.file_type().is_file() {
-                    builder.append_path_with_name(path, archive_name(root, path))?;
+                    let name = archive_name(root, path);
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    builder.append_path_with_name(path, &name)?;
+                    entries.push((name, size));
                 }
             }
         } else if root.is_file() && !excluded(root, &patterns) {
@@ -36,12 +45,14 @@ pub fn build_tar(sources: &[String], excludes: &[String], out: &Path) -> anyhow:
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".to_string());
-            builder.append_path_with_name(root, name)?;
+            let size = std::fs::metadata(root).map(|m| m.len()).unwrap_or(0);
+            builder.append_path_with_name(root, &name)?;
+            entries.push((name, size));
         }
     }
 
     builder.finish()?;
-    Ok(())
+    Ok(entries)
 }
 
 fn excluded(path: &Path, patterns: &[Pattern]) -> bool {
