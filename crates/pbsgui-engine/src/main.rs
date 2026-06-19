@@ -15,11 +15,13 @@
 
 mod archive;
 mod backup;
+mod changedet;
 mod config;
 mod handler;
 mod jobstore;
 mod restore;
 mod scheduler;
+mod scripts;
 mod secrets;
 #[cfg(windows)]
 mod service;

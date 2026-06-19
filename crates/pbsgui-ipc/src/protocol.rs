@@ -45,6 +45,15 @@ pub struct Job {
     #[serde(default)]
     pub excludes: Vec<String>,
     pub schedule: Schedule,
+    /// Skip the run if no source file changed (by size + mtime) since last run.
+    #[serde(default)]
+    pub change_detection: bool,
+    /// Command run before the backup; a non-zero exit aborts the job. Empty = none.
+    #[serde(default)]
+    pub pre_script: Option<String>,
+    /// Command run after the backup, with the job status in the environment.
+    #[serde(default)]
+    pub post_script: Option<String>,
     /// Last run time, unix seconds.
     #[serde(default)]
     pub last_run: Option<i64>,

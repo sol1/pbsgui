@@ -60,7 +60,7 @@ pub fn build_tar(
     Ok(entries)
 }
 
-fn excluded(path: &Path, patterns: &[Pattern]) -> bool {
+pub(crate) fn excluded(path: &Path, patterns: &[Pattern]) -> bool {
     let as_str = path.to_string_lossy();
     patterns.iter().any(|p| p.matches(as_str.as_ref()))
 }

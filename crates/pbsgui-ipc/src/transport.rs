@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 /// The `-v<N>` suffix is the IPC protocol version: bump it on any incompatible
 /// change to [`crate::protocol`]. A new GUI then uses a new pipe name, so it can
 /// never silently connect to a leftover engine speaking the old protocol.
-pub const DEFAULT_SOCKET: &str = "pbsgui-engine-v3";
+pub const DEFAULT_SOCKET: &str = "pbsgui-engine-v4";
 
 /// Build a platform-appropriate socket name from a base string.
 ///

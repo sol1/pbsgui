@@ -81,6 +81,22 @@
             </label>
           </div>
 
+          <label class="check">
+            <input type="checkbox" id="f-change-detection" />
+            Skip the run if no source file changed since last time (by size and modification time)
+          </label>
+          <label>Pre-job script (runs before the backup; a non-zero exit aborts the job)
+            <input id="f-pre-script" type="text" placeholder="e.g. C:\scripts\dump-sql.bat" />
+          </label>
+          <label>Post-job script (runs after the backup)
+            <input id="f-post-script" type="text" placeholder="e.g. C:\scripts\notify.bat" />
+            <span class="help muted">The post-job script receives the job status in environment
+              variables: PBSGUI_STATUS (ok | error | no-change), PBSGUI_SUCCESS (1 | 0),
+              PBSGUI_MESSAGE, PBSGUI_JOB_ID, PBSGUI_JOB_NAME, PBSGUI_BACKUP_ID,
+              PBSGUI_REPOSITORY, and on a successful backup PBSGUI_BYTES, PBSGUI_CHUNKS,
+              PBSGUI_UPLOADED, PBSGUI_REUSED.</span>
+          </label>
+
           <div class="actions">
             <button type="submit" class="primary">Save</button>
             <button id="cancel-edit" type="button">Cancel</button>

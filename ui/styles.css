@@ -152,6 +152,24 @@ textarea {
   font-family: inherit;
 }
 
+label.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+label.check input {
+  margin-top: 2px;
+}
+
+.help {
+  display: block;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
 .sources-head {
   display: flex;
   align-items: center;

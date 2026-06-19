@@ -84,6 +84,9 @@ fn sample_job() -> Job {
             hour: 2,
             minute: 30,
         },
+        change_detection: false,
+        pre_script: None,
+        post_script: None,
         last_run: None,
         last_status: None,
     }

@@ -165,6 +165,9 @@ function openEditor(job) {
     s.kind === "daily"
       ? `${String(s.hour).padStart(2, "0")}:${String(s.minute).padStart(2, "0")}`
       : "02:00";
+  el("f-change-detection").checked = !!job?.change_detection;
+  el("f-pre-script").value = job?.pre_script || "";
+  el("f-post-script").value = job?.post_script || "";
   updateScheduleFields();
   showView("editor");
 }
@@ -196,6 +199,9 @@ function gatherJob() {
       .map((s) => s.trim())
       .filter(Boolean),
     schedule: gatherSchedule(),
+    change_detection: el("f-change-detection").checked,
+    pre_script: el("f-pre-script").value.trim() || null,
+    post_script: el("f-post-script").value.trim() || null,
     last_run: editing?.last_run ?? null,
     last_status: editing?.last_status ?? null,
   };

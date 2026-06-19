@@ -106,6 +106,9 @@ mod tests {
             sources: vec!["/data".into()],
             excludes: vec![],
             schedule,
+            change_detection: false,
+            pre_script: None,
+            post_script: None,
             last_run,
             last_status: None,
         }
