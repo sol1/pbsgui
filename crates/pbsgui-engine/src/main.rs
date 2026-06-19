@@ -18,6 +18,7 @@ mod backup;
 mod config;
 mod handler;
 mod jobstore;
+mod restore;
 mod scheduler;
 mod secrets;
 #[cfg(windows)]

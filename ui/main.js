@@ -1,4 +1,4 @@
-// pbsgui frontend: manage backup jobs, pick sources, run with live progress.
+// pbsgui frontend: manage backup jobs, run them, and browse/restore snapshots.
 // Uses the global Tauri API (app.withGlobalTauri = true), so no JS build step.
 
 const { invoke, Channel } = window.__TAURI__.core;
@@ -6,6 +6,8 @@ const el = (id) => document.getElementById(id);
 
 let editing = null; // job being edited, or null for a new job
 let currentSources = [];
+let browseJobId = null;
+let snapshotTime = null;
 
 function escapeHtml(s) {
   return String(s).replace(
@@ -23,6 +25,18 @@ function mkbtn(text, cls, fn) {
   return b;
 }
 
+function formatBytes(n) {
+  if (n === null || n === undefined) return "?";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 function scheduleSummary(s) {
   if (!s) return "";
   if (s.kind === "interval") return `every ${s.minutes} min`;
@@ -34,6 +48,9 @@ function scheduleSummary(s) {
 function showView(which) {
   el("jobs-view").classList.toggle("hidden", which !== "jobs");
   el("editor").classList.toggle("hidden", which !== "editor");
+  el("browse-view").classList.toggle("hidden", which !== "browse");
+  el("tab-jobs").classList.toggle("active", which === "jobs" || which === "editor");
+  el("tab-browse").classList.toggle("active", which === "browse");
 }
 
 async function checkEngine() {
@@ -44,6 +61,8 @@ async function checkEngine() {
     el("engine-status").textContent = `unavailable (${err})`;
   }
 }
+
+// --- Jobs ---------------------------------------------------------------
 
 async function loadJobs() {
   let jobs;
@@ -193,6 +212,8 @@ async function deleteJob(job) {
   loadJobs();
 }
 
+// --- Run / restore output (shared) --------------------------------------
+
 function setProgress(fraction, label) {
   el("progress-bar").style.width = `${Math.round(fraction * 100)}%`;
   el("progress-label").textContent = label;
@@ -204,8 +225,8 @@ function appendLog(line) {
   log.scrollTop = log.scrollHeight;
 }
 
-async function runJob(job) {
-  el("run-title").textContent = "Running: " + job.name;
+async function streamRun(title, command, args) {
+  el("run-title").textContent = title;
   el("run").classList.remove("hidden");
   el("log").textContent = "";
   setProgress(0, "starting...");
@@ -234,13 +255,125 @@ async function runJob(job) {
   };
 
   try {
-    await invoke("run_job", { id: job.id, onEvent: channel });
+    await invoke(command, { ...args, onEvent: channel });
   } catch (err) {
     appendLog("error: " + err);
+    setProgress(0, "failed");
   }
 }
 
+function runJob(job) {
+  streamRun("Running: " + job.name, "run_job", { id: job.id });
+}
+
+// --- Browse & restore ---------------------------------------------------
+
+async function populateBrowseJobs() {
+  let jobs = [];
+  try {
+    jobs = await invoke("list_jobs");
+  } catch (err) {
+    /* engine offline; leave empty */
+  }
+  const sel = el("browse-job");
+  sel.innerHTML = "";
+  for (const job of jobs) {
+    const opt = document.createElement("option");
+    opt.value = job.id;
+    opt.textContent = job.name;
+    sel.append(opt);
+  }
+}
+
+async function loadSnapshots() {
+  const jobId = el("browse-job").value;
+  if (!jobId) return alert("Create a job first, then browse its snapshots.");
+  el("files-panel").classList.add("hidden");
+  el("snapshots-list").innerHTML = '<div class="muted">loading...</div>';
+  let snaps;
+  try {
+    snaps = await invoke("list_snapshots", { jobId });
+  } catch (err) {
+    el("snapshots-list").innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+    return;
+  }
+  const list = el("snapshots-list");
+  list.innerHTML = "";
+  if (!snaps.length) {
+    list.innerHTML = '<div class="placeholder">No snapshots in this group yet.</div>';
+    return;
+  }
+  snaps.sort((a, b) => b.backup_time - a.backup_time);
+  for (const snap of snaps) {
+    const row = document.createElement("div");
+    row.className = "snap-row";
+    row.innerHTML =
+      `<span class="snap-time">${escapeHtml(new Date(snap.backup_time * 1000).toLocaleString())}</span>` +
+      `<span class="snap-size muted">${escapeHtml(formatBytes(snap.size))}</span>`;
+    row.onclick = () => loadFiles(jobId, snap.backup_time, snap.backup_time);
+    list.append(row);
+  }
+}
+
+async function loadFiles(jobId, backupTime, label) {
+  browseJobId = jobId;
+  snapshotTime = backupTime;
+  el("files-panel").classList.remove("hidden");
+  el("files-title").textContent =
+    "Files in " + new Date(label * 1000).toLocaleString();
+  el("files-list").innerHTML = '<div class="muted">loading (downloading archive)...</div>';
+  let files;
+  try {
+    files = await invoke("list_files", { jobId, backupTime });
+  } catch (err) {
+    el("files-list").innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+    return;
+  }
+  const list = el("files-list");
+  list.innerHTML = "";
+  if (!files.length) {
+    list.innerHTML = '<div class="muted">no files</div>';
+    return;
+  }
+  for (const file of files) {
+    const row = document.createElement("label");
+    row.className = "file-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = file.path;
+    const name = document.createElement("span");
+    name.textContent = file.path;
+    const size = document.createElement("span");
+    size.className = "muted";
+    size.textContent = formatBytes(file.size);
+    row.append(cb, name, size);
+    list.append(row);
+  }
+}
+
+async function doRestore(all) {
+  if (!browseJobId || snapshotTime === null) return;
+  let files = null;
+  if (!all) {
+    files = Array.from(el("files-list").querySelectorAll("input:checked")).map((c) => c.value);
+    if (!files.length) return alert("Select at least one file, or use Restore all.");
+  }
+  const destination = await invoke("pick_destination");
+  if (!destination) return;
+  streamRun(`Restoring to ${destination}`, "restore", {
+    jobId: browseJobId,
+    backupTime: snapshotTime,
+    files,
+    destination,
+  });
+}
+
 window.addEventListener("DOMContentLoaded", () => {
+  el("tab-jobs").onclick = () => showView("jobs");
+  el("tab-browse").onclick = () => {
+    showView("browse");
+    populateBrowseJobs();
+  };
   el("new-job").onclick = () => openEditor(null);
   el("job-form").addEventListener("submit", saveJob);
   el("cancel-edit").onclick = () => showView("jobs");
@@ -249,6 +382,9 @@ window.addEventListener("DOMContentLoaded", () => {
   el("add-files").onclick = async () =>
     renderSources([...currentSources, ...(await invoke("pick_files"))]);
   el("f-schedule-kind").onchange = updateScheduleFields;
+  el("load-snapshots").onclick = loadSnapshots;
+  el("restore-all").onclick = () => doRestore(true);
+  el("restore-selected").onclick = () => doRestore(false);
   checkEngine();
   loadJobs();
 });

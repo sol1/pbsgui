@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use pbsgui_ipc::{Job, Reply, Request, DEFAULT_SOCKET};
+use pbsgui_ipc::{FileInfo, Job, Reply, Request, SnapshotInfo, DEFAULT_SOCKET};
 use tauri::ipc::Channel;
 
 /// Check (and if needed start) the engine.
@@ -70,6 +70,80 @@ async fn run_job(id: String, on_event: Channel<Reply>) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// List snapshots for a job's backup group (by date/time).
+#[tauri::command]
+async fn list_snapshots(job_id: String) -> Result<Vec<SnapshotInfo>, String> {
+    let replies = request_all(Request::ListSnapshots { job_id }).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Snapshots { snapshots } => Some(snapshots),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return snapshots".to_string())
+}
+
+/// List the files inside a snapshot's archive.
+#[tauri::command]
+async fn list_files(job_id: String, backup_time: i64) -> Result<Vec<FileInfo>, String> {
+    let replies = request_all(Request::ListFiles {
+        job_id,
+        backup_time,
+    })
+    .await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Files { files } => Some(files),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return a file list".to_string())
+}
+
+/// Restore a snapshot (full if `files` is None, else the selected paths),
+/// streaming progress to the frontend channel.
+#[tauri::command]
+async fn restore(
+    job_id: String,
+    backup_time: i64,
+    files: Option<Vec<String>>,
+    destination: String,
+    on_event: Channel<Reply>,
+) -> Result<(), String> {
+    ensure_engine().await?;
+    let name = pbsgui_ipc::socket_name(DEFAULT_SOCKET).map_err(|e| e.to_string())?;
+    let request = Request::Restore {
+        job_id,
+        backup_time,
+        files,
+        destination,
+    };
+    pbsgui_ipc::send_request(name, &request, move |reply| {
+        let _ = on_event.send(reply);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Native single-folder picker for a restore destination.
+#[tauri::command]
+async fn pick_destination() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .pick_folder()
+            .map(|p| p.display().to_string())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Native folder picker; returns selected paths.
@@ -178,6 +252,10 @@ pub fn run() {
             save_job,
             delete_job,
             run_job,
+            list_snapshots,
+            list_files,
+            restore,
+            pick_destination,
             pick_folders,
             pick_files
         ])

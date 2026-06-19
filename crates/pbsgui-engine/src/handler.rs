@@ -1,13 +1,22 @@
-//! IPC request handler: job CRUD and runs, backed by the shared job store.
+//! IPC request handler: job CRUD, runs, browse, and restore.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use pbsgui_ipc::{Reply, Request, Responder};
+use pbs_client::api::ApiClient;
+use pbs_client::session::{ReaderClient, SessionParams};
+use pbs_client::Repository;
+use pbsgui_ipc::{FileInfo, Job, Reply, Request, Responder, SnapshotInfo};
 use tokio::sync::mpsc;
 
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
-use crate::{backup, secrets};
+use crate::{backup, restore, secrets};
+
+/// Archive name for a job's filesystem backup.
+const ARCHIVE_NAME: &str = "files.didx";
+/// Backup type used for all backups for now.
+const BACKUP_TYPE: &str = "host";
 
 /// Handle one IPC request against the shared job store.
 pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Responder) {
@@ -51,7 +60,194 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
         Request::RunJob { id } => {
             run_job(store, id, responder).await;
         }
+
+        Request::ListSnapshots { job_id } => {
+            let reply = match list_snapshots(&store, &job_id).await {
+                Ok(snapshots) => Reply::Snapshots { snapshots },
+                Err(e) => Reply::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
+
+        Request::ListFiles {
+            job_id,
+            backup_time,
+        } => {
+            let reply = match list_files(&store, &job_id, backup_time).await {
+                Ok(files) => Reply::Files { files },
+                Err(e) => Reply::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
+
+        Request::Restore {
+            job_id,
+            backup_time,
+            files,
+            destination,
+        } => {
+            restore_job(store, job_id, backup_time, files, destination, responder).await;
+        }
     }
+}
+
+/// Resolve a job, its secret, and its parsed repository.
+fn job_context(store: &JobStore, job_id: &str) -> anyhow::Result<(Job, String, Repository)> {
+    let job = store
+        .get(job_id)
+        .ok_or_else(|| anyhow::anyhow!("no such job: {job_id}"))?;
+    let secret =
+        secrets::get(job_id)?.ok_or_else(|| anyhow::anyhow!("no saved credential for this job"))?;
+    let repo: Repository = job.destination.repository.parse()?;
+    Ok((job, secret, repo))
+}
+
+async fn list_snapshots(store: &JobStore, job_id: &str) -> anyhow::Result<Vec<SnapshotInfo>> {
+    let (job, secret, repo) = job_context(store, job_id)?;
+    let api = ApiClient::from_repository(&repo, secret, &job.destination.fingerprint)?;
+    let snapshots = api
+        .list_snapshots(&repo.datastore, BACKUP_TYPE, &job.destination.backup_id)
+        .await?;
+    Ok(snapshots
+        .into_iter()
+        .map(|s| SnapshotInfo {
+            backup_time: s.backup_time,
+            size: s.size,
+        })
+        .collect())
+}
+
+async fn list_files(
+    store: &JobStore,
+    job_id: &str,
+    backup_time: i64,
+) -> anyhow::Result<Vec<FileInfo>> {
+    let (job, secret, repo) = job_context(store, job_id)?;
+    let params = SessionParams::from_repository(
+        &repo,
+        secret,
+        &job.destination.fingerprint,
+        BACKUP_TYPE,
+        &job.destination.backup_id,
+        backup_time,
+    )?;
+    let mut reader = ReaderClient::connect(&params).await?;
+    let bytes = reader.restore_dynamic_archive(ARCHIVE_NAME).await?;
+    restore::list_tar(&bytes)
+}
+
+async fn restore_job(
+    store: Arc<JobStore>,
+    job_id: String,
+    backup_time: i64,
+    files: Option<Vec<String>>,
+    destination: String,
+    mut responder: Responder,
+) {
+    let (job, secret, repo) = match job_context(&store, &job_id) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            let _ = responder
+                .send(&Reply::Error {
+                    message: e.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    let _ = responder
+        .send(&Reply::Accepted {
+            job_id: job_id.clone(),
+        })
+        .await;
+
+    let result = run_restore(
+        &job,
+        &secret,
+        &repo,
+        backup_time,
+        files,
+        &destination,
+        &mut responder,
+    )
+    .await;
+    let reply = match result {
+        Ok(message) => Reply::Finished {
+            success: true,
+            message,
+        },
+        Err(e) => Reply::Finished {
+            success: false,
+            message: e.to_string(),
+        },
+    };
+    let _ = responder.send(&reply).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_restore(
+    job: &Job,
+    secret: &str,
+    repo: &Repository,
+    backup_time: i64,
+    files: Option<Vec<String>>,
+    destination: &str,
+    responder: &mut Responder,
+) -> anyhow::Result<String> {
+    let params = SessionParams::from_repository(
+        repo,
+        secret,
+        &job.destination.fingerprint,
+        BACKUP_TYPE,
+        &job.destination.backup_id,
+        backup_time,
+    )?;
+
+    let _ = responder
+        .send(&Reply::Log {
+            line: "connecting to PBS".to_string(),
+        })
+        .await;
+    let mut reader = ReaderClient::connect(&params).await?;
+
+    let _ = responder
+        .send(&Reply::Log {
+            line: "downloading archive".to_string(),
+        })
+        .await;
+    let bytes = reader.restore_dynamic_archive(ARCHIVE_NAME).await?;
+    let _ = responder
+        .send(&Reply::Progress {
+            fraction: 0.5,
+            message: format!("downloaded {} bytes", bytes.len()),
+        })
+        .await;
+
+    let selected: Option<HashSet<String>> = files.map(|v| v.into_iter().collect());
+    let dest = std::path::PathBuf::from(destination);
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!("extracting to {}", dest.display()),
+        })
+        .await;
+
+    let count =
+        tokio::task::spawn_blocking(move || restore::extract(&bytes, selected.as_ref(), &dest))
+            .await
+            .map_err(|e| anyhow::anyhow!("extract task failed: {e}"))??;
+
+    let _ = responder
+        .send(&Reply::Progress {
+            fraction: 1.0,
+            message: "done".to_string(),
+        })
+        .await;
+    Ok(format!("restored {count} file(s)"))
 }
 
 async fn run_job(store: Arc<JobStore>, id: String, mut responder: Responder) {

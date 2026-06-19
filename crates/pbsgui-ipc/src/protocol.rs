@@ -53,6 +53,23 @@ pub struct Job {
     pub last_status: Option<String>,
 }
 
+/// Summary of a snapshot for the browse view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    /// Backup time, unix seconds.
+    pub backup_time: i64,
+    /// Total archive size in bytes, if known.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
+/// A file inside a snapshot's archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub path: String,
+    pub size: u64,
+}
+
 /// A message from the GUI to the engine.
 // SaveJob carries a whole Job, so the enum's largest variant dominates its size.
 // These messages are sent once per connection, so the size is not a concern.
@@ -75,6 +92,19 @@ pub enum Request {
     DeleteJob { id: String },
     /// Run a saved job now; the engine streams progress until it finishes.
     RunJob { id: String },
+    /// List snapshots for a job's backup group, by date/time.
+    ListSnapshots { job_id: String },
+    /// List the files inside a snapshot's archive.
+    ListFiles { job_id: String, backup_time: i64 },
+    /// Restore a snapshot to `destination`. `files` is `None` for a full restore,
+    /// or the selected paths for a partial restore. Streams progress.
+    Restore {
+        job_id: String,
+        backup_time: i64,
+        #[serde(default)]
+        files: Option<Vec<String>>,
+        destination: String,
+    },
 }
 
 /// A message from the engine to the GUI.
@@ -89,6 +119,10 @@ pub enum Reply {
     Saved { id: String },
     /// Reply to [`Request::DeleteJob`].
     Deleted,
+    /// Reply to [`Request::ListSnapshots`].
+    Snapshots { snapshots: Vec<SnapshotInfo> },
+    /// Reply to [`Request::ListFiles`].
+    Files { files: Vec<FileInfo> },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -110,6 +144,8 @@ impl Reply {
                 | Reply::Jobs { .. }
                 | Reply::Saved { .. }
                 | Reply::Deleted
+                | Reply::Snapshots { .. }
+                | Reply::Files { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )

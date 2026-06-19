@@ -34,6 +34,22 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::ListSnapshots { .. } => {
+            let _ = responder
+                .send(&Reply::Snapshots { snapshots: vec![] })
+                .await;
+        }
+        Request::ListFiles { .. } => {
+            let _ = responder.send(&Reply::Files { files: vec![] }).await;
+        }
+        Request::Restore { .. } => {
+            let _ = responder
+                .send(&Reply::Finished {
+                    success: true,
+                    message: "restored".into(),
+                })
+                .await;
+        }
     }
 }
 

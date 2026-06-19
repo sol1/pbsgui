@@ -203,7 +203,7 @@ fn parse_fingerprint(fp: &str) -> Result<[u8; 32]> {
     Ok(arr)
 }
 
-fn tls_connector(fingerprint: &str) -> Result<TlsConnector> {
+pub(crate) fn tls_connector(fingerprint: &str) -> Result<TlsConnector> {
     let provider = rustls::crypto::ring::default_provider();
     let algs = provider.signature_verification_algorithms;
     let verifier = PinnedVerifier {

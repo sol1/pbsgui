@@ -28,6 +28,7 @@
 //! Client side encryption (optional, a differentiator over existing Windows
 //! clients) uses AES-256-GCM with a key derived for the datastore.
 
+pub mod api;
 pub mod blob;
 pub mod chunker;
 pub mod error;
@@ -42,6 +43,7 @@ pub mod session;
 // pub mod crypto;    // AES-256-GCM client side encryption and key handling
 // pub mod api_types; // serde types mirrored from the documented PBS API
 
+pub use api::{ApiClient, Snapshot};
 pub use error::{PbsError, Result};
 pub use index::{DynamicIndex, DynamicIndexBuilder, FixedIndex, FixedIndexBuilder};
 pub use manifest::BackupManifest;
