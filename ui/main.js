@@ -312,15 +312,20 @@ async function loadSnapshots() {
   const jobId = el("browse-job").value;
   if (!jobId) return alert("Create a job first, then browse its snapshots.");
   el("files-panel").classList.add("hidden");
-  el("snapshots-list").innerHTML = loadingHtml("loading snapshots...");
+  const list = el("snapshots-list");
+  // Only show the spinner if the load is slow, so fast loads don't flash.
+  const spinner = setTimeout(() => {
+    list.innerHTML = loadingHtml("loading snapshots...");
+  }, 200);
   let snaps;
   try {
     snaps = await invoke("list_snapshots", { jobId });
   } catch (err) {
-    el("snapshots-list").innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+    clearTimeout(spinner);
+    list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
     return;
   }
-  const list = el("snapshots-list");
+  clearTimeout(spinner);
   list.innerHTML = "";
   if (!snaps.length) {
     list.innerHTML = '<div class="placeholder">No snapshots in this group yet.</div>';
@@ -344,15 +349,22 @@ async function loadFiles(jobId, backupTime, label) {
   el("files-panel").classList.remove("hidden");
   el("files-title").textContent =
     "Files in " + new Date(label * 1000).toLocaleString();
-  el("files-list").innerHTML = loadingHtml("loading files...");
+  const list = el("files-list");
+  // Only show the spinner if the load is slow, so fast loads don't flash.
+  const spinner = setTimeout(() => {
+    list.innerHTML = loadingHtml("loading files...");
+  }, 200);
   let files;
   try {
     files = await invoke("list_files", { jobId, backupTime });
   } catch (err) {
-    el("files-list").innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+    clearTimeout(spinner);
+    if (snapshotTime !== backupTime) return; // a newer selection superseded this
+    list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
     return;
   }
-  const list = el("files-list");
+  clearTimeout(spinner);
+  if (snapshotTime !== backupTime) return; // a newer selection superseded this
   list.innerHTML = "";
   if (!files.length) {
     list.innerHTML = '<div class="muted">no files</div>';
