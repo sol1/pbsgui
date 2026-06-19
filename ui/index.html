@@ -12,6 +12,7 @@
       <nav class="tabs">
         <button id="tab-jobs" class="tab active" type="button">Jobs</button>
         <button id="tab-browse" class="tab" type="button">Browse &amp; restore</button>
+        <button id="tab-sql" class="tab" type="button">SQL Servers</button>
       </nav>
       <span class="spacer"></span>
       <span id="build-info" class="build muted"></span>
@@ -129,6 +130,21 @@
           </div>
           <div id="files-list"></div>
         </section>
+      </section>
+
+      <!-- SQL Servers -->
+      <section id="sql-view" class="hidden">
+        <div class="section-head">
+          <h1>SQL Servers</h1>
+          <span class="spacer"></span>
+          <button id="discover-sql" class="primary" type="button">Discover</button>
+        </div>
+        <p class="help muted">Finds SQL Server instances installed on this machine. Network
+          discovery (Browser, scan, Active Directory) and per-instance details (version,
+          standalone/cluster/Always On, databases) arrive in upcoming updates.</p>
+        <div id="sql-list">
+          <div class="muted">Click Discover to find SQL Server instances on this machine.</div>
+        </div>
       </section>
 
       <!-- Shared run / restore output -->

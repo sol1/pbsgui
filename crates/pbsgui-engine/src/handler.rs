@@ -92,6 +92,14 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
         } => {
             restore_job(store, job_id, backup_time, files, destination, responder).await;
         }
+
+        Request::DiscoverSql {
+            include_network,
+            targets,
+        } => {
+            let instances = crate::sql::discover::discover(include_network, targets).await;
+            let _ = responder.send(&Reply::SqlInstances { instances }).await;
+        }
     }
 }
 

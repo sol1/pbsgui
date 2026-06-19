@@ -7,7 +7,7 @@
 //! serve` in development) - it does not start the engine itself, so closing the
 //! GUI never stops backups.
 
-use pbsgui_ipc::{FileInfo, Job, Reply, Request, SnapshotInfo, DEFAULT_SOCKET};
+use pbsgui_ipc::{FileInfo, Job, Reply, Request, SnapshotInfo, SqlInstance, DEFAULT_SOCKET};
 use tauri::ipc::Channel;
 
 /// Check the engine/service is reachable (used by the Test button).
@@ -144,6 +144,29 @@ async fn restore(
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Discover SQL Server instances (local always; network when requested).
+#[tauri::command]
+async fn discover_sql(
+    include_network: bool,
+    targets: Vec<String>,
+) -> Result<Vec<SqlInstance>, String> {
+    let replies = request_all(Request::DiscoverSql {
+        include_network,
+        targets,
+    })
+    .await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::SqlInstances { instances } => Some(instances),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return SQL instances".to_string())
 }
 
 /// Native single-folder picker for a restore destination.
@@ -285,6 +308,7 @@ pub fn run() {
         list_snapshots,
         list_files,
         restore,
+        discover_sql,
         pick_destination,
         pick_folders,
         pick_files

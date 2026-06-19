@@ -50,6 +50,11 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::DiscoverSql { .. } => {
+            let _ = responder
+                .send(&Reply::SqlInstances { instances: vec![] })
+                .await;
+        }
     }
 }
 

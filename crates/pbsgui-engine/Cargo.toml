@@ -34,6 +34,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 keyring = { version = "3", features = ["windows-native"] }
 # Run as a Windows Service under the SCM.
 windows-service = "0.7"
+# Read SQL Server instance names, ports, and login mode from the registry.
+winreg = "0.52"
 # Enabled as the SQL/VSS modules are implemented:
 #   windows  COM bindings for SQLVDI.dll (VDI streaming) and VSS
 # windows = { version = "0.58", features = ["Win32_System_Com", "Win32_Storage_Vss"] }

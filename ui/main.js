@@ -64,8 +64,10 @@ function showView(which) {
   el("jobs-view").classList.toggle("hidden", which !== "jobs");
   el("editor").classList.toggle("hidden", which !== "editor");
   el("browse-view").classList.toggle("hidden", which !== "browse");
+  el("sql-view").classList.toggle("hidden", which !== "sql");
   el("tab-jobs").classList.toggle("active", which === "jobs" || which === "editor");
   el("tab-browse").classList.toggle("active", which === "browse");
+  el("tab-sql").classList.toggle("active", which === "sql");
 }
 
 async function checkEngine() {
@@ -403,12 +405,109 @@ async function doRestore(all) {
   });
 }
 
+// --- SQL Servers --------------------------------------------------------
+
+const authModeLabel = { windows_only: "Windows auth", mixed: "Mixed auth", unknown: "" };
+const sourceLabel = {
+  local_registry: "local",
+  browser: "browser",
+  network_scan: "network",
+  active_directory: "AD",
+};
+
+function recoveryBadge(model) {
+  const cls = model === "SIMPLE" ? "badge" : "badge badge-ok";
+  return `<span class="${cls}">${escapeHtml(model)}</span>`;
+}
+
+function topologyLabel(t) {
+  if (!t) return "";
+  if (t.topology === "failover_cluster_instance") return `FCI (node ${escapeHtml(t.current_node)})`;
+  if (t.topology === "availability_group") {
+    const pref = t.is_preferred_backup_replica ? " · preferred backup" : "";
+    return `Always On ${escapeHtml(t.group_name)} (${escapeHtml(t.role)})${pref}`;
+  }
+  return "Standalone";
+}
+
+function renderSqlDatabases(databases) {
+  if (!databases || !databases.length) return '<div class="muted">no databases</div>';
+  return databases
+    .map((db) => {
+      const wait =
+        db.log_reuse_wait && db.log_reuse_wait !== "NOTHING"
+          ? ` · log wait: ${escapeHtml(db.log_reuse_wait)}`
+          : "";
+      const ag = db.in_availability_group ? " · in AG" : "";
+      return (
+        `<div class="sql-db"><span class="sql-db-name">${escapeHtml(db.name)}</span>` +
+        `${recoveryBadge(db.recovery_model)}` +
+        `<span class="muted">${escapeHtml(db.state)}${ag}${wait}</span></div>`
+      );
+    })
+    .join("");
+}
+
+function renderSqlInstances(instances) {
+  const list = el("sql-list");
+  list.innerHTML = "";
+  if (!instances.length) {
+    list.innerHTML = '<div class="placeholder">No SQL Server instances found.</div>';
+    return;
+  }
+  for (const inst of instances) {
+    const card = document.createElement("div");
+    card.className = "sql-instance";
+    const badges = [`<span class="badge">${escapeHtml(sourceLabel[inst.source] || inst.source)}</span>`];
+    if (inst.port) badges.push(`<span class="badge">tcp ${inst.port}</span>`);
+    const auth = authModeLabel[inst.auth_mode];
+    if (auth) badges.push(`<span class="badge">${escapeHtml(auth)}</span>`);
+    if (inst.clustered) badges.push('<span class="badge">clustered</span>');
+
+    let body;
+    if (inst.probe) {
+      body =
+        `<div class="sql-meta muted">${escapeHtml(topologyLabel(inst.probe.topology))} · ` +
+        `${escapeHtml(inst.probe.edition)} · ${escapeHtml(inst.probe.product_version)}</div>` +
+        `<div class="sql-dbs">${renderSqlDatabases(inst.probe.databases)}</div>`;
+    } else if (inst.probe_error) {
+      body = `<div class="sql-meta placeholder">unreachable: ${escapeHtml(inst.probe_error)}</div>`;
+    } else {
+      body = '<div class="sql-meta muted">not yet probed</div>';
+    }
+
+    card.innerHTML =
+      `<div class="sql-head"><span class="sql-server">${escapeHtml(inst.server)}</span>` +
+      badges.join("") +
+      `</div><div class="sql-meta muted">instance: ${escapeHtml(inst.instance_name)}</div>` +
+      body;
+    list.append(card);
+  }
+}
+
+async function discoverSql() {
+  const list = el("sql-list");
+  const btn = el("discover-sql");
+  btn.disabled = true;
+  list.innerHTML = loadingHtml("discovering SQL Server instances...");
+  try {
+    const instances = await invoke("discover_sql", { includeNetwork: false, targets: [] });
+    renderSqlInstances(instances);
+  } catch (err) {
+    list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   el("tab-jobs").onclick = () => showView("jobs");
   el("tab-browse").onclick = () => {
     showView("browse");
     populateBrowseJobs();
   };
+  el("tab-sql").onclick = () => showView("sql");
+  el("discover-sql").onclick = discoverSql;
   el("new-job").onclick = () => openEditor(null);
   el("job-form").addEventListener("submit", saveJob);
   el("cancel-edit").onclick = () => showView("jobs");

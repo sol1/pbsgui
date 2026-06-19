@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod discover;
+
 /// The detected deployment archetype of a SQL Server instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "topology", rename_all = "snake_case")]

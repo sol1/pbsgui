@@ -79,6 +79,138 @@ pub struct FileInfo {
     pub size: u64,
 }
 
+/// How an instance was found during discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlDiscoverySource {
+    /// Listed in the local registry (instance names hive).
+    LocalRegistry,
+    /// Found via the SQL Server Browser (UDP 1434).
+    Browser,
+    /// Found by a network host/subnet scan.
+    NetworkScan,
+    /// Found via an Active Directory SPN lookup.
+    ActiveDirectory,
+}
+
+/// Which login types an instance accepts, from its `LoginMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlAuthMode {
+    /// Windows authentication only.
+    WindowsOnly,
+    /// Mixed mode: Windows and SQL logins.
+    Mixed,
+    /// Not determined (e.g. a remote instance not yet probed).
+    Unknown,
+}
+
+/// How to authenticate to a SQL Server instance for a connection.
+///
+/// `Integrated` carries no secret (the engine's service identity is used). The
+/// others name a principal; any password is stored separately in the OS
+/// credential store, never in this struct (mirrors [`Job`] secret handling).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SqlAuth {
+    /// Windows integrated auth as the engine's service account.
+    Integrated,
+    /// Windows integrated auth as an explicit account.
+    WindowsAccount { username: String },
+    /// SQL Server authentication.
+    SqlLogin { username: String },
+    /// Azure AD / Entra token-based auth.
+    AzureAd { username: String },
+}
+
+/// The detected deployment archetype of a SQL Server instance (probe result).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "topology", rename_all = "snake_case")]
+pub enum SqlTopology {
+    /// A single instance on local storage.
+    Standalone,
+    /// A Failover Cluster Instance; back up against the virtual name.
+    FailoverClusterInstance {
+        virtual_name: String,
+        current_node: String,
+    },
+    /// An Always On Availability Group replica.
+    AvailabilityGroup {
+        group_name: String,
+        /// "primary", "secondary", or "resolving".
+        role: String,
+        is_preferred_backup_replica: bool,
+    },
+}
+
+/// A database on a discovered instance (filled by the probe step).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlDatabase {
+    pub name: String,
+    /// "SIMPLE", "FULL", or "BULK_LOGGED".
+    pub recovery_model: String,
+    /// "ONLINE", "OFFLINE", "RESTORING", etc.
+    pub state: String,
+    /// Why the log is not truncating, if applicable (`log_reuse_wait_desc`).
+    #[serde(default)]
+    pub log_reuse_wait: Option<String>,
+    /// Whether the database is in an Availability Group.
+    #[serde(default)]
+    pub in_availability_group: bool,
+    /// Whether this replica is the preferred backup replica for the database.
+    #[serde(default)]
+    pub is_preferred_backup_replica: Option<bool>,
+}
+
+/// Details obtained by connecting to an instance (the probe step).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlProbe {
+    /// `SERVERPROPERTY('ProductVersion')`.
+    pub product_version: String,
+    /// `SERVERPROPERTY('Edition')`.
+    pub edition: String,
+    pub topology: SqlTopology,
+    pub databases: Vec<SqlDatabase>,
+}
+
+/// One discovered SQL Server instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlInstance {
+    /// Connection target: "HOST" for the default instance or "HOST\\NAME".
+    pub server: String,
+    /// Instance name ("MSSQLSERVER" for the default instance).
+    pub instance_name: String,
+    /// The machine hosting the instance (virtual name for an FCI).
+    pub host: String,
+    /// TCP port, if known from the registry/Browser.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// How the instance was found.
+    pub source: SqlDiscoverySource,
+    /// Service running state (local discovery only).
+    #[serde(default)]
+    pub running: Option<bool>,
+    /// The service account the instance runs as, if known.
+    #[serde(default)]
+    pub service_account: Option<String>,
+    /// Login types the instance accepts (from `LoginMode`).
+    #[serde(default = "unknown_auth_mode")]
+    pub auth_mode: SqlAuthMode,
+    /// Whether the instance is flagged clustered (refined to FCI/AG by the probe).
+    #[serde(default)]
+    pub clustered: Option<bool>,
+    /// Connection result, present once the instance has been probed.
+    #[serde(default)]
+    pub probe: Option<SqlProbe>,
+    /// If probing failed, why (so the UI can show "found but unreachable").
+    #[serde(default)]
+    pub probe_error: Option<String>,
+}
+
+fn unknown_auth_mode() -> SqlAuthMode {
+    SqlAuthMode::Unknown
+}
+
 /// A message from the GUI to the engine.
 // SaveJob carries a whole Job, so the enum's largest variant dominates its size.
 // These messages are sent once per connection, so the size is not a concern.
@@ -114,6 +246,15 @@ pub enum Request {
         files: Option<Vec<String>>,
         destination: String,
     },
+    /// Discover SQL Server instances. Local enumeration always runs; when
+    /// `include_network` is set, the engine also probes the Browser, scans the
+    /// given `targets` (hosts or subnets), and checks Active Directory.
+    DiscoverSql {
+        #[serde(default)]
+        include_network: bool,
+        #[serde(default)]
+        targets: Vec<String>,
+    },
 }
 
 /// A message from the engine to the GUI.
@@ -132,6 +273,8 @@ pub enum Reply {
     Snapshots { snapshots: Vec<SnapshotInfo> },
     /// Reply to [`Request::ListFiles`].
     Files { files: Vec<FileInfo> },
+    /// Reply to [`Request::DiscoverSql`].
+    SqlInstances { instances: Vec<SqlInstance> },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -155,6 +298,7 @@ impl Reply {
                 | Reply::Deleted
                 | Reply::Snapshots { .. }
                 | Reply::Files { .. }
+                | Reply::SqlInstances { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )
