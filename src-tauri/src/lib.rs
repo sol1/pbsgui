@@ -3,19 +3,24 @@
 //! Unprivileged control/monitor UI. It connects to `pbsgui-engine` over a local
 //! socket (a named pipe on Windows), exposes job CRUD/run commands plus a native
 //! folder picker, and forwards run progress to the frontend over a channel. It
-//! best-effort launches the engine sitting next to it; otherwise the engine must
-//! be started separately (`pbsgui-engine serve`).
-
-use std::time::Duration;
+//! connects to the engine, which runs as a Windows Service (or `pbsgui-engine
+//! serve` in development) - it does not start the engine itself, so closing the
+//! GUI never stops backups.
 
 use pbsgui_ipc::{FileInfo, Job, Reply, Request, SnapshotInfo, DEFAULT_SOCKET};
 use tauri::ipc::Channel;
 
-/// Check (and if needed start) the engine.
+/// Check the engine/service is reachable (used by the Test button).
 #[tauri::command]
 async fn engine_ping() -> Result<String, String> {
     ensure_engine().await?;
     Ok("connected".to_string())
+}
+
+/// Whether the backup service is currently reachable (for the status indicator).
+#[tauri::command]
+async fn engine_status() -> bool {
+    ping_once().await.unwrap_or(false)
 }
 
 /// List saved jobs.
@@ -191,23 +196,13 @@ fn first_error(replies: &[Reply]) -> Option<String> {
     })
 }
 
-/// Ensure the engine is reachable: ping it, and if that fails, try to launch the
-/// engine next to us and retry.
+/// Require the engine/service to be reachable on the IPC socket.
 async fn ensure_engine() -> Result<(), String> {
     if ping_once().await.unwrap_or(false) {
-        return Ok(());
+        Ok(())
+    } else {
+        Err("backup service is not reachable (is the pbsgui-engine service running?)".to_string())
     }
-    spawn_engine();
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if ping_once().await.unwrap_or(false) {
-            return Ok(());
-        }
-    }
-    Err(
-        "could not reach or start the backup engine (try running `pbsgui-engine serve`)"
-            .to_string(),
-    )
 }
 
 async fn ping_once() -> Result<bool, String> {
@@ -223,31 +218,12 @@ async fn ping_once() -> Result<bool, String> {
     Ok(got_pong)
 }
 
-fn spawn_engine() {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let Some(dir) = exe.parent() else {
-        return;
-    };
-    for name in [
-        "pbsgui-engine.exe",
-        "pbsgui-engine",
-        "pbsgui-engine-x86_64-pc-windows-msvc.exe",
-    ] {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            let _ = std::process::Command::new(candidate).arg("serve").spawn();
-            return;
-        }
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             engine_ping,
+            engine_status,
             list_jobs,
             save_job,
             delete_job,

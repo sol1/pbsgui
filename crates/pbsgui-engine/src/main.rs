@@ -1,13 +1,14 @@
 //! pbsgui backup engine.
 //!
 //! Does the backup work: archives a job's sources and streams them to a Proxmox
-//! Backup Server (deduplicated) using the clean-room [`pbs_client`] crate, and
-//! (in future) talks to SQL Server over VDI and snapshots volumes via VSS. The
-//! unprivileged GUI drives it over a local socket (a named pipe on Windows); see
-//! [`pbsgui_ipc`]. A built-in scheduler runs due jobs while the engine is up.
+//! Backup Server (deduplicated) using the clean-room [`pbs_client`] crate, runs
+//! pre/post job scripts, and serves the GUI over a local socket (a named pipe on
+//! Windows; see [`pbsgui_ipc`]). A built-in scheduler runs due jobs.
 //!
-//! Run `pbsgui-engine serve` to listen for the GUI. On Windows it will also be
-//! installable as a Service for scheduled, elevated backups (not yet built).
+//! Modes:
+//!   - `serve` runs the engine in the foreground (for development).
+//!   - `service install|uninstall|run` manages/runs the Windows Service, so
+//!     scheduled backups run unattended whether or not the GUI is open.
 
 // Temporary while the engine is scaffolded: the SQL module defines topology
 // detection ahead of the code that will use it.
@@ -42,24 +43,41 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the IPC socket so the GUI can drive backups, and run the scheduler.
+    /// Run the engine in the foreground (for development).
     Serve {
         /// Socket base name the GUI connects to.
         #[arg(long, default_value_t = pbsgui_ipc::DEFAULT_SOCKET.to_string())]
         socket: String,
     },
-    /// Run as a Windows Service (registered separately).
-    Service,
+    /// Manage or run the Windows Service.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Print version and platform information.
     Version,
+}
+
+#[derive(Subcommand, Clone, Copy)]
+enum ServiceAction {
+    /// Register the service and start it (run elevated).
+    Install,
+    /// Stop and remove the service (run elevated).
+    Uninstall,
+    /// Run as the service (invoked by the Service Control Manager).
+    Run,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     match Cli::parse().command {
-        Command::Serve { socket } => serve(&socket).await,
-        Command::Service => run_service(),
+        Command::Serve { socket } => {
+            let store = Arc::new(JobStore::load());
+            tracing::info!(socket, "engine serving IPC");
+            run_engine(store, &socket).await
+        }
+        Command::Service { action } => run_service(action),
         Command::Version => {
             println!(
                 "pbsgui-engine {} ({})",
@@ -71,11 +89,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn serve(socket: &str) -> anyhow::Result<()> {
-    let store = Arc::new(JobStore::load());
-    tracing::info!(socket, "engine serving IPC");
-
-    // Scheduler: run due jobs while we are up.
+/// Run the scheduler and the IPC server until the process stops.
+pub(crate) async fn run_engine(store: Arc<JobStore>, socket: &str) -> anyhow::Result<()> {
     let scheduler_store = store.clone();
     tokio::spawn(async move { scheduler::run(scheduler_store).await });
 
@@ -89,13 +104,17 @@ async fn serve(socket: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-fn run_service() -> anyhow::Result<()> {
-    service::run()
+fn run_service(action: ServiceAction) -> anyhow::Result<()> {
+    match action {
+        ServiceAction::Install => service::install(),
+        ServiceAction::Uninstall => service::uninstall(),
+        ServiceAction::Run => service::run(),
+    }
 }
 
 #[cfg(not(windows))]
-fn run_service() -> anyhow::Result<()> {
-    anyhow::bail!("service mode is only available on Windows");
+fn run_service(_action: ServiceAction) -> anyhow::Result<()> {
+    anyhow::bail!("service mode is only available on Windows")
 }
 
 fn init_tracing() {

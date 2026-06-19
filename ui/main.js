@@ -70,10 +70,10 @@ function showView(which) {
 
 async function checkEngine() {
   try {
-    await invoke("engine_ping");
-    el("engine-status").textContent = "connected";
+    const ok = await invoke("engine_status");
+    el("engine-status").textContent = ok ? "running" : "not reachable";
   } catch (err) {
-    el("engine-status").textContent = `unavailable (${err})`;
+    el("engine-status").textContent = "not reachable";
   }
 }
 
@@ -416,5 +416,6 @@ window.addEventListener("DOMContentLoaded", () => {
   el("restore-all").onclick = () => doRestore(true);
   el("restore-selected").onclick = () => doRestore(false);
   checkEngine();
+  setInterval(checkEngine, 5000);
   loadJobs();
 });

@@ -32,8 +32,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [target.'cfg(windows)'.dependencies]
 # Secrets in the Windows Credential Manager.
 keyring = { version = "3", features = ["windows-native"] }
-# Enabled as the Windows specific backup modules are implemented:
-#   windows         COM bindings for SQLVDI.dll (VDI streaming) and VSS
-#   windows-service registering and running as a Windows Service
+# Run as a Windows Service under the SCM.
+windows-service = "0.7"
+# Enabled as the SQL/VSS modules are implemented:
+#   windows  COM bindings for SQLVDI.dll (VDI streaming) and VSS
 # windows = { version = "0.58", features = ["Win32_System_Com", "Win32_Storage_Vss"] }
-# windows-service = "0.8"

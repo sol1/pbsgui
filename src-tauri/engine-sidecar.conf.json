@@ -1,6 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "externalBin": ["binaries/pbsgui-engine"]
+    "externalBin": ["binaries/pbsgui-engine"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./service-hooks.nsh"
+      }
+    }
   }
 }

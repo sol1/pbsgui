@@ -65,19 +65,18 @@ it), the WebView2 runtime (preinstalled on current Windows), and the Tauri CLI
 cargo test -p pbs-client -p pbsgui-ipc -p pbsgui-engine
 
 # run the desktop app in development
-cargo build -p pbsgui-engine   # so the GUI can launch it from the same directory
 tauri dev
 ```
 
-When the GUI starts it tries to launch the engine sitting next to it. If it is
-not found, start it yourself in another terminal:
+The GUI connects to the engine but does not start it. In development, run the
+engine yourself in another terminal:
 
 ```sh
 cargo run -p pbsgui-engine -- serve
 ```
 
-Then enter a PBS repository, API token secret, server fingerprint, and a file to
-back up, and click "Back up". Progress and logs stream from the engine.
+In an installed build the engine runs as a Windows service instead (below). Then
+create a job, pick sources, and click Run; progress and logs stream from the engine.
 
 ### Building the Windows installer locally
 
@@ -99,9 +98,16 @@ The GUI manages named backup jobs. A job has a PBS destination (repository,
 fingerprint, backup id), source folders/files chosen with a native picker,
 optional glob excludes, and a schedule (manual, every N minutes, or daily at a
 local time). The engine stores jobs as JSON in its config directory
-(`%ProgramData%\pbsgui` on Windows) and runs due jobs while it is running;
-unattended scheduling that survives logoff/reboot arrives with the Windows
-service.
+(`%ProgramData%\pbsgui` on Windows). The installer registers and starts the
+engine as a Windows service (LocalSystem), so scheduled jobs run **unattended** -
+even with the GUI closed, and across logoff and reboot. The GUI connects to that
+service and shows its status; closing the GUI never stops backups. (`pbsgui-engine
+service install` / `uninstall` manage it manually, elevated.)
+
+A job can also **skip its run** when no source file changed since the last
+success (change detection), and run a **pre-job script** (a non-zero exit aborts)
+and a **post-job script** (which receives the outcome in `PBSGUI_*` environment
+variables).
 
 Backups are deduplicated: a job's sources are archived and split into
 content-defined chunks, and each run uploads only the chunks that changed since
