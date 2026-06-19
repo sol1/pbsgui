@@ -454,6 +454,7 @@ function renderSqlInstanceCard(inst, card) {
   const auth = authModeLabel[inst.auth_mode];
   if (auth) badges.push(`<span class="badge">${escapeHtml(auth)}</span>`);
   if (inst.clustered) badges.push('<span class="badge">clustered</span>');
+  if (inst.tcp_enabled === false) badges.push('<span class="badge badge-warn">TCP/IP off</span>');
 
   let body;
   if (inst.probe) {
@@ -463,6 +464,10 @@ function renderSqlInstanceCard(inst, card) {
       `<div class="sql-dbs">${renderSqlDatabases(inst.probe.databases)}</div>`;
   } else if (inst.probe_error) {
     body = `<div class="sql-meta placeholder">unreachable: ${escapeHtml(inst.probe_error)}</div>`;
+  } else if (inst.tcp_enabled === false) {
+    body =
+      '<div class="sql-meta placeholder">TCP/IP is disabled on this instance. Enable it in ' +
+      "SQL Server Configuration Manager and restart the service before probing.</div>";
   } else {
     body = '<div class="sql-meta muted">not yet probed</div>';
   }

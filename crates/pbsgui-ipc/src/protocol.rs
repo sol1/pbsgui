@@ -199,6 +199,11 @@ pub struct SqlInstance {
     /// Whether the instance is flagged clustered (refined to FCI/AG by the probe).
     #[serde(default)]
     pub clustered: Option<bool>,
+    /// Whether the TCP/IP protocol is enabled (from the registry). When this is
+    /// `Some(false)`, a probe cannot connect until TCP/IP is enabled in SQL
+    /// Server Configuration Manager and the service is restarted.
+    #[serde(default)]
+    pub tcp_enabled: Option<bool>,
     /// Connection result, present once the instance has been probed.
     #[serde(default)]
     pub probe: Option<SqlProbe>,

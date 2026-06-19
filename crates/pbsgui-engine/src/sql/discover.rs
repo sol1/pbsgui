@@ -71,10 +71,17 @@ fn local_instances() -> Vec<SqlInstance> {
             })
             .unwrap_or(SqlAuthMode::Unknown);
 
-        let port = mssql
+        let tcp = mssql
             .as_ref()
-            .and_then(|key| key.open_subkey(r"SuperSocketNetLib\Tcp\IPAll").ok())
-            .and_then(|tcp| tcp_port(&tcp));
+            .and_then(|key| key.open_subkey(r"SuperSocketNetLib\Tcp").ok());
+        let tcp_enabled = tcp
+            .as_ref()
+            .and_then(|key| key.get_value::<u32, _>("Enabled").ok())
+            .map(|enabled| enabled == 1);
+        let port = tcp
+            .as_ref()
+            .and_then(|key| key.open_subkey("IPAll").ok())
+            .and_then(|ipall| tcp_port(&ipall));
 
         // The presence of a Cluster key marks a Failover Cluster Instance; the
         // probe step later refines this to FCI vs AG.
@@ -96,6 +103,7 @@ fn local_instances() -> Vec<SqlInstance> {
             service_account: None,
             auth_mode,
             clustered,
+            tcp_enabled,
             probe: None,
             probe_error: None,
         });

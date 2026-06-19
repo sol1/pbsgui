@@ -412,6 +412,11 @@ button:disabled {
   color: var(--accent);
 }
 
+.badge-warn {
+  border-color: #b5552f;
+  color: #e0915f;
+}
+
 .sql-instance {
   padding: 12px 14px;
   background: var(--panel);
