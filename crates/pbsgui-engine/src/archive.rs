@@ -27,7 +27,12 @@ pub fn build_tar(
     for source in sources {
         let root = Path::new(source);
         if root.is_dir() {
-            for entry in walkdir::WalkDir::new(root).follow_links(false) {
+            // Sort for a deterministic tar across runs, so unchanged files
+            // produce identical chunks and dedup actually reuses them.
+            for entry in walkdir::WalkDir::new(root)
+                .follow_links(false)
+                .sort_by_file_name()
+            {
                 let entry = entry?;
                 let path = entry.path();
                 if excluded(path, &patterns) {
