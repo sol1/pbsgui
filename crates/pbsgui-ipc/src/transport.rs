@@ -51,6 +51,30 @@ impl Responder {
     }
 }
 
+/// On Windows, give the pipe a DACL allowing SYSTEM, Administrators, and
+/// authenticated users to connect, so the unprivileged GUI can reach the engine
+/// even when it runs as a LocalSystem service. Falls back to the default on error.
+#[cfg(windows)]
+fn with_pipe_security(options: ListenerOptions<'_>) -> ListenerOptions<'_> {
+    use interprocess::os::windows::local_socket::ListenerOptionsExt;
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    use widestring::U16CString;
+
+    // SYSTEM, Builtin Administrators, and Authenticated Users: full access.
+    const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)";
+    let wide = match U16CString::from_str(SDDL) {
+        Ok(wide) => wide,
+        Err(_) => return options,
+    };
+    match SecurityDescriptor::deserialize(&wide) {
+        Ok(sd) => options.security_descriptor(sd),
+        Err(e) => {
+            tracing::warn!("could not set pipe security descriptor: {e}");
+            options
+        }
+    }
+}
+
 /// Listen on `name` and dispatch each connection's request to `handler`.
 ///
 /// Each connection carries exactly one request; the handler streams replies via
@@ -60,7 +84,10 @@ where
     H: Fn(crate::Request, Responder) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let listener = ListenerOptions::new().name(name).create_tokio()?;
+    let options = ListenerOptions::new().name(name);
+    #[cfg(windows)]
+    let options = with_pipe_security(options);
+    let listener = options.create_tokio()?;
     loop {
         let conn = match listener.accept().await {
             Ok(conn) => conn,
