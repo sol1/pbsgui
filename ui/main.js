@@ -417,5 +417,8 @@ window.addEventListener("DOMContentLoaded", () => {
   el("restore-selected").onclick = () => doRestore(false);
   checkEngine();
   setInterval(checkEngine, 5000);
+  invoke("build_info")
+    .then((v) => (el("build-info").textContent = v))
+    .catch(() => {});
   loadJobs();
 });

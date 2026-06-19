@@ -50,6 +50,11 @@ body {
   color: var(--muted);
 }
 
+.build {
+  font-size: 11px;
+  margin-right: 12px;
+}
+
 .content {
   padding: 22px;
   max-width: 820px;

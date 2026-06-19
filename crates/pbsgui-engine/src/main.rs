@@ -80,8 +80,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Service { action } => run_service(action),
         Command::Version => {
             println!(
-                "pbsgui-engine {} ({})",
+                "pbsgui-engine {} build {} ({})",
                 env!("CARGO_PKG_VERSION"),
+                option_env!("PBSGUI_BUILD").unwrap_or("dev"),
                 std::env::consts::OS
             );
             Ok(())

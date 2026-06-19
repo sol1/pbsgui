@@ -23,6 +23,14 @@ async fn engine_status() -> bool {
     ping_once().await.unwrap_or(false)
 }
 
+/// Version + build id (commit) of this GUI, baked at build time, for display.
+#[tauri::command]
+fn build_info() -> String {
+    option_env!("PBSGUI_BUILD")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} (dev)", env!("CARGO_PKG_VERSION")))
+}
+
 /// List saved jobs.
 #[tauri::command]
 async fn list_jobs() -> Result<Vec<Job>, String> {
@@ -224,6 +232,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             engine_ping,
             engine_status,
+            build_info,
             list_jobs,
             save_job,
             delete_job,
