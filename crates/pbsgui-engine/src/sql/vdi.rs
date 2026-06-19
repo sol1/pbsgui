@@ -10,6 +10,7 @@
 //! the device handshake on real hardware. Stage 2 will replace the file sink
 //! with the PBS fixed-index uploader.
 
+#[cfg(not(windows))]
 use pbsgui_ipc::SqlAuth;
 
 /// Back up `database` over VDI, writing the native backup stream to
@@ -136,7 +137,7 @@ mod windows_impl {
         database: &str,
         output_path: &str,
     ) -> anyhow::Result<u64> {
-        let mut client = super::probe::connect(server, port, auth, password).await?;
+        let mut client = crate::sql::probe::connect(server, port, auth, password).await?;
 
         let set_name = format!("pbsgui-{}", Uuid::new_v4());
 
