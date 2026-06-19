@@ -226,24 +226,95 @@ async fn ping_once() -> Result<bool, String> {
     Ok(got_pong)
 }
 
+/// Show, restore, and focus the main window (from a tray action).
+#[cfg(windows)]
+fn show_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Build the system-tray icon with a Show/Quit menu.
+#[cfg(windows)]
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::Manager;
+
+    let show = MenuItemBuilder::with_id("show", "Show pbsgui").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
+
+    TrayIconBuilder::with_id("main")
+        .tooltip("pbsgui")
+        .icon(app.default_window_icon().cloned().expect("window icon"))
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            engine_ping,
-            engine_status,
-            build_info,
-            list_jobs,
-            save_job,
-            delete_job,
-            run_job,
-            list_snapshots,
-            list_files,
-            restore,
-            pick_destination,
-            pick_folders,
-            pick_files
-        ])
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default().invoke_handler(tauri::generate_handler![
+        engine_ping,
+        engine_status,
+        build_info,
+        list_jobs,
+        save_job,
+        delete_job,
+        run_job,
+        list_snapshots,
+        list_files,
+        restore,
+        pick_destination,
+        pick_folders,
+        pick_files
+    ]);
+
+    // On Windows, closing or minimizing tucks the window into the system tray
+    // instead of exiting; the backup service keeps running regardless.
+    #[cfg(windows)]
+    {
+        builder = builder
+            .on_window_event(|window, event| match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+                tauri::WindowEvent::Resized(_) => {
+                    if window.is_minimized().unwrap_or(false) {
+                        let _ = window.hide();
+                    }
+                }
+                _ => {}
+            })
+            .setup(|app| {
+                build_tray(app)?;
+                Ok(())
+            });
+    }
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running pbsgui");
 }

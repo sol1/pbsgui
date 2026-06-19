@@ -24,3 +24,7 @@ tracing.workspace = true
 tokio.workspace = true
 # Native file/folder picker (WinAPI on Windows, GTK on Linux for dev).
 rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+
+[target.'cfg(windows)'.dependencies]
+# Tray icon enabled only on Windows (avoids the Linux appindicator build dep).
+tauri = { version = "2", features = ["tray-icon"] }
