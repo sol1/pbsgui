@@ -518,17 +518,19 @@ impl BackupWriter {
         ensure_ok(status, &body)
     }
 
-    /// Append a batch of chunk references (cumulative end offsets) to a dynamic index.
+    /// Append a batch of chunk references to a dynamic index. `offsets` are the
+    /// chunk START offsets (the first chunk is 0); the server derives each end
+    /// offset from the chunk size, the same convention as the fixed index.
     pub async fn append_dynamic_index(
         &mut self,
         wid: u64,
         digests: &[[u8; DIGEST_LEN]],
-        end_offsets: &[u64],
+        offsets: &[u64],
     ) -> Result<()> {
         let body = serde_json::json!({
             "wid": wid,
             "digest-list": digests.iter().map(hex::encode).collect::<Vec<_>>(),
-            "offset-list": end_offsets,
+            "offset-list": offsets,
         });
         let bytes = serde_json::to_vec(&body)
             .map_err(|e| PbsError::Protocol(format!("encoding append body: {e}")))?;
@@ -728,6 +730,7 @@ pub async fn backup_dynamic_file_with_progress(
     let mut uploaded = 0u64;
 
     while let Some((digest, data)) = rx.recv().await {
+        let start_offset = end_offset;
         end_offset += data.len() as u64;
         chunks += 1;
         if known.contains(&digest) {
@@ -742,7 +745,7 @@ pub async fn backup_dynamic_file_with_progress(
         builder.push(end_offset, digest);
         on_progress(end_offset, total_bytes);
         batch_digests.push(digest);
-        batch_offsets.push(end_offset);
+        batch_offsets.push(start_offset);
         if batch_digests.len() >= APPEND_BATCH {
             writer
                 .append_dynamic_index(wid, &batch_digests, &batch_offsets)
