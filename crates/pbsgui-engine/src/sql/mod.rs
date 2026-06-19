@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod discover;
 pub mod probe;
+pub mod vdi;
 
 /// The detected deployment archetype of a SQL Server instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

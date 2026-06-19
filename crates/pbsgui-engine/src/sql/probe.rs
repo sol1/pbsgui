@@ -13,7 +13,7 @@ use tiberius::{AuthMethod, Client, Config, Row};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
-type SqlClient = Client<Compat<TcpStream>>;
+pub(crate) type SqlClient = Client<Compat<TcpStream>>;
 
 const IDENTITY_SQL: &str = "\
 SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), \
@@ -149,7 +149,7 @@ async fn ag_details(client: &mut SqlClient) -> anyhow::Result<(String, String)> 
     Ok((string_at(&row, 0), string_at(&row, 1).to_lowercase()))
 }
 
-async fn connect(
+pub(crate) async fn connect(
     server: &str,
     port: Option<u16>,
     auth: &SqlAuth,

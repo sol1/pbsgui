@@ -62,6 +62,14 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::BackupSqlToFile { .. } => {
+            let _ = responder
+                .send(&Reply::Finished {
+                    success: true,
+                    message: "backed up".into(),
+                })
+                .await;
+        }
     }
 }
 

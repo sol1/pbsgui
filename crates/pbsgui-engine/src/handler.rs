@@ -6,7 +6,7 @@ use std::sync::Arc;
 use pbs_client::api::ApiClient;
 use pbs_client::session::{ReaderClient, SessionParams};
 use pbs_client::Repository;
-use pbsgui_ipc::{FileInfo, Job, Reply, Request, Responder, SnapshotInfo};
+use pbsgui_ipc::{FileInfo, Job, Reply, Request, Responder, SnapshotInfo, SqlAuth};
 use tokio::sync::mpsc;
 
 use crate::config::unix_now;
@@ -116,7 +116,71 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
                 };
             let _ = responder.send(&reply).await;
         }
+
+        Request::BackupSqlToFile {
+            server,
+            port,
+            auth,
+            password,
+            database,
+            output_path,
+        } => {
+            backup_sql_to_file(
+                server,
+                port,
+                auth,
+                password,
+                database,
+                output_path,
+                responder,
+            )
+            .await;
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn backup_sql_to_file(
+    server: String,
+    port: Option<u16>,
+    auth: SqlAuth,
+    password: Option<String>,
+    database: String,
+    output_path: String,
+    mut responder: Responder,
+) {
+    let _ = responder
+        .send(&Reply::Accepted {
+            job_id: database.clone(),
+        })
+        .await;
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!("backing up [{database}] over VDI to {output_path}"),
+        })
+        .await;
+
+    let result = crate::sql::vdi::backup_database_to_file(
+        &server,
+        port,
+        &auth,
+        password.as_deref(),
+        &database,
+        &output_path,
+    )
+    .await;
+
+    let reply = match result {
+        Ok(bytes) => Reply::Finished {
+            success: true,
+            message: format!("backed up {bytes} bytes to {output_path}"),
+        },
+        Err(e) => Reply::Finished {
+            success: false,
+            message: e.to_string(),
+        },
+    };
+    let _ = responder.send(&reply).await;
 }
 
 /// Resolve a job, its secret, and its parsed repository.

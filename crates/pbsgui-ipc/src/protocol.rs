@@ -271,6 +271,19 @@ pub enum Request {
         #[serde(default)]
         password: Option<String>,
     },
+    /// Back up a database over VDI to a local `.bak` file (the validation step
+    /// before streaming to PBS). Streams progress; the connection must be
+    /// `sysadmin`.
+    BackupSqlToFile {
+        server: String,
+        #[serde(default)]
+        port: Option<u16>,
+        auth: SqlAuth,
+        #[serde(default)]
+        password: Option<String>,
+        database: String,
+        output_path: String,
+    },
 }
 
 /// A message from the engine to the GUI.

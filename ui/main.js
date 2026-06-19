@@ -430,6 +430,11 @@ function topologyLabel(t) {
   return "Standalone";
 }
 
+// tempdb cannot be backed up; only ONLINE user/system databases get a button.
+function canBackup(db) {
+  return db.state === "ONLINE" && db.name.toLowerCase() !== "tempdb";
+}
+
 function renderSqlDatabases(databases) {
   if (!databases || !databases.length) return '<div class="muted">no databases</div>';
   return databases
@@ -439,13 +444,30 @@ function renderSqlDatabases(databases) {
           ? ` · log wait: ${escapeHtml(db.log_reuse_wait)}`
           : "";
       const ag = db.in_availability_group ? " · in AG" : "";
+      const button = canBackup(db)
+        ? `<span class="spacer"></span><button type="button" class="sql-db-backup" data-db="${escapeHtml(db.name)}">Back up</button>`
+        : "";
       return (
         `<div class="sql-db"><span class="sql-db-name">${escapeHtml(db.name)}</span>` +
         `${recoveryBadge(db.recovery_model)}` +
-        `<span class="muted">${escapeHtml(db.state)}${ag}${wait}</span></div>`
+        `<span class="muted">${escapeHtml(db.state)}${ag}${wait}</span>${button}</div>`
       );
     })
     .join("");
+}
+
+// Back up a database over VDI to a local .bak file (validation step before PBS).
+async function backupDatabase(inst, dbName) {
+  const path = await invoke("pick_save_file", { defaultName: `${dbName}.bak` });
+  if (!path) return;
+  streamRun(`Backing up ${dbName}`, "backup_sql_to_file", {
+    server: inst.server,
+    port: inst.port ?? null,
+    auth: { kind: "integrated" },
+    password: null,
+    database: dbName,
+    outputPath: path,
+  });
 }
 
 function renderSqlInstanceCard(inst, card) {
@@ -480,6 +502,9 @@ function renderSqlInstanceCard(inst, card) {
     `</div><div class="sql-meta muted">instance: ${escapeHtml(inst.instance_name)}</div>` +
     body;
   card.querySelector(".sql-probe-btn").onclick = () => probeInstance(inst, card);
+  card.querySelectorAll(".sql-db-backup").forEach((btn) => {
+    btn.onclick = () => backupDatabase(inst, btn.dataset.db);
+  });
 }
 
 // Probe an instance with the engine's service identity (integrated auth), the

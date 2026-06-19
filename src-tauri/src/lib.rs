@@ -198,6 +198,48 @@ async fn probe_sql(
         .ok_or_else(|| "engine did not return a probe result".to_string())
 }
 
+/// Back up a SQL Server database over VDI to a local file, streaming progress.
+#[tauri::command]
+async fn backup_sql_to_file(
+    server: String,
+    port: Option<u16>,
+    auth: SqlAuth,
+    password: Option<String>,
+    database: String,
+    output_path: String,
+    on_event: Channel<Reply>,
+) -> Result<(), String> {
+    ensure_engine().await?;
+    let name = pbsgui_ipc::socket_name(DEFAULT_SOCKET).map_err(|e| e.to_string())?;
+    let request = Request::BackupSqlToFile {
+        server,
+        port,
+        auth,
+        password,
+        database,
+        output_path,
+    };
+    pbsgui_ipc::send_request(name, &request, move |reply| {
+        let _ = on_event.send(reply);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Native save-file picker (for choosing where to write a .bak).
+#[tauri::command]
+async fn pick_save_file(default_name: String) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .save_file()
+            .map(|p| p.display().to_string())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Native single-folder picker for a restore destination.
 #[tauri::command]
 async fn pick_destination() -> Option<String> {
@@ -339,6 +381,8 @@ pub fn run() {
         restore,
         discover_sql,
         probe_sql,
+        backup_sql_to_file,
+        pick_save_file,
         pick_destination,
         pick_folders,
         pick_files
