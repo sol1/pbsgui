@@ -18,6 +18,9 @@ src-tauri/target/
 # Engine binary staged as a sidecar during the Windows build (produced by CI)
 src-tauri/binaries/
 
+# Per-build version override written by the installer build (CI and local)
+/build-version.json
+
 # Tauri-generated capability/permission schemas
 src-tauri/gen/
 
