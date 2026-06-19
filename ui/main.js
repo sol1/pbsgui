@@ -8,6 +8,17 @@ let editing = null; // job being edited, or null for a new job
 let currentSources = [];
 let browseJobId = null;
 let snapshotTime = null;
+let backupIdTouched = false; // has the user edited the Backup id directly?
+
+// Derive a PBS-safe snapshot group id from a job name.
+function slug(s) {
+  const out = s
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 60);
+  return out;
+}
 
 function escapeHtml(s) {
   return String(s).replace(
@@ -139,7 +150,8 @@ function openEditor(job) {
   el("f-secret").value = "";
   el("secret-note").textContent = job ? "leave blank to keep the saved secret" : "";
   el("f-fingerprint").value = job?.destination?.fingerprint || "";
-  el("f-backup-id").value = job?.destination?.backup_id || "pbsgui-host";
+  el("f-backup-id").value = job?.destination?.backup_id || "";
+  backupIdTouched = !!job?.destination?.backup_id;
   renderSources(job?.sources || []);
   el("f-excludes").value = (job?.excludes || []).join("\n");
   const s = job?.schedule || { kind: "manual" };
@@ -189,6 +201,7 @@ async function saveJob(event) {
   event.preventDefault();
   const job = gatherJob();
   if (!job.name) return alert("Name is required");
+  if (!job.destination.backup_id) return alert("Backup id is required");
   if (!job.sources.length) return alert("Add at least one source");
   const secretVal = el("f-secret").value;
   const secret = secretVal ? secretVal : null;
@@ -382,6 +395,13 @@ window.addEventListener("DOMContentLoaded", () => {
   el("add-files").onclick = async () =>
     renderSources([...currentSources, ...(await invoke("pick_files"))]);
   el("f-schedule-kind").onchange = updateScheduleFields;
+  // Auto-fill the Backup id from the name until the user edits it directly.
+  el("f-name").addEventListener("input", () => {
+    if (!backupIdTouched) el("f-backup-id").value = slug(el("f-name").value);
+  });
+  el("f-backup-id").addEventListener("input", () => {
+    backupIdTouched = true;
+  });
   el("load-snapshots").onclick = loadSnapshots;
   el("restore-all").onclick = () => doRestore(true);
   el("restore-selected").onclick = () => doRestore(false);
