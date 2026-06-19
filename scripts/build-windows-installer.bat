@@ -1,8 +1,11 @@
 @echo off
 REM Build the full Windows installer: the engine bundled with the GUI as a sidecar.
-REM Run from the repository root: scripts\build-windows-installer.bat
+REM Can be run from anywhere; it changes to the repository root itself.
 REM Output: target\release\bundle\nsis\pbsgui_<version>_x64-setup.exe
 setlocal
+
+REM Move to the repository root (the directory above this script).
+cd /d "%~dp0.." || exit /b 1
 
 REM Stamp the build with the short commit so you can tell builds apart in-app.
 set SHORT=local
