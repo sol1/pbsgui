@@ -175,9 +175,10 @@ async fn backup_sql_to_file(
             success: true,
             message: format!("backed up {bytes} bytes to {output_path}"),
         },
+        // `{:#}` includes the full error chain (the SQL Server message lives there).
         Err(e) => Reply::Finished {
             success: false,
-            message: e.to_string(),
+            message: format!("{e:#}"),
         },
     };
     let _ = responder.send(&reply).await;

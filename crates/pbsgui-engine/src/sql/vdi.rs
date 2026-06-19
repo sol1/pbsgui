@@ -164,14 +164,21 @@ mod windows_impl {
             Err(e) => Err(e),
         };
 
-        let bytes = device_loop
+        let device_result = device_loop
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
 
-        // The BACKUP statement is the source of truth: a device-side success with a
-        // failed BACKUP still means no usable backup.
-        backup.context("BACKUP DATABASE failed")?;
-        bytes
+        // Surface whichever side failed. When BACKUP fails, the SQL Server error
+        // text (carried by the tiberius error) is the useful part; when both fail,
+        // the device-side cause (e.g. cannot write the file) is usually the root.
+        match (backup, device_result) {
+            (Ok(()), Ok(bytes)) => Ok(bytes),
+            (Err(sql), Ok(_)) => Err(anyhow::anyhow!("BACKUP DATABASE failed: {sql}")),
+            (Ok(()), Err(device)) => Err(device),
+            (Err(sql), Err(device)) => Err(anyhow::anyhow!(
+                "BACKUP DATABASE failed: {sql}; device side: {device:#}"
+            )),
+        }
     }
 
     /// Run the full COM device-set lifecycle on the current (blocking) thread,
@@ -245,6 +252,9 @@ mod windows_impl {
             .context("VDI OpenDevice failed")?;
         let device = unsafe { IClientVirtualDevice::from_raw(device_ptr) };
 
+        if let Some(parent) = std::path::Path::new(output_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let mut file = File::create(output_path)
             .with_context(|| format!("creating backup file {output_path}"))?;
         let mut total: u64 = 0;
