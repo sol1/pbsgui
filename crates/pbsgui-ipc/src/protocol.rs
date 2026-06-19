@@ -255,6 +255,17 @@ pub enum Request {
         #[serde(default)]
         targets: Vec<String>,
     },
+    /// Connect to one instance and report its version, topology, and databases.
+    /// `password` is required for SQL and explicit-Windows logins; `Integrated`
+    /// uses the engine's service identity and needs none.
+    ProbeSql {
+        server: String,
+        #[serde(default)]
+        port: Option<u16>,
+        auth: SqlAuth,
+        #[serde(default)]
+        password: Option<String>,
+    },
 }
 
 /// A message from the engine to the GUI.
@@ -275,6 +286,8 @@ pub enum Reply {
     Files { files: Vec<FileInfo> },
     /// Reply to [`Request::DiscoverSql`].
     SqlInstances { instances: Vec<SqlInstance> },
+    /// Reply to [`Request::ProbeSql`].
+    SqlProbe { probe: SqlProbe },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -299,6 +312,7 @@ impl Reply {
                 | Reply::Snapshots { .. }
                 | Reply::Files { .. }
                 | Reply::SqlInstances { .. }
+                | Reply::SqlProbe { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )

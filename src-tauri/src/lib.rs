@@ -7,7 +7,9 @@
 //! serve` in development) - it does not start the engine itself, so closing the
 //! GUI never stops backups.
 
-use pbsgui_ipc::{FileInfo, Job, Reply, Request, SnapshotInfo, SqlInstance, DEFAULT_SOCKET};
+use pbsgui_ipc::{
+    FileInfo, Job, Reply, Request, SnapshotInfo, SqlAuth, SqlInstance, SqlProbe, DEFAULT_SOCKET,
+};
 use tauri::ipc::Channel;
 
 /// Check the engine/service is reachable (used by the Test button).
@@ -169,6 +171,33 @@ async fn discover_sql(
         .ok_or_else(|| "engine did not return SQL instances".to_string())
 }
 
+/// Connect to one instance and report its version, topology, and databases.
+#[tauri::command]
+async fn probe_sql(
+    server: String,
+    port: Option<u16>,
+    auth: SqlAuth,
+    password: Option<String>,
+) -> Result<SqlProbe, String> {
+    let replies = request_all(Request::ProbeSql {
+        server,
+        port,
+        auth,
+        password,
+    })
+    .await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::SqlProbe { probe } => Some(probe),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return a probe result".to_string())
+}
+
 /// Native single-folder picker for a restore destination.
 #[tauri::command]
 async fn pick_destination() -> Option<String> {
@@ -309,6 +338,7 @@ pub fn run() {
         list_files,
         restore,
         discover_sql,
+        probe_sql,
         pick_destination,
         pick_folders,
         pick_files

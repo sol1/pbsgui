@@ -448,6 +448,56 @@ function renderSqlDatabases(databases) {
     .join("");
 }
 
+function renderSqlInstanceCard(inst, card) {
+  const badges = [`<span class="badge">${escapeHtml(sourceLabel[inst.source] || inst.source)}</span>`];
+  if (inst.port) badges.push(`<span class="badge">tcp ${inst.port}</span>`);
+  const auth = authModeLabel[inst.auth_mode];
+  if (auth) badges.push(`<span class="badge">${escapeHtml(auth)}</span>`);
+  if (inst.clustered) badges.push('<span class="badge">clustered</span>');
+
+  let body;
+  if (inst.probe) {
+    body =
+      `<div class="sql-meta muted">${escapeHtml(topologyLabel(inst.probe.topology))} · ` +
+      `${escapeHtml(inst.probe.edition)} · ${escapeHtml(inst.probe.product_version)}</div>` +
+      `<div class="sql-dbs">${renderSqlDatabases(inst.probe.databases)}</div>`;
+  } else if (inst.probe_error) {
+    body = `<div class="sql-meta placeholder">unreachable: ${escapeHtml(inst.probe_error)}</div>`;
+  } else {
+    body = '<div class="sql-meta muted">not yet probed</div>';
+  }
+
+  card.innerHTML =
+    `<div class="sql-head"><span class="sql-server">${escapeHtml(inst.server)}</span>` +
+    badges.join("") +
+    '<span class="spacer"></span>' +
+    `<button type="button" class="sql-probe-btn">${inst.probe ? "Re-probe" : "Probe"}</button>` +
+    `</div><div class="sql-meta muted">instance: ${escapeHtml(inst.instance_name)}</div>` +
+    body;
+  card.querySelector(".sql-probe-btn").onclick = () => probeInstance(inst, card);
+}
+
+// Probe an instance with the engine's service identity (integrated auth), the
+// common on-host case. Credentialed connect (SQL / explicit Windows) follows.
+async function probeInstance(inst, card) {
+  const btn = card.querySelector(".sql-probe-btn");
+  btn.disabled = true;
+  btn.textContent = "probing...";
+  try {
+    inst.probe = await invoke("probe_sql", {
+      server: inst.server,
+      port: inst.port ?? null,
+      auth: { kind: "integrated" },
+      password: null,
+    });
+    inst.probe_error = null;
+  } catch (err) {
+    inst.probe_error = String(err);
+    inst.probe = null;
+  }
+  renderSqlInstanceCard(inst, card);
+}
+
 function renderSqlInstances(instances) {
   const list = el("sql-list");
   list.innerHTML = "";
@@ -458,29 +508,7 @@ function renderSqlInstances(instances) {
   for (const inst of instances) {
     const card = document.createElement("div");
     card.className = "sql-instance";
-    const badges = [`<span class="badge">${escapeHtml(sourceLabel[inst.source] || inst.source)}</span>`];
-    if (inst.port) badges.push(`<span class="badge">tcp ${inst.port}</span>`);
-    const auth = authModeLabel[inst.auth_mode];
-    if (auth) badges.push(`<span class="badge">${escapeHtml(auth)}</span>`);
-    if (inst.clustered) badges.push('<span class="badge">clustered</span>');
-
-    let body;
-    if (inst.probe) {
-      body =
-        `<div class="sql-meta muted">${escapeHtml(topologyLabel(inst.probe.topology))} · ` +
-        `${escapeHtml(inst.probe.edition)} · ${escapeHtml(inst.probe.product_version)}</div>` +
-        `<div class="sql-dbs">${renderSqlDatabases(inst.probe.databases)}</div>`;
-    } else if (inst.probe_error) {
-      body = `<div class="sql-meta placeholder">unreachable: ${escapeHtml(inst.probe_error)}</div>`;
-    } else {
-      body = '<div class="sql-meta muted">not yet probed</div>';
-    }
-
-    card.innerHTML =
-      `<div class="sql-head"><span class="sql-server">${escapeHtml(inst.server)}</span>` +
-      badges.join("") +
-      `</div><div class="sql-meta muted">instance: ${escapeHtml(inst.instance_name)}</div>` +
-      body;
+    renderSqlInstanceCard(inst, card);
     list.append(card);
   }
 }

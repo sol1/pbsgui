@@ -28,6 +28,15 @@ walkdir = "2"
 glob = "0.3"
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# TDS client for SQL Server: identity/topology/database queries (the probe step)
+# and, later, issuing BACKUP ... TO VIRTUAL_DEVICE. rustls TLS to match pbs-client.
+tiberius = { version = "0.12", default-features = false, features = [
+    "tds73",
+    "rustls",
+    "sql-browser-tokio",
+] }
+# Adapts a tokio TcpStream to the futures-io traits tiberius expects.
+tokio-util = { version = "0.7", features = ["compat"] }
 
 [target.'cfg(windows)'.dependencies]
 # Secrets in the Windows Credential Manager.
@@ -36,6 +45,8 @@ keyring = { version = "3", features = ["windows-native"] }
 windows-service = "0.7"
 # Read SQL Server instance names, ports, and login mode from the registry.
 winreg = "0.52"
+# Windows integrated authentication (SSPI/NTLM) for SQL Server connections.
+tiberius = { version = "0.12", default-features = false, features = ["winauth"] }
 # Enabled as the SQL/VSS modules are implemented:
 #   windows  COM bindings for SQLVDI.dll (VDI streaming) and VSS
 # windows = { version = "0.58", features = ["Win32_System_Com", "Win32_Storage_Vss"] }

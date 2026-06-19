@@ -100,6 +100,22 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             let instances = crate::sql::discover::discover(include_network, targets).await;
             let _ = responder.send(&Reply::SqlInstances { instances }).await;
         }
+
+        Request::ProbeSql {
+            server,
+            port,
+            auth,
+            password,
+        } => {
+            let reply =
+                match crate::sql::probe::probe(&server, port, &auth, password.as_deref()).await {
+                    Ok(probe) => Reply::SqlProbe { probe },
+                    Err(e) => Reply::Error {
+                        message: e.to_string(),
+                    },
+                };
+            let _ = responder.send(&reply).await;
+        }
     }
 }
 

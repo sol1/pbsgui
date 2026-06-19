@@ -55,6 +55,13 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 .send(&Reply::SqlInstances { instances: vec![] })
                 .await;
         }
+        Request::ProbeSql { .. } => {
+            let _ = responder
+                .send(&Reply::Error {
+                    message: "probe not supported in loopback test".into(),
+                })
+                .await;
+        }
     }
 }
 
