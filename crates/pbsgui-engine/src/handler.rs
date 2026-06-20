@@ -6,7 +6,7 @@ use std::sync::Arc;
 use pbs_client::api::ApiClient;
 use pbs_client::session::{ReaderClient, SessionParams};
 use pbs_client::Repository;
-use pbsgui_ipc::{FileInfo, Job, Reply, Request, Responder, SnapshotInfo, SqlAuth};
+use pbsgui_ipc::{FileInfo, Reply, Request, Responder, SnapshotInfo, SqlAuth};
 use tokio::sync::mpsc;
 
 use crate::config::unix_now;
@@ -31,32 +31,13 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             let _ = responder.send(&Reply::Jobs { jobs: store.list() }).await;
         }
 
-        Request::SaveJob { job, secret } => {
+        Request::SaveJob { job } => {
             let id = job.id.clone();
-            let result = (|| -> anyhow::Result<()> {
-                if let Some(secret) = secret {
-                    secrets::set(&id, &secret)?;
-                }
-                store.save_job(job)
-            })();
-            let reply = match result {
-                Ok(()) => Reply::Saved { id },
-                Err(e) => Reply::Error {
-                    message: e.to_string(),
-                },
-            };
-            let _ = responder.send(&reply).await;
+            let _ = responder.send(&saved_reply(id, store.save_job(job))).await;
         }
 
         Request::DeleteJob { id } => {
-            let _ = secrets::delete(&id);
-            let reply = match store.delete(&id) {
-                Ok(()) => Reply::Deleted,
-                Err(e) => Reply::Error {
-                    message: e.to_string(),
-                },
-            };
-            let _ = responder.send(&reply).await;
+            let _ = responder.send(&deleted_reply(store.delete(&id))).await;
         }
 
         Request::RunJob { id } => {
@@ -375,22 +356,50 @@ async fn backup_sql_to_file(
     let _ = responder.send(&reply).await;
 }
 
-/// Resolve a job, its secret, and its parsed repository.
-fn job_context(store: &JobStore, job_id: &str) -> anyhow::Result<(Job, String, Repository)> {
+/// The PBS connection details for browsing/restoring a job's snapshots.
+/// Browse and restore currently support file backups to a PBS server.
+struct PbsContext {
+    repo: Repository,
+    secret: String,
+    fingerprint: String,
+    backup_id: String,
+}
+
+fn job_pbs_context(store: &JobStore, job_id: &str) -> anyhow::Result<PbsContext> {
     let job = store
         .get(job_id)
         .ok_or_else(|| anyhow::anyhow!("no such job: {job_id}"))?;
-    let secret =
-        secrets::get(job_id)?.ok_or_else(|| anyhow::anyhow!("no saved credential for this job"))?;
-    let repo: Repository = job.destination.repository.parse()?;
-    Ok((job, secret, repo))
+    if !matches!(job.source, pbsgui_ipc::JobSource::Files { .. }) {
+        anyhow::bail!("browsing and restore are only available for file backups for now");
+    }
+    let (server_id, backup_id) = match &job.destination {
+        pbsgui_ipc::JobDestination::Pbs {
+            server_id,
+            backup_id,
+        } => (server_id.clone(), backup_id.clone()),
+        pbsgui_ipc::JobDestination::Folder { .. } => {
+            anyhow::bail!("this job backs up to a folder, not PBS")
+        }
+    };
+    let server = connstore::pbs_servers()
+        .get(&server_id)
+        .ok_or_else(|| anyhow::anyhow!("the job's PBS server no longer exists"))?;
+    let secret = secrets::get(&connstore::pbs_secret_key(&server_id))?
+        .ok_or_else(|| anyhow::anyhow!("no saved secret for the PBS server"))?;
+    let repo: Repository = server.repository.parse()?;
+    Ok(PbsContext {
+        repo,
+        secret,
+        fingerprint: server.fingerprint,
+        backup_id,
+    })
 }
 
 async fn list_snapshots(store: &JobStore, job_id: &str) -> anyhow::Result<Vec<SnapshotInfo>> {
-    let (job, secret, repo) = job_context(store, job_id)?;
-    let api = ApiClient::from_repository(&repo, secret, &job.destination.fingerprint)?;
+    let ctx = job_pbs_context(store, job_id)?;
+    let api = ApiClient::from_repository(&ctx.repo, ctx.secret, &ctx.fingerprint)?;
     let snapshots = api
-        .list_snapshots(&repo.datastore, BACKUP_TYPE, &job.destination.backup_id)
+        .list_snapshots(&ctx.repo.datastore, BACKUP_TYPE, &ctx.backup_id)
         .await?;
     Ok(snapshots
         .into_iter()
@@ -406,13 +415,13 @@ async fn list_files(
     job_id: &str,
     backup_time: i64,
 ) -> anyhow::Result<Vec<FileInfo>> {
-    let (job, secret, repo) = job_context(store, job_id)?;
+    let ctx = job_pbs_context(store, job_id)?;
     let params = SessionParams::from_repository(
-        &repo,
-        secret,
-        &job.destination.fingerprint,
+        &ctx.repo,
+        ctx.secret,
+        &ctx.fingerprint,
         BACKUP_TYPE,
-        &job.destination.backup_id,
+        &ctx.backup_id,
         backup_time,
     )?;
     let mut reader = ReaderClient::connect(&params).await?;
@@ -435,7 +444,7 @@ async fn restore_job(
     destination: String,
     mut responder: Responder,
 ) {
-    let (job, secret, repo) = match job_context(&store, &job_id) {
+    let ctx = match job_pbs_context(&store, &job_id) {
         Ok(ctx) => ctx,
         Err(e) => {
             let _ = responder
@@ -453,16 +462,7 @@ async fn restore_job(
         })
         .await;
 
-    let result = run_restore(
-        &job,
-        &secret,
-        &repo,
-        backup_time,
-        files,
-        &destination,
-        &mut responder,
-    )
-    .await;
+    let result = run_restore(&ctx, backup_time, files, &destination, &mut responder).await;
     let reply = match result {
         Ok(message) => Reply::Finished {
             success: true,
@@ -476,22 +476,19 @@ async fn restore_job(
     let _ = responder.send(&reply).await;
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_restore(
-    job: &Job,
-    secret: &str,
-    repo: &Repository,
+    ctx: &PbsContext,
     backup_time: i64,
     files: Option<Vec<String>>,
     destination: &str,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
     let params = SessionParams::from_repository(
-        repo,
-        secret,
-        &job.destination.fingerprint,
+        &ctx.repo,
+        ctx.secret.clone(),
+        &ctx.fingerprint,
         BACKUP_TYPE,
-        &job.destination.backup_id,
+        &ctx.backup_id,
         backup_time,
     )?;
 
@@ -546,25 +543,6 @@ async fn run_job(store: Arc<JobStore>, id: String, mut responder: Responder) {
             .await;
         return;
     };
-    let secret = match secrets::get(&id) {
-        Ok(Some(secret)) => secret,
-        Ok(None) => {
-            let _ = responder
-                .send(&Reply::Error {
-                    message: "no saved credential for this job".to_string(),
-                })
-                .await;
-            return;
-        }
-        Err(e) => {
-            let _ = responder
-                .send(&Reply::Error {
-                    message: e.to_string(),
-                })
-                .await;
-            return;
-        }
-    };
 
     let _ = responder
         .send(&Reply::Accepted { job_id: id.clone() })
@@ -572,7 +550,7 @@ async fn run_job(store: Arc<JobStore>, id: String, mut responder: Responder) {
 
     let (tx, mut rx) = mpsc::channel::<Reply>(64);
     let job_for_run = job.clone();
-    let run = tokio::spawn(async move { backup::run_job(&job_for_run, &secret, tx).await });
+    let run = tokio::spawn(async move { backup::run_job(&job_for_run, tx).await });
 
     while let Some(reply) = rx.recv().await {
         if responder.send(&reply).await.is_err() {

@@ -10,9 +10,9 @@ use chrono::{Local, Timelike};
 use pbsgui_ipc::{Job, Reply, Schedule};
 use tokio::sync::mpsc;
 
+use crate::backup;
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
-use crate::{backup, secrets};
 
 /// Check every minute and run any due jobs.
 pub async fn run(store: Arc<JobStore>) {
@@ -24,25 +24,16 @@ pub async fn run(store: Arc<JobStore>) {
             if !is_due(&job, now) {
                 continue;
             }
-            run_due(&store, job, now).await;
+            run_due(&store, job).await;
         }
     }
 }
 
-async fn run_due(store: &Arc<JobStore>, job: Job, now: i64) {
-    let secret = match secrets::get(&job.id) {
-        Ok(Some(secret)) => secret,
-        _ => {
-            tracing::warn!(job = %job.id, "scheduled job has no stored credential; skipping");
-            let _ = store.record_run(&job.id, now, "no stored credential".to_string());
-            return;
-        }
-    };
-
+async fn run_due(store: &Arc<JobStore>, job: Job) {
     tracing::info!(job = %job.name, "running scheduled job");
     let (tx, mut rx) = mpsc::channel::<Reply>(64);
     let job_for_run = job.clone();
-    let handle = tokio::spawn(async move { backup::run_job(&job_for_run, &secret, tx).await });
+    let handle = tokio::spawn(async move { backup::run_job(&job_for_run, tx).await });
 
     while let Some(reply) = rx.recv().await {
         if let Reply::Log { line } = reply {
@@ -92,21 +83,22 @@ fn today_scheduled_unix(hour: u8, minute: u8) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pbsgui_ipc::PbsDestination;
+    use pbsgui_ipc::{JobDestination, JobSource};
 
     fn job_with(schedule: Schedule, last_run: Option<i64>) -> Job {
         Job {
             id: "j".into(),
             name: "j".into(),
-            destination: PbsDestination {
-                repository: "u@pbs!t@host:8007:store".into(),
-                fingerprint: "ab".repeat(32),
+            source: JobSource::Files {
+                sources: vec!["/data".into()],
+                excludes: vec![],
+                change_detection: false,
+            },
+            destination: JobDestination::Pbs {
+                server_id: "s".into(),
                 backup_id: "host".into(),
             },
-            sources: vec!["/data".into()],
-            excludes: vec![],
             schedule,
-            change_detection: false,
             pre_script: None,
             post_script: None,
             last_run,

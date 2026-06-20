@@ -9,6 +9,8 @@ let currentSources = [];
 let browseJobId = null;
 let snapshotTime = null;
 let backupIdTouched = false; // has the user edited the Backup id directly?
+let wizStep = 0; // current job-wizard step
+let sqlConnCache = []; // saved SQL connections, for the wizard's source step
 
 // Derive a PBS-safe snapshot group id from a job name.
 function slug(s) {
@@ -60,6 +62,22 @@ function scheduleSummary(s) {
   return "manual";
 }
 
+function sourceSummary(job) {
+  const s = job.source || {};
+  if (s.type === "sql") return `SQL: ${(s.databases || []).length} db(s)`;
+  return `Files: ${(s.sources || []).length} source(s)`;
+}
+
+function destSummary(job) {
+  const d = job.destination || {};
+  return d.type === "folder" ? `folder ${d.path}` : "PBS";
+}
+
+// Browse/restore currently supports file backups to PBS.
+function isBrowsable(job) {
+  return job.source?.type === "files" && job.destination?.type === "pbs";
+}
+
 function showView(which) {
   el("jobs-view").classList.toggle("hidden", which !== "jobs");
   el("editor").classList.toggle("hidden", which !== "editor");
@@ -106,8 +124,8 @@ async function loadJobs() {
     main.className = "job-main";
     main.innerHTML =
       `<div class="job-name">${escapeHtml(job.name)}</div>` +
-      `<div class="job-meta">${escapeHtml(scheduleSummary(job.schedule))} · ` +
-      `${job.sources.length} source(s) · last: ${escapeHtml(last)}${escapeHtml(status)}</div>`;
+      `<div class="job-meta">${escapeHtml(sourceSummary(job))} → ${escapeHtml(destSummary(job))} · ` +
+      `${escapeHtml(scheduleSummary(job.schedule))} · last: ${escapeHtml(last)}${escapeHtml(status)}</div>`;
     const actions = document.createElement("div");
     actions.className = "job-actions";
     actions.append(
@@ -150,18 +168,134 @@ function updateScheduleFields() {
   el("daily-fields").classList.toggle("hidden", k !== "daily");
 }
 
-function openEditor(job) {
+const WIZ_STEPS = ["source", "dest", "schedule"];
+
+function showWizStep(n) {
+  wizStep = Math.max(0, Math.min(n, WIZ_STEPS.length - 1));
+  WIZ_STEPS.forEach((name, i) => {
+    el(`wiz-step-${name}`).classList.toggle("hidden", i !== wizStep);
+    el(`wiz-tab-${name}`).classList.toggle("wiz-active", i === wizStep);
+  });
+  el("wiz-back").disabled = wizStep === 0;
+  const last = wizStep === WIZ_STEPS.length - 1;
+  el("wiz-next").classList.toggle("hidden", last);
+  el("wiz-save").classList.toggle("hidden", !last);
+}
+
+function updateSourceType() {
+  const sql = el("f-source-type").value === "sql";
+  el("src-sql").classList.toggle("hidden", !sql);
+  el("src-files").classList.toggle("hidden", sql);
+}
+
+function updateDestType() {
+  const folder = el("f-dest-type").value === "folder";
+  el("dest-folder").classList.toggle("hidden", !folder);
+  el("dest-pbs").classList.toggle("hidden", folder);
+}
+
+function renderDbCheckboxes(databases, checked) {
+  const checkedSet = new Set(checked || []);
+  const c = el("sql-db-pick");
+  if (!databases.length) {
+    c.innerHTML = '<div class="muted">no databases</div>';
+    return;
+  }
+  c.innerHTML = "";
+  for (const name of databases) {
+    const row = document.createElement("label");
+    row.className = "file-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = name;
+    cb.checked = checkedSet.has(name);
+    const span = document.createElement("span");
+    span.textContent = name;
+    row.append(cb, span);
+    c.append(row);
+  }
+}
+
+async function loadDatabasesForConn() {
+  const conn = sqlConnCache.find((c) => c.id === el("f-sql-conn").value);
+  if (!conn) return alert("Pick a SQL connection first.");
+  const checked = Array.from(el("sql-db-pick").querySelectorAll("input:checked")).map((c) => c.value);
+  el("sql-db-pick").innerHTML = loadingHtml("loading databases...");
+  try {
+    const probe = await invoke("probe_sql", {
+      server: conn.server,
+      port: conn.port ?? null,
+      auth: conn.auth,
+      password: null,
+    });
+    renderDbCheckboxes(
+      probe.databases.map((d) => d.name),
+      checked,
+    );
+  } catch (err) {
+    el("sql-db-pick").innerHTML = `<div class="placeholder">could not load databases: ${escapeHtml(err)}</div>`;
+  }
+}
+
+async function populateJobPickers(job) {
+  try {
+    sqlConnCache = await invoke("list_sql_connections");
+  } catch (err) {
+    sqlConnCache = [];
+  }
+  const connSel = el("f-sql-conn");
+  connSel.innerHTML = "";
+  for (const c of sqlConnCache) {
+    const o = document.createElement("option");
+    o.value = c.id;
+    o.textContent = `${c.name} (${c.server})`;
+    connSel.append(o);
+  }
+  let servers = [];
+  try {
+    servers = await invoke("list_pbs_servers");
+  } catch (err) {
+    /* engine offline */
+  }
+  const pbsSel = el("f-pbs-server");
+  pbsSel.innerHTML = "";
+  for (const s of servers) {
+    const o = document.createElement("option");
+    o.value = s.id;
+    o.textContent = `${s.name} (${s.repository})`;
+    pbsSel.append(o);
+  }
+  if (job?.source?.type === "sql" && job.source.connection_id) connSel.value = job.source.connection_id;
+  if (job?.destination?.type === "pbs" && job.destination.server_id) {
+    pbsSel.value = job.destination.server_id;
+  }
+}
+
+async function openEditor(job) {
   editing = job || null;
   el("editor-title").textContent = job ? "Edit job" : "New job";
   el("f-name").value = job?.name || "";
-  el("f-repository").value = job?.destination?.repository || "";
-  el("f-secret").value = "";
-  el("secret-note").textContent = job ? "leave blank to keep the saved secret" : "";
-  el("f-fingerprint").value = job?.destination?.fingerprint || "";
-  el("f-backup-id").value = job?.destination?.backup_id || "";
-  backupIdTouched = !!job?.destination?.backup_id;
-  renderSources(job?.sources || []);
-  el("f-excludes").value = (job?.excludes || []).join("\n");
+  await populateJobPickers(job);
+
+  const source = job?.source || { type: "files" };
+  el("f-source-type").value = source.type;
+  renderSources(source.type === "files" ? source.sources || [] : []);
+  el("f-excludes").value = (source.type === "files" ? source.excludes || [] : []).join("\n");
+  el("f-change-detection").checked = source.type === "files" ? !!source.change_detection : false;
+  if (source.type === "sql") {
+    renderDbCheckboxes(source.databases || [], source.databases || []);
+  } else {
+    el("sql-db-pick").innerHTML = '<div class="muted">Pick a connection and load its databases.</div>';
+  }
+  updateSourceType();
+
+  const dest = job?.destination || { type: "pbs" };
+  el("f-dest-type").value = dest.type;
+  el("f-backup-id").value = dest.type === "pbs" ? dest.backup_id || "" : "";
+  el("f-folder").value = dest.type === "folder" ? dest.path || "" : "";
+  backupIdTouched = !!(dest.type === "pbs" && dest.backup_id);
+  updateDestType();
+
   const s = job?.schedule || { kind: "manual" };
   el("f-schedule-kind").value = s.kind;
   el("f-interval").value = s.kind === "interval" ? s.minutes : 60;
@@ -169,10 +303,10 @@ function openEditor(job) {
     s.kind === "daily"
       ? `${String(s.hour).padStart(2, "0")}:${String(s.minute).padStart(2, "0")}`
       : "02:00";
-  el("f-change-detection").checked = !!job?.change_detection;
   el("f-pre-script").value = job?.pre_script || "";
   el("f-post-script").value = job?.post_script || "";
   updateScheduleFields();
+  showWizStep(0);
   showView("editor");
 }
 
@@ -188,22 +322,42 @@ function gatherSchedule() {
   return { kind: "manual" };
 }
 
-function gatherJob() {
+function gatherSource() {
+  if (el("f-source-type").value === "sql") {
+    const databases = Array.from(el("sql-db-pick").querySelectorAll("input:checked")).map((c) => c.value);
+    return {
+      type: "sql",
+      connection_id: el("f-sql-conn").value,
+      databases,
+      backup_type: "full",
+      copy_only: true,
+    };
+  }
   return {
-    id: editing?.id || crypto.randomUUID(),
-    name: el("f-name").value.trim(),
-    destination: {
-      repository: el("f-repository").value.trim(),
-      fingerprint: el("f-fingerprint").value.trim(),
-      backup_id: el("f-backup-id").value.trim(),
-    },
+    type: "files",
     sources: currentSources,
     excludes: el("f-excludes")
       .value.split("\n")
       .map((s) => s.trim())
       .filter(Boolean),
-    schedule: gatherSchedule(),
     change_detection: el("f-change-detection").checked,
+  };
+}
+
+function gatherDestination() {
+  if (el("f-dest-type").value === "folder") {
+    return { type: "folder", path: el("f-folder").value.trim() };
+  }
+  return { type: "pbs", server_id: el("f-pbs-server").value, backup_id: el("f-backup-id").value.trim() };
+}
+
+function gatherJob() {
+  return {
+    id: editing?.id || crypto.randomUUID(),
+    name: el("f-name").value.trim(),
+    source: gatherSource(),
+    destination: gatherDestination(),
+    schedule: gatherSchedule(),
     pre_script: el("f-pre-script").value.trim() || null,
     post_script: el("f-post-script").value.trim() || null,
     last_run: editing?.last_run ?? null,
@@ -211,17 +365,27 @@ function gatherJob() {
   };
 }
 
-async function saveJob(event) {
-  event.preventDefault();
+async function saveJob() {
   const job = gatherJob();
   if (!job.name) return alert("Name is required");
-  if (!job.destination.backup_id) return alert("Backup id is required");
-  if (!job.sources.length) return alert("Add at least one source");
-  const secretVal = el("f-secret").value;
-  const secret = secretVal ? secretVal : null;
-  if (!editing && !secret) return alert("A token secret is required for a new job");
+  if (job.source.type === "files" && !job.source.sources.length) {
+    return alert("Add at least one source");
+  }
+  if (job.source.type === "sql") {
+    if (!job.source.connection_id) return alert("Pick a SQL connection");
+    if (!job.source.databases.length) return alert("Select at least one database");
+  }
+  if (job.destination.type === "pbs") {
+    if (!job.destination.server_id) return alert("Pick a PBS server (add one in the PBS servers tab)");
+    if (!job.destination.backup_id) return alert("Backup id is required");
+  } else if (!job.destination.path) {
+    return alert("Folder path is required");
+  }
+  if (job.source.type === "files" && job.destination.type === "folder") {
+    return alert("Backing up files to a folder is not supported yet; choose PBS.");
+  }
   try {
-    await invoke("save_job", { job, secret });
+    await invoke("save_job", { job });
   } catch (err) {
     return alert("save failed: " + err);
   }
@@ -304,7 +468,7 @@ async function populateBrowseJobs() {
   }
   const sel = el("browse-job");
   sel.innerHTML = "";
-  for (const job of jobs) {
+  for (const job of jobs.filter(isBrowsable)) {
     const opt = document.createElement("option");
     opt.value = job.id;
     opt.textContent = job.name;
@@ -812,8 +976,17 @@ window.addEventListener("DOMContentLoaded", () => {
   el("pbs-form").addEventListener("submit", savePbsServer);
   el("pbs-clear").onclick = resetPbsForm;
   el("new-job").onclick = () => openEditor(null);
-  el("job-form").addEventListener("submit", saveJob);
   el("cancel-edit").onclick = () => showView("jobs");
+  el("wiz-next").onclick = () => showWizStep(wizStep + 1);
+  el("wiz-back").onclick = () => showWizStep(wizStep - 1);
+  el("wiz-save").onclick = saveJob;
+  el("f-source-type").onchange = updateSourceType;
+  el("f-dest-type").onchange = updateDestType;
+  el("load-dbs").onclick = loadDatabasesForConn;
+  el("pick-folder").onclick = async () => {
+    const dir = await invoke("pick_destination");
+    if (dir) el("f-folder").value = dir;
+  };
   el("add-folders").onclick = async () =>
     renderSources([...currentSources, ...(await invoke("pick_folders"))]);
   el("add-files").onclick = async () =>

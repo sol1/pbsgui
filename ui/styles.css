@@ -394,6 +394,18 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Job wizard */
+.wiz-steps {
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.wiz-active {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 /* SQL Servers */
 .badge {
   display: inline-block;

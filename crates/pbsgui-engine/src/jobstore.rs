@@ -90,21 +90,22 @@ impl JobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pbsgui_ipc::{PbsDestination, Schedule};
+    use pbsgui_ipc::{JobDestination, JobSource, Schedule};
 
     fn job(id: &str) -> Job {
         Job {
             id: id.into(),
             name: format!("job {id}"),
-            destination: PbsDestination {
-                repository: "u@pbs!t@host:8007:store".into(),
-                fingerprint: "ab".repeat(32),
+            source: JobSource::Files {
+                sources: vec!["/data".into()],
+                excludes: vec![],
+                change_detection: false,
+            },
+            destination: JobDestination::Pbs {
+                server_id: "s".into(),
                 backup_id: "host".into(),
             },
-            sources: vec!["/data".into()],
-            excludes: vec![],
             schedule: Schedule::Manual,
-            change_detection: false,
             pre_script: None,
             post_script: None,
             last_run: None,

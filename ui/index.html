@@ -30,42 +30,85 @@
         <div id="jobs-list"></div>
       </section>
 
-      <!-- Job editor -->
+      <!-- Job editor (3-step wizard) -->
       <section id="editor" class="hidden">
         <h2 id="editor-title">New job</h2>
-        <form id="job-form" autocomplete="off">
+        <div class="wiz-steps muted">
+          <span id="wiz-tab-source">1. Source</span> &rsaquo;
+          <span id="wiz-tab-dest">2. Destination</span> &rsaquo;
+          <span id="wiz-tab-schedule">3. Schedule</span>
+        </div>
+
+        <!-- Step 1: Source -->
+        <div id="wiz-step-source" class="wiz-step">
           <label>Name
-            <input id="f-name" type="text" required placeholder="Daily documents" />
+            <input id="f-name" type="text" required placeholder="Nightly SQL" />
           </label>
-          <label>Repository
-            <input id="f-repository" type="text" required
-                   placeholder="user@pbs!token@host:8007:datastore" />
+          <label>What to back up
+            <select id="f-source-type">
+              <option value="files">Files and folders</option>
+              <option value="sql">SQL Server databases</option>
+            </select>
           </label>
-          <label>API token secret
-            <input id="f-secret" type="password" placeholder="token secret" />
-            <span id="secret-note" class="muted"></span>
-          </label>
-          <div class="row">
-            <label>Server fingerprint (SHA-256)
-              <input id="f-fingerprint" type="text" required placeholder="AA:BB:..:FF" />
+
+          <div id="src-files">
+            <div class="sources-head">
+              <span>Sources</span>
+              <span class="spacer"></span>
+              <button id="add-folders" type="button">Add folder</button>
+              <button id="add-files" type="button">Add files</button>
+            </div>
+            <div id="sources"></div>
+            <label>Excludes (glob, one per line)
+              <textarea id="f-excludes" rows="3" placeholder="*.tmp"></textarea>
             </label>
-            <label>Backup id (snapshot group, unique per job)
-              <input id="f-backup-id" type="text" required placeholder="auto from name" />
+            <label class="check">
+              <input type="checkbox" id="f-change-detection" />
+              Skip the run if no source file changed since last time
             </label>
           </div>
 
-          <div class="sources-head">
-            <span>Sources</span>
-            <span class="spacer"></span>
-            <button id="add-folders" type="button">Add folder</button>
-            <button id="add-files" type="button">Add files</button>
+          <div id="src-sql" class="hidden">
+            <label>SQL connection
+              <select id="f-sql-conn"></select>
+            </label>
+            <button id="load-dbs" type="button">Load databases</button>
+            <div id="sql-db-pick"><div class="muted">Pick a connection and load its databases.</div></div>
+            <p class="help muted">Backs up the selected databases as full, copy-only backups.</p>
           </div>
-          <div id="sources"></div>
+        </div>
 
-          <label>Excludes (glob, one per line)
-            <textarea id="f-excludes" rows="3" placeholder="*.tmp"></textarea>
+        <!-- Step 2: Destination -->
+        <div id="wiz-step-dest" class="wiz-step hidden">
+          <label>Send the backup to
+            <select id="f-dest-type">
+              <option value="pbs">Proxmox Backup Server</option>
+              <option value="folder">Folder</option>
+            </select>
           </label>
+          <div id="dest-pbs">
+            <label>PBS server
+              <select id="f-pbs-server"></select>
+              <span class="help muted">Manage servers in the PBS servers tab.</span>
+            </label>
+            <label>Backup id (snapshot group)
+              <input id="f-backup-id" type="text" placeholder="auto from name" />
+            </label>
+          </div>
+          <div id="dest-folder" class="hidden">
+            <div class="sources-head">
+              <span>Folder</span>
+              <span class="spacer"></span>
+              <button id="pick-folder" type="button">Browse...</button>
+            </div>
+            <label>
+              <input id="f-folder" type="text" placeholder="C:\backups" />
+            </label>
+          </div>
+        </div>
 
+        <!-- Step 3: Schedule -->
+        <div id="wiz-step-schedule" class="wiz-step hidden">
           <label>Schedule
             <select id="f-schedule-kind">
               <option value="manual">Manual (on demand)</option>
@@ -83,28 +126,25 @@
               <input id="f-daily-time" type="time" value="02:00" />
             </label>
           </div>
-
-          <label class="check">
-            <input type="checkbox" id="f-change-detection" />
-            Skip the run if no source file changed since last time (by size and modification time)
-          </label>
           <label>Pre-job script (runs before the backup; a non-zero exit aborts the job)
-            <input id="f-pre-script" type="text" placeholder="e.g. C:\scripts\dump-sql.bat" />
+            <input id="f-pre-script" type="text" placeholder="e.g. C:\scripts\quiesce.bat" />
           </label>
           <label>Post-job script (runs after the backup)
             <input id="f-post-script" type="text" placeholder="e.g. C:\scripts\notify.bat" />
             <span class="help muted">The post-job script receives the job status in environment
               variables: PBSGUI_STATUS (ok | error | no-change), PBSGUI_SUCCESS (1 | 0),
-              PBSGUI_MESSAGE, PBSGUI_JOB_ID, PBSGUI_JOB_NAME, PBSGUI_BACKUP_ID,
-              PBSGUI_REPOSITORY, and on a successful backup PBSGUI_BYTES, PBSGUI_CHUNKS,
-              PBSGUI_UPLOADED, PBSGUI_REUSED.</span>
+              PBSGUI_MESSAGE, PBSGUI_JOB_ID, PBSGUI_JOB_NAME, PBSGUI_DESTINATION, PBSGUI_BACKUP_ID,
+              and on a successful files-to-PBS backup PBSGUI_BYTES, PBSGUI_CHUNKS, PBSGUI_UPLOADED,
+              PBSGUI_REUSED.</span>
           </label>
+        </div>
 
-          <div class="actions">
-            <button type="submit" class="primary">Save</button>
-            <button id="cancel-edit" type="button">Cancel</button>
-          </div>
-        </form>
+        <div class="actions">
+          <button id="wiz-back" type="button">Back</button>
+          <button id="wiz-next" class="primary" type="button">Next</button>
+          <button id="wiz-save" class="primary hidden" type="button">Save</button>
+          <button id="cancel-edit" type="button">Cancel</button>
+        </div>
       </section>
 
       <!-- Browse & restore -->

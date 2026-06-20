@@ -4,9 +4,9 @@
 //! stream of [`Reply`] messages (newline-delimited JSON), ending in a terminal
 //! one (see [`Reply::is_terminal`]), then closes.
 //!
-//! Secret handling: a [`Job`] never carries the PBS token secret. The secret
-//! travels only on [`Request::SaveJob`] and is stored by the engine in the OS
-//! credential store; [`Reply::Jobs`] returns jobs without it.
+//! Secret handling: jobs carry no secrets. A job references saved connections
+//! (a [`SqlConnection`] and/or a [`PbsServer`]) by id, and each connection's
+//! secret is stored by the engine in the OS credential store.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,15 +23,49 @@ pub struct PbsServer {
     pub fingerprint: String,
 }
 
-/// Where a backup is sent: the PBS connection and snapshot identity. No secret.
+/// The backup type for a SQL Server source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SqlBackupType {
+    Full,
+    Differential,
+    Log,
+}
+
+/// What a job backs up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PbsDestination {
-    /// Full repository string, e.g. `user@pbs!token@host:8007:datastore`.
-    pub repository: String,
-    /// Expected server certificate SHA-256 fingerprint.
-    pub fingerprint: String,
-    /// Backup id (the snapshot group id).
-    pub backup_id: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobSource {
+    /// Files and folders on disk.
+    Files {
+        sources: Vec<String>,
+        #[serde(default)]
+        excludes: Vec<String>,
+        #[serde(default)]
+        change_detection: bool,
+    },
+    /// One or more SQL Server databases via a saved connection.
+    Sql {
+        connection_id: String,
+        databases: Vec<String>,
+        backup_type: SqlBackupType,
+        #[serde(default)]
+        copy_only: bool,
+    },
+}
+
+/// Where a job sends its backup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobDestination {
+    /// A saved PBS server. `backup_id` is the snapshot group; for a SQL source
+    /// with several databases it is the group prefix (one group per database).
+    Pbs {
+        server_id: String,
+        backup_id: String,
+    },
+    /// A local or network folder (e.g. for SQL `.bak` files).
+    Folder { path: String },
 }
 
 /// When a job runs automatically.
@@ -46,21 +80,15 @@ pub enum Schedule {
     Daily { hour: u8, minute: u8 },
 }
 
-/// A persisted backup job. Never contains the token secret.
+/// A persisted backup job. References saved connections by id; carries no
+/// secrets (those live with the SQL connection and PBS server).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
     pub name: String,
-    pub destination: PbsDestination,
-    /// Files and folders to back up.
-    pub sources: Vec<String>,
-    /// Optional glob patterns to exclude.
-    #[serde(default)]
-    pub excludes: Vec<String>,
+    pub source: JobSource,
+    pub destination: JobDestination,
     pub schedule: Schedule,
-    /// Skip the run if no source file changed (by size + mtime) since last run.
-    #[serde(default)]
-    pub change_detection: bool,
     /// Command run before the backup; a non-zero exit aborts the job. Empty = none.
     #[serde(default)]
     pub pre_script: Option<String>,
@@ -274,14 +302,10 @@ pub enum Request {
     Ping,
     /// List all saved jobs (without secrets).
     ListJobs,
-    /// Create or update a job (matched by id). If `secret` is `Some`, it is
-    /// stored in the credential store; if `None`, any existing secret is kept.
-    SaveJob {
-        job: Job,
-        #[serde(default)]
-        secret: Option<String>,
-    },
-    /// Delete a job and its stored secret.
+    /// Create or update a job (matched by id). Secrets live with the connections
+    /// the job references, not the job.
+    SaveJob { job: Job },
+    /// Delete a job.
     DeleteJob { id: String },
     /// Run a saved job now; the engine streams progress until it finishes.
     RunJob { id: String },

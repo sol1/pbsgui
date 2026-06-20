@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use pbsgui_ipc::transport::{self, Responder};
-use pbsgui_ipc::{Job, PbsDestination, Reply, Request, Schedule};
+use pbsgui_ipc::{Job, JobDestination, JobSource, Reply, Request, Schedule};
 
 async fn demo_handler(request: Request, mut responder: Responder) {
     match request {
@@ -13,7 +13,7 @@ async fn demo_handler(request: Request, mut responder: Responder) {
         Request::ListJobs => {
             let _ = responder.send(&Reply::Jobs { jobs: vec![] }).await;
         }
-        Request::SaveJob { job, .. } => {
+        Request::SaveJob { job } => {
             let _ = responder.send(&Reply::Saved { id: job.id }).await;
         }
         Request::DeleteJob { .. } => {
@@ -126,18 +126,19 @@ fn sample_job() -> Job {
     Job {
         id: "job-1".into(),
         name: "Docs".into(),
-        destination: PbsDestination {
-            repository: "u@pbs!t@host:8007:store".into(),
-            fingerprint: "ab".repeat(32),
+        source: JobSource::Files {
+            sources: vec!["C:/data".into()],
+            excludes: vec![],
+            change_detection: false,
+        },
+        destination: JobDestination::Pbs {
+            server_id: "s".into(),
             backup_id: "myhost".into(),
         },
-        sources: vec!["C:/data".into()],
-        excludes: vec![],
         schedule: Schedule::Daily {
             hour: 2,
             minute: 30,
         },
-        change_detection: false,
         pre_script: None,
         post_script: None,
         last_run: None,
@@ -163,14 +164,7 @@ async fn save_then_run_streams_progress() {
         let _ = transport::serve(name, demo_handler).await;
     });
 
-    let saved = collect(
-        base,
-        Request::SaveJob {
-            job: sample_job(),
-            secret: Some("s".into()),
-        },
-    )
-    .await;
+    let saved = collect(base, Request::SaveJob { job: sample_job() }).await;
     assert_eq!(saved, vec![Reply::Saved { id: "job-1".into() }]);
 
     let run = collect(base, Request::RunJob { id: "job-1".into() }).await;

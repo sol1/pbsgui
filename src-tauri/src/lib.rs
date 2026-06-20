@@ -50,23 +50,14 @@ async fn list_jobs() -> Result<Vec<Job>, String> {
         .ok_or_else(|| "engine did not return a job list".to_string())
 }
 
-/// Create or update a job. `secret` is stored only when present.
+/// Create or update a job. Secrets live with the referenced connections.
 #[tauri::command]
-async fn save_job(job: Job, secret: Option<String>) -> Result<String, String> {
-    let replies = request_all(Request::SaveJob { job, secret }).await?;
-    if let Some(err) = first_error(&replies) {
-        return Err(err);
-    }
-    replies
-        .into_iter()
-        .find_map(|r| match r {
-            Reply::Saved { id } => Some(id),
-            _ => None,
-        })
-        .ok_or_else(|| "engine did not confirm the save".to_string())
+async fn save_job(job: Job) -> Result<String, String> {
+    let replies = request_all(Request::SaveJob { job }).await?;
+    saved_id(replies)
 }
 
-/// Delete a job and its stored secret.
+/// Delete a job.
 #[tauri::command]
 async fn delete_job(id: String) -> Result<(), String> {
     let replies = request_all(Request::DeleteJob { id }).await?;
