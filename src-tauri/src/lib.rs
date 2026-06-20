@@ -8,8 +8,8 @@
 //! GUI never stops backups.
 
 use pbsgui_ipc::{
-    FileInfo, Job, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck, SqlInstance, SqlProbe,
-    DEFAULT_SOCKET,
+    FileInfo, Job, PbsServer, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection,
+    SqlInstance, SqlProbe, DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -170,6 +170,75 @@ async fn discover_sql(
             _ => None,
         })
         .ok_or_else(|| "engine did not return SQL instances".to_string())
+}
+
+/// List saved SQL Server connections.
+#[tauri::command]
+async fn list_sql_connections() -> Result<Vec<SqlConnection>, String> {
+    let replies = request_all(Request::ListSqlConnections).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::SqlConnections { connections } => Some(connections),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return SQL connections".to_string())
+}
+
+/// Create or update a SQL connection; `secret` is stored only when present.
+#[tauri::command]
+async fn save_sql_connection(
+    connection: SqlConnection,
+    secret: Option<String>,
+) -> Result<String, String> {
+    let replies = request_all(Request::SaveSqlConnection { connection, secret }).await?;
+    saved_id(replies)
+}
+
+/// Delete a SQL connection and its stored secret.
+#[tauri::command]
+async fn delete_sql_connection(id: String) -> Result<(), String> {
+    let replies = request_all(Request::DeleteSqlConnection { id }).await?;
+    match first_error(&replies) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// List saved PBS servers.
+#[tauri::command]
+async fn list_pbs_servers() -> Result<Vec<PbsServer>, String> {
+    let replies = request_all(Request::ListPbsServers).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::PbsServers { servers } => Some(servers),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return PBS servers".to_string())
+}
+
+/// Create or update a PBS server; `secret` is stored only when present.
+#[tauri::command]
+async fn save_pbs_server(server: PbsServer, secret: Option<String>) -> Result<String, String> {
+    let replies = request_all(Request::SavePbsServer { server, secret }).await?;
+    saved_id(replies)
+}
+
+/// Delete a PBS server and its stored secret.
+#[tauri::command]
+async fn delete_pbs_server(id: String) -> Result<(), String> {
+    let replies = request_all(Request::DeletePbsServer { id }).await?;
+    match first_error(&replies) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
 /// Connect to one instance and report its version, topology, and databases.
@@ -357,6 +426,20 @@ fn first_error(replies: &[Reply]) -> Option<String> {
     })
 }
 
+/// Extract the saved id from a save reply, or the error.
+fn saved_id(replies: Vec<Reply>) -> Result<String, String> {
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Saved { id } => Some(id),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not confirm the save".to_string())
+}
+
 /// Require the engine/service to be reachable on the IPC socket.
 async fn ensure_engine() -> Result<(), String> {
     if ping_once().await.unwrap_or(false) {
@@ -443,6 +526,12 @@ pub fn run() {
         check_sql,
         backup_sql_to_file,
         backup_sql_to_pbs,
+        list_sql_connections,
+        save_sql_connection,
+        delete_sql_connection,
+        list_pbs_servers,
+        save_pbs_server,
+        delete_pbs_server,
         pick_save_file,
         pick_destination,
         pick_folders,

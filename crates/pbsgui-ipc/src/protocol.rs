@@ -10,6 +10,19 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A saved Proxmox Backup Server connection (a backup destination). Managed
+/// independently of jobs; the API token secret is stored separately under
+/// `pbs:<id>` in the credential store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PbsServer {
+    pub id: String,
+    pub name: String,
+    /// Repository string, e.g. `user@pbs!token@host:8007:datastore`.
+    pub repository: String,
+    /// Expected server certificate SHA-256 fingerprint.
+    pub fingerprint: String,
+}
+
 /// Where a backup is sent: the PBS connection and snapshot identity. No secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PbsDestination {
@@ -121,6 +134,20 @@ pub enum SqlAuth {
     SqlLogin { username: String },
     /// Azure AD / Entra token-based auth.
     AzureAd { username: String },
+}
+
+/// A saved SQL Server connection (managed in the SQL Servers tab). Any password
+/// is stored separately under `sql:<id>` in the credential store; `Integrated`
+/// auth needs none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlConnection {
+    pub id: String,
+    pub name: String,
+    /// Connection target: "HOST" or "HOST\\INSTANCE".
+    pub server: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    pub auth: SqlAuth,
 }
 
 /// The detected deployment archetype of a SQL Server instance (probe result).
@@ -328,6 +355,30 @@ pub enum Request {
         pbs_job_id: String,
         backup_id: String,
     },
+
+    /// List saved SQL Server connections (without secrets).
+    ListSqlConnections,
+    /// Create or update a SQL connection. `secret` (a password) is stored when
+    /// present; `None` keeps any existing secret.
+    SaveSqlConnection {
+        connection: SqlConnection,
+        #[serde(default)]
+        secret: Option<String>,
+    },
+    /// Delete a SQL connection and its stored secret.
+    DeleteSqlConnection { id: String },
+
+    /// List saved PBS servers (without secrets).
+    ListPbsServers,
+    /// Create or update a PBS server. `secret` (the token secret) is stored when
+    /// present; `None` keeps any existing secret.
+    SavePbsServer {
+        server: PbsServer,
+        #[serde(default)]
+        secret: Option<String>,
+    },
+    /// Delete a PBS server and its stored secret.
+    DeletePbsServer { id: String },
 }
 
 /// A message from the engine to the GUI.
@@ -352,6 +403,10 @@ pub enum Reply {
     SqlProbe { probe: SqlProbe },
     /// Reply to [`Request::CheckSql`].
     SqlChecks { checks: Vec<SqlCheck> },
+    /// Reply to [`Request::ListSqlConnections`].
+    SqlConnections { connections: Vec<SqlConnection> },
+    /// Reply to [`Request::ListPbsServers`].
+    PbsServers { servers: Vec<PbsServer> },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -378,6 +433,8 @@ impl Reply {
                 | Reply::SqlInstances { .. }
                 | Reply::SqlProbe { .. }
                 | Reply::SqlChecks { .. }
+                | Reply::SqlConnections { .. }
+                | Reply::PbsServers { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )

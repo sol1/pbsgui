@@ -18,6 +18,7 @@ mod archive;
 mod backup;
 mod changedet;
 mod config;
+mod connstore;
 mod handler;
 mod jobstore;
 mod restore;

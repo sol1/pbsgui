@@ -81,6 +81,28 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::ListSqlConnections => {
+            let _ = responder
+                .send(&Reply::SqlConnections {
+                    connections: vec![],
+                })
+                .await;
+        }
+        Request::SaveSqlConnection { connection, .. } => {
+            let _ = responder.send(&Reply::Saved { id: connection.id }).await;
+        }
+        Request::DeleteSqlConnection { .. } => {
+            let _ = responder.send(&Reply::Deleted).await;
+        }
+        Request::ListPbsServers => {
+            let _ = responder.send(&Reply::PbsServers { servers: vec![] }).await;
+        }
+        Request::SavePbsServer { server, .. } => {
+            let _ = responder.send(&Reply::Saved { id: server.id }).await;
+        }
+        Request::DeletePbsServer { .. } => {
+            let _ = responder.send(&Reply::Deleted).await;
+        }
     }
 }
 

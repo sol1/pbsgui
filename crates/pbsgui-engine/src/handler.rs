@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
-use crate::{backup, restore, secrets};
+use crate::{backup, connstore, restore, secrets};
 
 /// Archive name for a job's filesystem backup.
 const ARCHIVE_NAME: &str = "files.didx";
@@ -163,6 +163,66 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             )
             .await;
         }
+
+        Request::ListSqlConnections => {
+            let connections = connstore::sql_connections().list();
+            let _ = responder.send(&Reply::SqlConnections { connections }).await;
+        }
+        Request::SaveSqlConnection { connection, secret } => {
+            let id = connection.id.clone();
+            let result = (|| -> anyhow::Result<()> {
+                if let Some(secret) = secret {
+                    secrets::set(&connstore::sql_secret_key(&id), &secret)?;
+                }
+                connstore::sql_connections().save(connection)
+            })();
+            let _ = responder.send(&saved_reply(id, result)).await;
+        }
+        Request::DeleteSqlConnection { id } => {
+            let _ = secrets::delete(&connstore::sql_secret_key(&id));
+            let _ = responder
+                .send(&deleted_reply(connstore::sql_connections().delete(&id)))
+                .await;
+        }
+
+        Request::ListPbsServers => {
+            let servers = connstore::pbs_servers().list();
+            let _ = responder.send(&Reply::PbsServers { servers }).await;
+        }
+        Request::SavePbsServer { server, secret } => {
+            let id = server.id.clone();
+            let result = (|| -> anyhow::Result<()> {
+                if let Some(secret) = secret {
+                    secrets::set(&connstore::pbs_secret_key(&id), &secret)?;
+                }
+                connstore::pbs_servers().save(server)
+            })();
+            let _ = responder.send(&saved_reply(id, result)).await;
+        }
+        Request::DeletePbsServer { id } => {
+            let _ = secrets::delete(&connstore::pbs_secret_key(&id));
+            let _ = responder
+                .send(&deleted_reply(connstore::pbs_servers().delete(&id)))
+                .await;
+        }
+    }
+}
+
+fn saved_reply(id: String, result: anyhow::Result<()>) -> Reply {
+    match result {
+        Ok(()) => Reply::Saved { id },
+        Err(e) => Reply::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+fn deleted_reply(result: anyhow::Result<()>) -> Reply {
+    match result {
+        Ok(()) => Reply::Deleted,
+        Err(e) => Reply::Error {
+            message: e.to_string(),
+        },
     }
 }
 
