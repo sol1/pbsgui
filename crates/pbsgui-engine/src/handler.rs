@@ -155,11 +155,18 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             auth,
             password,
             database,
-            pbs_job_id,
+            pbs_server_id,
             backup_id,
         } => {
             backup_sql_to_pbs(
-                store, server, port, auth, password, database, pbs_job_id, backup_id, responder,
+                server,
+                port,
+                auth,
+                password,
+                database,
+                pbs_server_id,
+                backup_id,
+                responder,
             )
             .await;
         }
@@ -243,13 +250,12 @@ fn sql_archive_name(database: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 async fn backup_sql_to_pbs(
-    store: Arc<JobStore>,
     server: String,
     port: Option<u16>,
     auth: SqlAuth,
     password: Option<String>,
     database: String,
-    pbs_job_id: String,
+    pbs_server_id: String,
     backup_id: String,
     mut responder: Responder,
 ) {
@@ -265,13 +271,12 @@ async fn backup_sql_to_pbs(
         .await;
 
     let result = run_backup_sql_to_pbs(
-        &store,
         &server,
         port,
         &auth,
         password.as_deref(),
         &database,
-        &pbs_job_id,
+        &pbs_server_id,
         &backup_id,
     )
     .await;
@@ -291,22 +296,26 @@ async fn backup_sql_to_pbs(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_backup_sql_to_pbs(
-    store: &JobStore,
     server: &str,
     port: Option<u16>,
     auth: &SqlAuth,
     password: Option<&str>,
     database: &str,
-    pbs_job_id: &str,
+    pbs_server_id: &str,
     backup_id: &str,
 ) -> anyhow::Result<String> {
-    let (job, secret, repo) = job_context(store, pbs_job_id)?;
+    let pbs = connstore::pbs_servers()
+        .get(pbs_server_id)
+        .ok_or_else(|| anyhow::anyhow!("no such PBS server"))?;
+    let secret = secrets::get(&connstore::pbs_secret_key(pbs_server_id))?
+        .ok_or_else(|| anyhow::anyhow!("no saved secret for this PBS server"))?;
+    let repo: Repository = pbs.repository.parse()?;
     let backup_time = unix_now();
     let archive = sql_archive_name(database);
     let params = SessionParams::from_repository(
         &repo,
         secret,
-        &job.destination.fingerprint,
+        &pbs.fingerprint,
         SQL_BACKUP_TYPE,
         backup_id,
         backup_time,

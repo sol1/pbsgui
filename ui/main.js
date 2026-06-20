@@ -65,9 +65,11 @@ function showView(which) {
   el("editor").classList.toggle("hidden", which !== "editor");
   el("browse-view").classList.toggle("hidden", which !== "browse");
   el("sql-view").classList.toggle("hidden", which !== "sql");
+  el("pbs-view").classList.toggle("hidden", which !== "pbs");
   el("tab-jobs").classList.toggle("active", which === "jobs" || which === "editor");
   el("tab-browse").classList.toggle("active", which === "browse");
   el("tab-sql").classList.toggle("active", which === "sql");
+  el("tab-pbs").classList.toggle("active", which === "pbs");
 }
 
 async function checkEngine() {
@@ -473,11 +475,11 @@ async function backupDatabase(inst, dbName) {
   });
 }
 
-// Back up a database over VDI straight to PBS, reusing a job's PBS connection.
+// Back up a database over VDI straight to PBS, sending it to a saved PBS server.
 async function backupDatabaseToPbs(inst, dbName) {
-  const pbsJobId = el("sql-pbs-job").value;
-  if (!pbsJobId) {
-    return alert("Create a backup job first; the SQL backup reuses its PBS connection as the target.");
+  const pbsServerId = el("sql-pbs-server").value;
+  if (!pbsServerId) {
+    return alert("Add a PBS server first (the PBS servers tab), then pick it as the target.");
   }
   streamRun(`Backing up ${dbName} to PBS`, "backup_sql_to_pbs", {
     server: inst.server,
@@ -485,37 +487,182 @@ async function backupDatabaseToPbs(inst, dbName) {
     auth: { kind: "integrated" },
     password: null,
     database: dbName,
-    pbsJobId,
+    pbsServerId,
     backupId: `mssql-${slug(dbName)}`,
   });
 }
 
-// Populate the PBS target dropdown from saved backup jobs (their PBS connection
-// is reused as the destination for SQL backups).
-async function populatePbsJobs() {
-  let jobs = [];
+// Populate the PBS target dropdown from saved PBS servers.
+async function populatePbsServers() {
+  let servers = [];
   try {
-    jobs = await invoke("list_jobs");
+    servers = await invoke("list_pbs_servers");
   } catch (err) {
     /* engine offline; leave empty */
   }
-  const sel = el("sql-pbs-job");
+  const sel = el("sql-pbs-server");
   const previous = sel.value;
   sel.innerHTML = "";
-  if (!jobs.length) {
+  if (!servers.length) {
     const opt = document.createElement("option");
     opt.value = "";
-    opt.textContent = "no backup jobs yet";
+    opt.textContent = "no PBS servers yet";
     sel.append(opt);
     return;
   }
-  for (const job of jobs) {
+  for (const s of servers) {
     const opt = document.createElement("option");
-    opt.value = job.id;
-    opt.textContent = `${job.name} (${job.destination.repository})`;
+    opt.value = s.id;
+    opt.textContent = `${s.name} (${s.repository})`;
     sel.append(opt);
   }
   if (previous) sel.value = previous;
+}
+
+// --- Saved SQL connections ---------------------------------------------
+
+async function saveSqlConnection(inst) {
+  const name = prompt("Name for this SQL connection:", inst.server);
+  if (!name) return;
+  try {
+    await invoke("save_sql_connection", {
+      connection: {
+        id: crypto.randomUUID(),
+        name,
+        server: inst.server,
+        port: inst.port ?? null,
+        auth: { kind: "integrated" },
+      },
+      secret: null,
+    });
+    loadSqlConnections();
+  } catch (err) {
+    alert("save failed: " + err);
+  }
+}
+
+async function loadSqlConnections() {
+  let conns = [];
+  try {
+    conns = await invoke("list_sql_connections");
+  } catch (err) {
+    /* engine offline */
+  }
+  const list = el("sql-conns");
+  list.innerHTML = "";
+  if (!conns.length) {
+    list.innerHTML = '<div class="muted">No saved connections yet.</div>';
+    return;
+  }
+  for (const conn of conns) {
+    const row = document.createElement("div");
+    row.className = "job-row";
+    const main = document.createElement("div");
+    main.className = "job-main";
+    main.innerHTML =
+      `<div class="job-name">${escapeHtml(conn.name)}</div>` +
+      `<div class="job-meta">${escapeHtml(conn.server)} · ${escapeHtml(conn.auth.kind)}</div>`;
+    const actions = document.createElement("div");
+    actions.className = "job-actions";
+    actions.append(
+      mkbtn("Delete", "", async () => {
+        if (!confirm(`Delete connection "${conn.name}"?`)) return;
+        try {
+          await invoke("delete_sql_connection", { id: conn.id });
+        } catch (err) {
+          alert("delete failed: " + err);
+        }
+        loadSqlConnections();
+      }),
+    );
+    row.append(main, actions);
+    list.append(row);
+  }
+}
+
+// --- PBS servers --------------------------------------------------------
+
+let editingPbs = null; // id of the server being edited, or null
+
+function resetPbsForm() {
+  editingPbs = null;
+  el("pbs-name").value = "";
+  el("pbs-repository").value = "";
+  el("pbs-fingerprint").value = "";
+  el("pbs-secret").value = "";
+  el("pbs-secret-note").textContent = "";
+}
+
+function editPbsServer(server) {
+  editingPbs = server.id;
+  el("pbs-name").value = server.name;
+  el("pbs-repository").value = server.repository;
+  el("pbs-fingerprint").value = server.fingerprint;
+  el("pbs-secret").value = "";
+  el("pbs-secret-note").textContent = "leave blank to keep the saved secret";
+}
+
+async function savePbsServer(event) {
+  event.preventDefault();
+  const server = {
+    id: editingPbs || crypto.randomUUID(),
+    name: el("pbs-name").value.trim(),
+    repository: el("pbs-repository").value.trim(),
+    fingerprint: el("pbs-fingerprint").value.trim(),
+  };
+  if (!server.name || !server.repository || !server.fingerprint) {
+    return alert("Name, repository, and fingerprint are required.");
+  }
+  const secretVal = el("pbs-secret").value;
+  const secret = secretVal ? secretVal : null;
+  if (!editingPbs && !secret) return alert("A token secret is required for a new server.");
+  try {
+    await invoke("save_pbs_server", { server, secret });
+  } catch (err) {
+    return alert("save failed: " + err);
+  }
+  resetPbsForm();
+  loadPbsServers();
+}
+
+async function loadPbsServers() {
+  let servers = [];
+  try {
+    servers = await invoke("list_pbs_servers");
+  } catch (err) {
+    /* engine offline */
+  }
+  const list = el("pbs-list");
+  list.innerHTML = "";
+  if (!servers.length) {
+    list.innerHTML = '<div class="placeholder">No PBS servers yet. Add one above.</div>';
+    return;
+  }
+  for (const server of servers) {
+    const row = document.createElement("div");
+    row.className = "job-row";
+    const main = document.createElement("div");
+    main.className = "job-main";
+    main.innerHTML =
+      `<div class="job-name">${escapeHtml(server.name)}</div>` +
+      `<div class="job-meta">${escapeHtml(server.repository)}</div>`;
+    const actions = document.createElement("div");
+    actions.className = "job-actions";
+    actions.append(
+      mkbtn("Edit", "", () => editPbsServer(server)),
+      mkbtn("Delete", "", async () => {
+        if (!confirm(`Delete PBS server "${server.name}"?`)) return;
+        try {
+          await invoke("delete_pbs_server", { id: server.id });
+        } catch (err) {
+          alert("delete failed: " + err);
+        }
+        loadPbsServers();
+      }),
+    );
+    row.append(main, actions);
+    list.append(row);
+  }
 }
 
 function renderSqlInstanceCard(inst, card) {
@@ -550,6 +697,7 @@ function renderSqlInstanceCard(inst, card) {
     `<div class="sql-head"><span class="sql-server">${escapeHtml(inst.server)}</span>` +
     badges.join("") +
     '<span class="spacer"></span>' +
+    `<button type="button" class="sql-save-btn">Save connection</button>` +
     `<button type="button" class="sql-check-btn">Check</button>` +
     `<button type="button" class="sql-probe-btn">${inst.probe ? "Re-probe" : "Probe"}</button>` +
     `</div><div class="sql-meta muted">instance: ${escapeHtml(inst.instance_name)}</div>` +
@@ -557,6 +705,7 @@ function renderSqlInstanceCard(inst, card) {
     checksHtml;
   card.querySelector(".sql-probe-btn").onclick = () => probeInstance(inst, card);
   card.querySelector(".sql-check-btn").onclick = () => checkInstance(inst, card);
+  card.querySelector(".sql-save-btn").onclick = () => saveSqlConnection(inst);
   card.querySelectorAll(".sql-db-backup").forEach((btn) => {
     btn.onclick = () => backupDatabase(inst, btn.dataset.db);
   });
@@ -652,9 +801,16 @@ window.addEventListener("DOMContentLoaded", () => {
   };
   el("tab-sql").onclick = () => {
     showView("sql");
-    populatePbsJobs();
+    populatePbsServers();
+    loadSqlConnections();
+  };
+  el("tab-pbs").onclick = () => {
+    showView("pbs");
+    loadPbsServers();
   };
   el("discover-sql").onclick = discoverSql;
+  el("pbs-form").addEventListener("submit", savePbsServer);
+  el("pbs-clear").onclick = resetPbsForm;
   el("new-job").onclick = () => openEditor(null);
   el("job-form").addEventListener("submit", saveJob);
   el("cancel-edit").onclick = () => showView("jobs");

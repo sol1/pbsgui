@@ -342,8 +342,9 @@ pub enum Request {
         output_path: String,
     },
     /// Back up a database over VDI, streaming it to PBS as a deduplicated
-    /// snapshot. Reuses `pbs_job_id`'s PBS connection (repository, fingerprint,
-    /// and stored secret); `backup_id` is the snapshot group. Streams progress.
+    /// snapshot. Sends it to the saved PBS server `pbs_server_id` (its
+    /// repository, fingerprint, and stored secret); `backup_id` is the snapshot
+    /// group. Streams progress.
     BackupSqlToPbs {
         server: String,
         #[serde(default)]
@@ -352,7 +353,7 @@ pub enum Request {
         #[serde(default)]
         password: Option<String>,
         database: String,
-        pbs_job_id: String,
+        pbs_server_id: String,
         backup_id: String,
     },
 

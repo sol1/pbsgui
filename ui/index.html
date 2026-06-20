@@ -13,6 +13,7 @@
         <button id="tab-jobs" class="tab active" type="button">Jobs</button>
         <button id="tab-browse" class="tab" type="button">Browse &amp; restore</button>
         <button id="tab-sql" class="tab" type="button">SQL Servers</button>
+        <button id="tab-pbs" class="tab" type="button">PBS servers</button>
       </nav>
       <span class="spacer"></span>
       <span id="build-info" class="build muted"></span>
@@ -145,13 +146,47 @@
           integrated auth). Network discovery (Browser, scan, Active Directory) and
           credentialed connect (SQL login) arrive in upcoming updates.</p>
         <div class="browse-pick">
-          <label>PBS target (reuses a backup job's connection)
-            <select id="sql-pbs-job"></select>
+          <label>PBS target (for "To PBS")
+            <select id="sql-pbs-server"></select>
           </label>
         </div>
+        <h2>Saved connections</h2>
+        <div id="sql-conns"><div class="muted">No saved connections yet.</div></div>
+        <h2>Discovered instances</h2>
         <div id="sql-list">
           <div class="muted">Click Discover to find SQL Server instances on this machine.</div>
         </div>
+      </section>
+
+      <!-- PBS servers -->
+      <section id="pbs-view" class="hidden">
+        <div class="section-head">
+          <h1>PBS servers</h1>
+        </div>
+        <p class="help muted">Saved Proxmox Backup Server connections, reused as backup
+          destinations by jobs and SQL backups.</p>
+        <form id="pbs-form" autocomplete="off">
+          <label>Name
+            <input id="pbs-name" type="text" required placeholder="Main PBS" />
+          </label>
+          <label>Repository
+            <input id="pbs-repository" type="text" required
+                   placeholder="user@pbs!token@host:8007:datastore" />
+          </label>
+          <label>Server fingerprint (SHA-256)
+            <input id="pbs-fingerprint" type="text" required placeholder="AA:BB:..:FF" />
+          </label>
+          <label>API token secret
+            <input id="pbs-secret" type="password" placeholder="token secret" />
+            <span id="pbs-secret-note" class="muted"></span>
+          </label>
+          <div class="actions">
+            <button type="submit" class="primary">Save server</button>
+            <button id="pbs-clear" type="button">Clear</button>
+          </div>
+        </form>
+        <h2>Saved servers</h2>
+        <div id="pbs-list"></div>
       </section>
 
       <!-- Shared run / restore output -->

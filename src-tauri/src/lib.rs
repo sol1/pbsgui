@@ -332,7 +332,7 @@ async fn backup_sql_to_pbs(
     auth: SqlAuth,
     password: Option<String>,
     database: String,
-    pbs_job_id: String,
+    pbs_server_id: String,
     backup_id: String,
     on_event: Channel<Reply>,
 ) -> Result<(), String> {
@@ -344,7 +344,7 @@ async fn backup_sql_to_pbs(
         auth,
         password,
         database,
-        pbs_job_id,
+        pbs_server_id,
         backup_id,
     };
     pbsgui_ipc::send_request(name, &request, move |reply| {
