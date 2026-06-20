@@ -381,6 +381,17 @@ pub enum Request {
         backup_id: String,
     },
 
+    /// List the PBS snapshots for one database of a SQL backup job, by date/time.
+    ListSqlSnapshots { job_id: String, database: String },
+    /// Restore a SQL database snapshot via VDI. `target_database` is where it is
+    /// restored (the original name, or a new one). Streams progress.
+    RestoreSql {
+        job_id: String,
+        database: String,
+        backup_time: i64,
+        target_database: String,
+    },
+
     /// List saved SQL Server connections (without secrets).
     ListSqlConnections,
     /// Create or update a SQL connection. `secret` (a password) is stored when

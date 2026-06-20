@@ -155,6 +155,33 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             .await;
         }
 
+        Request::ListSqlSnapshots { job_id, database } => {
+            let reply = match list_sql_snapshots(&store, &job_id, &database).await {
+                Ok(snapshots) => Reply::Snapshots { snapshots },
+                Err(e) => Reply::Error {
+                    message: format!("{e:#}"),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
+
+        Request::RestoreSql {
+            job_id,
+            database,
+            backup_time,
+            target_database,
+        } => {
+            restore_sql(
+                store,
+                job_id,
+                database,
+                backup_time,
+                target_database,
+                responder,
+            )
+            .await;
+        }
+
         Request::ListSqlConnections => {
             let connections = connstore::sql_connections().list();
             let _ = responder.send(&Reply::SqlConnections { connections }).await;
@@ -357,6 +384,173 @@ async fn backup_sql_to_file(
         },
     };
     let _ = responder.send(&reply).await;
+}
+
+/// A SQL backup job resolved to its source connection and PBS destination.
+struct SqlJobPbs {
+    conn: pbsgui_ipc::SqlConnection,
+    password: Option<String>,
+    repo: Repository,
+    secret: String,
+    fingerprint: String,
+    backup_id: String,
+}
+
+fn sql_job_pbs(store: &JobStore, job_id: &str) -> anyhow::Result<SqlJobPbs> {
+    let job = store
+        .get(job_id)
+        .ok_or_else(|| anyhow::anyhow!("no such job: {job_id}"))?;
+    let connection_id = match &job.source {
+        pbsgui_ipc::JobSource::Sql { connection_id, .. } => connection_id.clone(),
+        _ => anyhow::bail!("not a SQL Server backup job"),
+    };
+    let (server_id, backup_id) = match &job.destination {
+        pbsgui_ipc::JobDestination::Pbs {
+            server_id,
+            backup_id,
+        } => (server_id.clone(), backup_id.clone()),
+        pbsgui_ipc::JobDestination::Folder { .. } => {
+            anyhow::bail!("this job backs up to a folder, not PBS")
+        }
+    };
+    let conn = connstore::sql_connections()
+        .get(&connection_id)
+        .ok_or_else(|| anyhow::anyhow!("the job's SQL connection no longer exists"))?;
+    let password = match conn.auth {
+        SqlAuth::Integrated => None,
+        _ => secrets::get(&connstore::sql_secret_key(&connection_id))?,
+    };
+    let server = connstore::pbs_servers()
+        .get(&server_id)
+        .ok_or_else(|| anyhow::anyhow!("the job's PBS server no longer exists"))?;
+    let secret = secrets::get(&connstore::pbs_secret_key(&server_id))?
+        .ok_or_else(|| anyhow::anyhow!("no saved secret for the PBS server"))?;
+    let repo: Repository = server.repository.parse()?;
+    Ok(SqlJobPbs {
+        conn,
+        password,
+        repo,
+        secret,
+        fingerprint: server.fingerprint,
+        backup_id,
+    })
+}
+
+async fn list_sql_snapshots(
+    store: &JobStore,
+    job_id: &str,
+    database: &str,
+) -> anyhow::Result<Vec<SnapshotInfo>> {
+    let ctx = sql_job_pbs(store, job_id)?;
+    let (group, _archive) = backup::sql_group_and_archive(&ctx.backup_id, database);
+    let api = ApiClient::from_repository(&ctx.repo, ctx.secret, &ctx.fingerprint)?;
+    let snapshots = api
+        .list_snapshots(&ctx.repo.datastore, SQL_BACKUP_TYPE, &group)
+        .await?;
+    Ok(snapshots
+        .into_iter()
+        .map(|s| SnapshotInfo {
+            backup_time: s.backup_time,
+            size: s.size,
+        })
+        .collect())
+}
+
+async fn restore_sql(
+    store: Arc<JobStore>,
+    job_id: String,
+    database: String,
+    backup_time: i64,
+    target_database: String,
+    mut responder: Responder,
+) {
+    let _ = responder
+        .send(&Reply::Accepted {
+            job_id: database.clone(),
+        })
+        .await;
+    let result = run_restore_sql(
+        &store,
+        &job_id,
+        &database,
+        backup_time,
+        &target_database,
+        &mut responder,
+    )
+    .await;
+    let reply = match result {
+        Ok(message) => Reply::Finished {
+            success: true,
+            message,
+        },
+        Err(e) => Reply::Finished {
+            success: false,
+            message: format!("{e:#}"),
+        },
+    };
+    let _ = responder.send(&reply).await;
+}
+
+async fn run_restore_sql(
+    store: &JobStore,
+    job_id: &str,
+    database: &str,
+    backup_time: i64,
+    target_database: &str,
+    responder: &mut Responder,
+) -> anyhow::Result<String> {
+    let ctx = sql_job_pbs(store, job_id)?;
+    let (group, archive) = backup::sql_group_and_archive(&ctx.backup_id, database);
+    let params = SessionParams::from_repository(
+        &ctx.repo,
+        ctx.secret,
+        &ctx.fingerprint,
+        SQL_BACKUP_TYPE,
+        &group,
+        backup_time,
+    )?;
+
+    let _ = responder
+        .send(&Reply::Log {
+            line: "connecting to PBS".to_string(),
+        })
+        .await;
+    let mut reader = ReaderClient::connect(&params).await?;
+    let _ = responder
+        .send(&Reply::Log {
+            line: "downloading the database backup".to_string(),
+        })
+        .await;
+    let image = reader.restore_dynamic_archive(&archive).await?;
+    let _ = responder
+        .send(&Reply::Progress {
+            fraction: 0.5,
+            message: format!("downloaded {} bytes; restoring", image.len()),
+        })
+        .await;
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!("restoring as [{target_database}] (overwrites it if it exists)"),
+        })
+        .await;
+
+    crate::sql::vdi::restore_database_from_image(
+        &ctx.conn.server,
+        ctx.conn.port,
+        &ctx.conn.auth,
+        ctx.password.as_deref(),
+        target_database,
+        image,
+    )
+    .await?;
+
+    let _ = responder
+        .send(&Reply::Progress {
+            fraction: 1.0,
+            message: "done".to_string(),
+        })
+        .await;
+    Ok(format!("restored {database} as {target_database}"))
 }
 
 /// The PBS connection details for browsing/restoring a job's snapshots.

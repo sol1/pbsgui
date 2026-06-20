@@ -73,9 +73,12 @@ function destSummary(job) {
   return d.type === "folder" ? `folder ${d.path}` : "PBS";
 }
 
-// Browse/restore currently supports file backups to PBS.
+// Browse/restore supports file and SQL backups to PBS.
 function isBrowsable(job) {
-  return job.source?.type === "files" && job.destination?.type === "pbs";
+  return (
+    job.destination?.type === "pbs" &&
+    (job.source?.type === "files" || job.source?.type === "sql")
+  );
 }
 
 function showView(which) {
@@ -459,6 +462,8 @@ function runJob(job) {
 
 // --- Browse & restore ---------------------------------------------------
 
+let browseJobsCache = [];
+
 async function populateBrowseJobs() {
   let jobs = [];
   try {
@@ -466,19 +471,45 @@ async function populateBrowseJobs() {
   } catch (err) {
     /* engine offline; leave empty */
   }
+  browseJobsCache = jobs.filter(isBrowsable);
   const sel = el("browse-job");
   sel.innerHTML = "";
-  for (const job of jobs.filter(isBrowsable)) {
+  for (const job of browseJobsCache) {
     const opt = document.createElement("option");
     opt.value = job.id;
     opt.textContent = job.name;
     sel.append(opt);
   }
+  onBrowseJobChange();
+}
+
+function selectedBrowseJob() {
+  return browseJobsCache.find((j) => j.id === el("browse-job").value);
+}
+
+// Show the database picker only for SQL jobs, populated from the job's databases.
+function onBrowseJobChange() {
+  const job = selectedBrowseJob();
+  const isSql = job?.source?.type === "sql";
+  el("browse-db-label").classList.toggle("hidden", !isSql);
+  if (isSql) {
+    const sel = el("browse-db");
+    sel.innerHTML = "";
+    for (const db of job.source.databases || []) {
+      const opt = document.createElement("option");
+      opt.value = db;
+      opt.textContent = db;
+      sel.append(opt);
+    }
+  }
 }
 
 async function loadSnapshots() {
-  const jobId = el("browse-job").value;
-  if (!jobId) return alert("Create a job first, then browse its snapshots.");
+  const job = selectedBrowseJob();
+  if (!job) return alert("Create a job first, then browse its snapshots.");
+  const isSql = job.source?.type === "sql";
+  const database = isSql ? el("browse-db").value : null;
+  if (isSql && !database) return alert("Pick a database.");
   el("files-panel").classList.add("hidden");
   const list = el("snapshots-list");
   // Only show the spinner if the load is slow, so fast loads don't flash.
@@ -487,7 +518,9 @@ async function loadSnapshots() {
   }, 200);
   let snaps;
   try {
-    snaps = await invoke("list_snapshots", { jobId });
+    snaps = isSql
+      ? await invoke("list_sql_snapshots", { jobId: job.id, database })
+      : await invoke("list_snapshots", { jobId: job.id });
   } catch (err) {
     clearTimeout(spinner);
     list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
@@ -503,12 +536,33 @@ async function loadSnapshots() {
   for (const snap of snaps) {
     const row = document.createElement("div");
     row.className = "snap-row";
+    const action = isSql ? "Restore" : "";
     row.innerHTML =
       `<span class="snap-time">${escapeHtml(new Date(snap.backup_time * 1000).toLocaleString())}</span>` +
-      `<span class="snap-size muted">${escapeHtml(formatBytes(snap.size))}</span>`;
-    row.onclick = () => loadFiles(jobId, snap.backup_time, snap.backup_time);
+      `<span class="snap-size muted">${escapeHtml(formatBytes(snap.size))}</span>` +
+      (isSql ? `<span class="spacer"></span><span class="snap-action">${action}</span>` : "");
+    row.onclick = () =>
+      isSql
+        ? restoreSqlSnapshot(job.id, database, snap.backup_time)
+        : loadFiles(job.id, snap.backup_time, snap.backup_time);
     list.append(row);
   }
+}
+
+// Restore a SQL snapshot via VDI, prompting for the target database name.
+function restoreSqlSnapshot(jobId, database, backupTime) {
+  const target = prompt(
+    `Restore "${database}" as which database?\n` +
+      `This OVERWRITES the target if it exists (WITH REPLACE).`,
+    database,
+  );
+  if (!target) return;
+  streamRun(`Restoring ${database} as ${target}`, "restore_sql", {
+    jobId,
+    database,
+    backupTime,
+    targetDatabase: target.trim(),
+  });
 }
 
 async function loadFiles(jobId, backupTime, label) {
@@ -999,6 +1053,7 @@ window.addEventListener("DOMContentLoaded", () => {
   el("f-backup-id").addEventListener("input", () => {
     backupIdTouched = true;
   });
+  el("browse-job").onchange = onBrowseJobChange;
   el("load-snapshots").onclick = loadSnapshots;
   el("restore-all").onclick = () => doRestore(true);
   el("restore-selected").onclick = () => doRestore(false);

@@ -394,6 +394,11 @@ button:disabled {
   white-space: nowrap;
 }
 
+.snap-action {
+  color: var(--accent);
+  font-size: 12px;
+}
+
 /* Job wizard */
 .wiz-steps {
   margin-bottom: 16px;

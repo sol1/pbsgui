@@ -73,6 +73,19 @@ async fn demo_handler(request: Request, mut responder: Responder) {
         Request::CheckSql { .. } => {
             let _ = responder.send(&Reply::SqlChecks { checks: vec![] }).await;
         }
+        Request::ListSqlSnapshots { .. } => {
+            let _ = responder
+                .send(&Reply::Snapshots { snapshots: vec![] })
+                .await;
+        }
+        Request::RestoreSql { .. } => {
+            let _ = responder
+                .send(&Reply::Finished {
+                    success: true,
+                    message: "restored".into(),
+                })
+                .await;
+        }
         Request::BackupSqlToPbs { .. } => {
             let _ = responder
                 .send(&Reply::Finished {

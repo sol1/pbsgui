@@ -124,8 +124,25 @@ pub async fn backup_database_to_pbs(
     anyhow::bail!("VDI backup is only available on Windows")
 }
 
+/// Restore `target_database` over VDI from a previously-downloaded native backup
+/// stream (`image`). The connection issuing `RESTORE` must be `sysadmin`.
+#[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
+pub async fn restore_database_from_image(
+    _server: &str,
+    _port: Option<u16>,
+    _auth: &SqlAuth,
+    _password: Option<&str>,
+    _target_database: &str,
+    _image: Vec<u8>,
+) -> anyhow::Result<()> {
+    anyhow::bail!("VDI restore is only available on Windows")
+}
+
 #[cfg(windows)]
-pub use windows_impl::{backup_database_to_file, backup_database_to_pbs};
+pub use windows_impl::{
+    backup_database_to_file, backup_database_to_pbs, restore_database_from_image,
+};
 
 #[cfg(windows)]
 mod windows_impl {
@@ -168,6 +185,7 @@ mod windows_impl {
 
     // Win32 completion codes returned to the device.
     const ERROR_SUCCESS: u32 = 0;
+    const ERROR_HANDLE_EOF: u32 = 38;
     const ERROR_NOT_SUPPORTED: u32 = 50;
     const ERROR_WRITE_FAULT: u32 = 29;
 
@@ -355,30 +373,120 @@ mod windows_impl {
         super::combine_pbs_result(backup, upload)
     }
 
-    /// Run the COM device-set lifecycle on the current (blocking) thread,
-    /// draining the device into `sink`. Signals `ready` once the device set is
-    /// created (so the caller can issue BACKUP).
+    /// Issue `RESTORE DATABASE ... FROM VIRTUAL_DEVICE`, overwriting the target
+    /// and recovering it online.
+    async fn issue_restore(
+        client: &mut SqlClient,
+        target_database: &str,
+        set_name: &str,
+    ) -> anyhow::Result<()> {
+        let escaped = target_database.replace(']', "]]");
+        let sql = format!(
+            "RESTORE DATABASE [{escaped}] FROM VIRTUAL_DEVICE = '{set_name}' WITH REPLACE, RECOVERY"
+        );
+        client.simple_query(sql).await?.into_results().await?;
+        Ok(())
+    }
+
+    /// An in-memory restore source: the downloaded native backup stream, served
+    /// sequentially to the device's `VDC_Read` requests.
+    struct ImageSource {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl ImageSource {
+        /// Copy up to `out.len()` bytes into `out`; returns how many (fewer only
+        /// at end of stream).
+        fn read_into(&mut self, out: &mut [u8]) -> usize {
+            let n = (self.data.len() - self.pos).min(out.len());
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            n
+        }
+    }
+
+    pub async fn restore_database_from_image(
+        server: &str,
+        port: Option<u16>,
+        auth: &SqlAuth,
+        password: Option<&str>,
+        target_database: &str,
+        image: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let mut client = probe::connect(server, port, auth, password).await?;
+        let set_name = format!("pbsgui-{}", Uuid::new_v4());
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+        let loop_name = set_name.clone();
+        let device_loop = tokio::task::spawn_blocking(move || {
+            let mut source = ImageSource {
+                data: image,
+                pos: 0,
+            };
+            run_device_session(&loop_name, ready_tx, |vds| {
+                fill_device(vds, &loop_name, &mut source)
+            })
+        });
+
+        ready_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("VDI thread exited before signaling readiness"))??;
+
+        let restore = issue_restore(&mut client, target_database, &set_name).await;
+        let device_result = device_loop
+            .await
+            .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
+
+        // A RESTORE failure breaks the device read, so it is the root cause when
+        // present; otherwise surface the device error.
+        match (restore, device_result) {
+            (Ok(()), _) => Ok(()),
+            (Err(sql), _) => Err(sql.context("RESTORE DATABASE failed")),
+        }
+    }
+
+    /// Run the COM device-set lifecycle on the current (blocking) thread:
+    /// initialize COM, create the device set, signal `ready` (so the caller can
+    /// issue the BACKUP/RESTORE statement), run `body`, then close.
     fn run_device_loop(
         set_name: &str,
         sink: Sink,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
     ) -> anyhow::Result<u64> {
+        let mut sink = sink;
+        run_device_session(set_name, ready, |vds| {
+            drain_device(vds, set_name, &mut sink)
+        })
+    }
+
+    fn run_device_session<F>(
+        set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        body: F,
+    ) -> anyhow::Result<u64>
+    where
+        F: FnOnce(&IClientVirtualDeviceSet2) -> anyhow::Result<u64>,
+    {
         unsafe {
             // S_FALSE (already initialized on this thread) is not a failure.
             CoInitializeEx(None, COINIT_MULTITHREADED)
                 .ok()
                 .context("CoInitializeEx failed")?;
         }
-        let result = run_device_loop_inner(set_name, sink, ready);
+        let result = run_device_session_inner(set_name, ready, body);
         unsafe { CoUninitialize() };
         result
     }
 
-    fn run_device_loop_inner(
+    fn run_device_session_inner<F>(
         set_name: &str,
-        mut sink: Sink,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
-    ) -> anyhow::Result<u64> {
+        body: F,
+    ) -> anyhow::Result<u64>
+    where
+        F: FnOnce(&IClientVirtualDeviceSet2) -> anyhow::Result<u64>,
+    {
         let vds: IClientVirtualDeviceSet2 = unsafe {
             CoCreateInstance(&CLSID_CLIENT_VIRTUAL_DEVICE_SET, None, CLSCTX_INPROC_SERVER)
         }
@@ -394,27 +502,26 @@ mod windows_impl {
             let _ = ready.send(Err(anyhow::anyhow!("VDI CreateEx failed: {e}")));
             return Err(anyhow::anyhow!("VDI CreateEx failed: {e}"));
         }
-        // The device set exists; the caller may now issue BACKUP. Anything past
-        // here must close the set so a failed BACKUP does not hang the caller.
+        // The device set exists; the caller may now issue the statement. Anything
+        // past here must close the set so a failed statement does not hang it.
         let _ = ready.send(Ok(()));
 
-        let outcome = drain_device(&vds, set_name, &mut sink);
+        let outcome = body(&vds);
         unsafe { vds.Close().ok().ok() };
         outcome
     }
 
-    fn drain_device(
+    /// Wait for SQL Server to attach to the set, then open the single device.
+    fn open_device(
         vds: &IClientVirtualDeviceSet2,
         set_name: &str,
-        sink: &mut Sink,
-    ) -> anyhow::Result<u64> {
+    ) -> anyhow::Result<IClientVirtualDevice> {
         let mut config: VDConfig = unsafe { std::mem::zeroed() };
-        // Wait for SQL Server to attach to the set (it does so as BACKUP starts).
         let hr = unsafe { vds.GetConfiguration(30_000, &mut config) };
         if hr == VD_E_TIMEOUT {
             anyhow::bail!(
                 "timed out waiting for SQL Server to attach to the virtual device \
-                 (did BACKUP start, and is the connection sysadmin?)"
+                 (did the BACKUP/RESTORE start, and is the connection sysadmin?)"
             );
         }
         hr.ok().context("VDI GetConfiguration failed")?;
@@ -424,8 +531,17 @@ mod windows_impl {
         unsafe { vds.OpenDevice(PCWSTR(name_w.as_ptr()), &mut device_ptr) }
             .ok()
             .context("VDI OpenDevice failed")?;
-        let device = unsafe { IClientVirtualDevice::from_raw(device_ptr) };
+        Ok(unsafe { IClientVirtualDevice::from_raw(device_ptr) })
+    }
 
+    /// Backup direction: handle the device's `VDC_Write` commands by writing the
+    /// backup bytes to `sink`, until the device closes.
+    fn drain_device(
+        vds: &IClientVirtualDeviceSet2,
+        set_name: &str,
+        sink: &mut Sink,
+    ) -> anyhow::Result<u64> {
+        let device = open_device(vds, set_name)?;
         let mut total: u64 = 0;
         loop {
             let mut cmd_ptr: *mut VDCCommand = std::ptr::null_mut();
@@ -454,8 +570,6 @@ mod windows_impl {
                     ERROR_SUCCESS
                 }
                 VDC_CLEAR_ERROR => ERROR_SUCCESS,
-                // Restore-only and tape/snapshot commands are not used here.
-                VDC_READ => ERROR_NOT_SUPPORTED,
                 _ => ERROR_NOT_SUPPORTED,
             };
 
@@ -467,7 +581,50 @@ mod windows_impl {
                 anyhow::bail!("failed writing backup data to the sink");
             }
         }
+        Ok(total)
+    }
 
+    /// Restore direction: satisfy the device's `VDC_Read` commands from `source`,
+    /// reporting end of stream when it runs out, until the device closes.
+    fn fill_device(
+        vds: &IClientVirtualDeviceSet2,
+        set_name: &str,
+        source: &mut ImageSource,
+    ) -> anyhow::Result<u64> {
+        let device = open_device(vds, set_name)?;
+        let mut total: u64 = 0;
+        loop {
+            let mut cmd_ptr: *mut VDCCommand = std::ptr::null_mut();
+            let hr = unsafe { device.GetCommand(u32::MAX, &mut cmd_ptr) };
+            if hr == VD_E_CLOSE {
+                break; // normal end of stream
+            }
+            hr.ok().context("VDI GetCommand failed")?;
+
+            let cmd = unsafe { &*cmd_ptr };
+            let mut bytes_transferred: u32 = 0;
+            let completion_code = match cmd.command_code {
+                VDC_READ => {
+                    let out =
+                        unsafe { std::slice::from_raw_parts_mut(cmd.buffer, cmd.size as usize) };
+                    let n = source.read_into(out);
+                    bytes_transferred = n as u32;
+                    total += n as u64;
+                    // A short read is end of stream, mirroring the VDI sample.
+                    if n as u32 == cmd.size {
+                        ERROR_SUCCESS
+                    } else {
+                        ERROR_HANDLE_EOF
+                    }
+                }
+                VDC_FLUSH | VDC_CLEAR_ERROR => ERROR_SUCCESS,
+                _ => ERROR_NOT_SUPPORTED,
+            };
+
+            unsafe { device.CompleteCommand(cmd_ptr, completion_code, bytes_transferred, 0) }
+                .ok()
+                .context("VDI CompleteCommand failed")?;
+        }
         Ok(total)
     }
 }

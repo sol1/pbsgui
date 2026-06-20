@@ -259,6 +259,46 @@ async fn probe_sql(
         .ok_or_else(|| "engine did not return a probe result".to_string())
 }
 
+/// List a SQL database's snapshots for a backup job, by date/time.
+#[tauri::command]
+async fn list_sql_snapshots(job_id: String, database: String) -> Result<Vec<SnapshotInfo>, String> {
+    let replies = request_all(Request::ListSqlSnapshots { job_id, database }).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Snapshots { snapshots } => Some(snapshots),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return snapshots".to_string())
+}
+
+/// Restore a SQL database snapshot via VDI, streaming progress.
+#[tauri::command]
+async fn restore_sql(
+    job_id: String,
+    database: String,
+    backup_time: i64,
+    target_database: String,
+    on_event: Channel<Reply>,
+) -> Result<(), String> {
+    ensure_engine().await?;
+    let name = pbsgui_ipc::socket_name(DEFAULT_SOCKET).map_err(|e| e.to_string())?;
+    let request = Request::RestoreSql {
+        job_id,
+        database,
+        backup_time,
+        target_database,
+    };
+    pbsgui_ipc::send_request(name, &request, move |reply| {
+        let _ = on_event.send(reply);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Run readiness checks against a SQL Server instance.
 #[tauri::command]
 async fn check_sql(
@@ -515,6 +555,8 @@ pub fn run() {
         discover_sql,
         probe_sql,
         check_sql,
+        list_sql_snapshots,
+        restore_sql,
         backup_sql_to_file,
         backup_sql_to_pbs,
         list_sql_connections,

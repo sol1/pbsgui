@@ -243,8 +243,7 @@ async fn backup_sql_to_pbs(
 
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     for db in databases {
-        let group = format!("{backup_id}-{}", sanitize(db));
-        let archive = format!("{}.didx", sanitize(db));
+        let (group, archive) = sql_group_and_archive(backup_id, db);
         // PBS only allows the backup types vm/ct/host; SQL backups use "host"
         // and stay distinct by their per-database group id.
         let params = pbs_session_params(server_id, &group, "host", unix_now())?;
@@ -360,6 +359,13 @@ fn sql_conn_and_password(
         _ => secrets::get(&connstore::sql_secret_key(connection_id))?,
     };
     Ok((conn, password))
+}
+
+/// The PBS snapshot group and archive name for a database in a SQL job. Kept in
+/// one place so backup and restore agree on the naming.
+pub(crate) fn sql_group_and_archive(backup_id: &str, database: &str) -> (String, String) {
+    let db = sanitize(database);
+    (format!("{backup_id}-{db}"), format!("{db}.didx"))
 }
 
 /// PBS-safe slug for snapshot groups and archive names.
