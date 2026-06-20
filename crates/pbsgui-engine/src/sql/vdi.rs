@@ -133,6 +133,7 @@ pub async fn restore_database_from_image(
     _port: Option<u16>,
     _auth: &SqlAuth,
     _password: Option<&str>,
+    _source_database: &str,
     _target_database: &str,
     _image: Vec<u8>,
 ) -> anyhow::Result<()> {
@@ -158,6 +159,7 @@ mod windows_impl {
     use anyhow::Context;
     use pbs_client::{BackupStats, SessionParams};
     use pbsgui_ipc::SqlAuth;
+    use tiberius::Row;
     use uuid::Uuid;
     use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, HRESULT, PCWSTR};
     use windows::Win32::System::Com::{
@@ -373,21 +375,6 @@ mod windows_impl {
         super::combine_pbs_result(backup, upload)
     }
 
-    /// Issue `RESTORE DATABASE ... FROM VIRTUAL_DEVICE`, overwriting the target
-    /// and recovering it online.
-    async fn issue_restore(
-        client: &mut SqlClient,
-        target_database: &str,
-        set_name: &str,
-    ) -> anyhow::Result<()> {
-        let escaped = target_database.replace(']', "]]");
-        let sql = format!(
-            "RESTORE DATABASE [{escaped}] FROM VIRTUAL_DEVICE = '{set_name}' WITH REPLACE, RECOVERY"
-        );
-        client.simple_query(sql).await?.into_results().await?;
-        Ok(())
-    }
-
     /// An in-memory restore source: the downloaded native backup stream, served
     /// sequentially to the device's `VDC_Read` requests.
     struct ImageSource {
@@ -406,17 +393,25 @@ mod windows_impl {
         }
     }
 
-    pub async fn restore_database_from_image(
-        server: &str,
-        port: Option<u16>,
-        auth: &SqlAuth,
-        password: Option<&str>,
-        target_database: &str,
-        image: Vec<u8>,
-    ) -> anyhow::Result<()> {
-        let mut client = probe::connect(server, port, auth, password).await?;
-        let set_name = format!("pbsgui-{}", Uuid::new_v4());
+    /// One file inside a backup (from `RESTORE FILELISTONLY`).
+    struct BackupFile {
+        logical: String,
+        physical: String,
+        is_log: bool,
+    }
 
+    /// Run a statement that reads its input from a VDI device fed by `image`
+    /// (`RESTORE ... FROM VIRTUAL_DEVICE`), returning the statement's result sets.
+    /// `make_sql` builds the statement given the device set name.
+    async fn run_vdi_read_stmt<F>(
+        client: &mut SqlClient,
+        image: Vec<u8>,
+        make_sql: F,
+    ) -> anyhow::Result<Vec<Vec<Row>>>
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let set_name = format!("pbsgui-{}", Uuid::new_v4());
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let loop_name = set_name.clone();
         let device_loop = tokio::task::spawn_blocking(move || {
@@ -433,16 +428,168 @@ mod windows_impl {
             .await
             .map_err(|_| anyhow::anyhow!("VDI thread exited before signaling readiness"))??;
 
-        let restore = issue_restore(&mut client, target_database, &set_name).await;
+        let sql = make_sql(&set_name);
+        let stmt = async {
+            let stream = client.simple_query(sql).await?;
+            stream.into_results().await
+        }
+        .await;
+
         let device_result = device_loop
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
 
-        // A RESTORE failure breaks the device read, so it is the root cause when
-        // present; otherwise surface the device error.
-        match (restore, device_result) {
-            (Ok(()), _) => Ok(()),
-            (Err(sql), _) => Err(sql.context("RESTORE DATABASE failed")),
+        // A statement failure breaks the device read, so it is the root cause.
+        match (stmt, device_result) {
+            (Ok(results), _) => Ok(results),
+            (Err(sql), _) => Err(anyhow::Error::new(sql).context("the RESTORE statement failed")),
+        }
+    }
+
+    pub async fn restore_database_from_image(
+        server: &str,
+        port: Option<u16>,
+        auth: &SqlAuth,
+        password: Option<&str>,
+        source_database: &str,
+        target_database: &str,
+        image: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let mut client = probe::connect(server, port, auth, password).await?;
+        let target = target_database.replace(']', "]]");
+
+        if source_database.eq_ignore_ascii_case(target_database) {
+            // In-place restore: keep the backup's own file paths.
+            run_vdi_read_stmt(&mut client, image, |set| {
+                format!(
+                    "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                     WITH REPLACE, RECOVERY"
+                )
+            })
+            .await?;
+            return Ok(());
+        }
+
+        // Restoring under a new name: relocate each file so it does not collide
+        // with the still-existing source database (otherwise error 1834).
+        let files = backup_filelist(&mut client, image.clone()).await?;
+        let (data_dir, log_dir) = default_dirs(&mut client).await?;
+        let moves = move_clause(&files, &data_dir, &log_dir, target_database);
+        run_vdi_read_stmt(&mut client, image, |set| {
+            format!(
+                "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                 WITH REPLACE, RECOVERY{moves}"
+            )
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Read the backup's file list via `RESTORE FILELISTONLY` over VDI.
+    async fn backup_filelist(
+        client: &mut SqlClient,
+        image: Vec<u8>,
+    ) -> anyhow::Result<Vec<BackupFile>> {
+        let results = run_vdi_read_stmt(client, image, |set| {
+            format!("RESTORE FILELISTONLY FROM VIRTUAL_DEVICE = '{set}'")
+        })
+        .await?;
+        let rows = results.into_iter().next().unwrap_or_default();
+        let files: Vec<BackupFile> = rows
+            .into_iter()
+            .map(|row| {
+                let ftype = row.get::<&str, _>("Type").unwrap_or("D");
+                BackupFile {
+                    logical: row
+                        .get::<&str, _>("LogicalName")
+                        .unwrap_or_default()
+                        .to_string(),
+                    physical: row
+                        .get::<&str, _>("PhysicalName")
+                        .unwrap_or_default()
+                        .to_string(),
+                    is_log: ftype.eq_ignore_ascii_case("L"),
+                }
+            })
+            .collect();
+        if files.is_empty() {
+            anyhow::bail!("the backup file list was empty");
+        }
+        Ok(files)
+    }
+
+    /// The instance's default data and log directories (empty if unavailable).
+    async fn default_dirs(client: &mut SqlClient) -> anyhow::Result<(String, String)> {
+        let row = client
+            .simple_query(
+                "SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(260)), \
+                        CAST(SERVERPROPERTY('InstanceDefaultLogPath') AS nvarchar(260))",
+            )
+            .await?
+            .into_row()
+            .await?
+            .context("default-paths query returned no row")?;
+        Ok((
+            row.get::<&str, _>(0).unwrap_or_default().to_string(),
+            row.get::<&str, _>(1).unwrap_or_default().to_string(),
+        ))
+    }
+
+    /// Build the `, MOVE N'logical' TO N'newpath'` clauses that relocate each
+    /// file into the default dir under a target-prefixed name.
+    fn move_clause(files: &[BackupFile], data_dir: &str, log_dir: &str, target: &str) -> String {
+        let tgt = sanitize_file(target);
+        let mut clause = String::new();
+        for f in files {
+            let base = f.physical.rsplit(['\\', '/']).next().unwrap_or(&f.physical);
+            let chosen = if f.is_log { log_dir } else { data_dir };
+            let dir = if chosen.is_empty() {
+                parent_dir(&f.physical)
+            } else {
+                chosen.to_string()
+            };
+            let dir = ensure_trailing_sep(&dir);
+            let new_path = format!("{dir}{tgt}_{base}");
+            clause.push_str(&format!(
+                ", MOVE N'{}' TO N'{}'",
+                esc(&f.logical),
+                esc(&new_path)
+            ));
+        }
+        clause
+    }
+
+    /// Escape a T-SQL single-quoted string literal.
+    fn esc(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    /// Keep only filename-safe characters for the target-name prefix.
+    fn sanitize_file(value: &str) -> String {
+        value
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    fn parent_dir(physical: &str) -> String {
+        match physical.rfind(['\\', '/']) {
+            Some(i) => physical[..i].to_string(),
+            None => String::new(),
+        }
+    }
+
+    fn ensure_trailing_sep(dir: &str) -> String {
+        if dir.is_empty() || dir.ends_with('\\') || dir.ends_with('/') {
+            dir.to_string()
+        } else {
+            format!("{dir}\\")
         }
     }
 

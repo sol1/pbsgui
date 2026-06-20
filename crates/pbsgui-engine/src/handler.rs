@@ -539,6 +539,7 @@ async fn run_restore_sql(
         ctx.conn.port,
         &ctx.conn.auth,
         ctx.password.as_deref(),
+        database,
         target_database,
         image,
     )
