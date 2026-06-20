@@ -70,6 +70,9 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::CheckSql { .. } => {
+            let _ = responder.send(&Reply::SqlChecks { checks: vec![] }).await;
+        }
     }
 }
 

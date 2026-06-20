@@ -459,3 +459,50 @@ button:disabled {
   min-width: 160px;
   font-weight: 500;
 }
+
+.sql-checks {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.check {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.check-glyph {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.check-ok .check-glyph {
+  color: #5fbf6a;
+}
+
+.check-warn .check-glyph {
+  color: #e0915f;
+}
+
+.check-fail .check-glyph {
+  color: #e06a5f;
+}
+
+.check-name {
+  font-weight: 500;
+}
+
+.check-hint {
+  margin-top: 3px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+}

@@ -117,6 +117,16 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             let _ = responder.send(&reply).await;
         }
 
+        Request::CheckSql {
+            server,
+            port,
+            auth,
+            password,
+        } => {
+            let checks = crate::sql::check::check(&server, port, &auth, password.as_deref()).await;
+            let _ = responder.send(&Reply::SqlChecks { checks }).await;
+        }
+
         Request::BackupSqlToFile {
             server,
             port,

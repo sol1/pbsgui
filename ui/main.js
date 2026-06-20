@@ -494,17 +494,52 @@ function renderSqlInstanceCard(inst, card) {
     body = '<div class="sql-meta muted">not yet probed</div>';
   }
 
+  const checksHtml = inst.checks
+    ? `<div class="sql-checks">${inst.checks.map(renderCheck).join("")}</div>`
+    : "";
+
   card.innerHTML =
     `<div class="sql-head"><span class="sql-server">${escapeHtml(inst.server)}</span>` +
     badges.join("") +
     '<span class="spacer"></span>' +
+    `<button type="button" class="sql-check-btn">Check</button>` +
     `<button type="button" class="sql-probe-btn">${inst.probe ? "Re-probe" : "Probe"}</button>` +
     `</div><div class="sql-meta muted">instance: ${escapeHtml(inst.instance_name)}</div>` +
-    body;
+    body +
+    checksHtml;
   card.querySelector(".sql-probe-btn").onclick = () => probeInstance(inst, card);
+  card.querySelector(".sql-check-btn").onclick = () => checkInstance(inst, card);
   card.querySelectorAll(".sql-db-backup").forEach((btn) => {
     btn.onclick = () => backupDatabase(inst, btn.dataset.db);
   });
+}
+
+function renderCheck(c) {
+  const glyph = { ok: "✓", warn: "!", fail: "✗" }[c.status] || "•";
+  const hint = c.hint ? `<div class="check-hint">${escapeHtml(c.hint)}</div>` : "";
+  return (
+    `<div class="check check-${escapeHtml(c.status)}"><span class="check-glyph">${glyph}</span>` +
+    `<div class="check-body"><span class="check-name">${escapeHtml(c.name)}</span> ` +
+    `<span class="muted">${escapeHtml(c.detail)}</span>${hint}</div></div>`
+  );
+}
+
+// Run readiness checks (connectivity, login, sysadmin) against an instance.
+async function checkInstance(inst, card) {
+  const btn = card.querySelector(".sql-check-btn");
+  btn.disabled = true;
+  btn.textContent = "checking...";
+  try {
+    inst.checks = await invoke("check_sql", {
+      server: inst.server,
+      port: inst.port ?? null,
+      auth: { kind: "integrated" },
+      password: null,
+    });
+  } catch (err) {
+    inst.checks = [{ name: "Check", status: "fail", detail: String(err), hint: null }];
+  }
+  renderSqlInstanceCard(inst, card);
 }
 
 // Probe an instance with the engine's service identity (integrated auth), the

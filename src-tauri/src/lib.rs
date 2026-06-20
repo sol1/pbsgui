@@ -8,7 +8,8 @@
 //! GUI never stops backups.
 
 use pbsgui_ipc::{
-    FileInfo, Job, Reply, Request, SnapshotInfo, SqlAuth, SqlInstance, SqlProbe, DEFAULT_SOCKET,
+    FileInfo, Job, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck, SqlInstance, SqlProbe,
+    DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -198,6 +199,33 @@ async fn probe_sql(
         .ok_or_else(|| "engine did not return a probe result".to_string())
 }
 
+/// Run readiness checks against a SQL Server instance.
+#[tauri::command]
+async fn check_sql(
+    server: String,
+    port: Option<u16>,
+    auth: SqlAuth,
+    password: Option<String>,
+) -> Result<Vec<SqlCheck>, String> {
+    let replies = request_all(Request::CheckSql {
+        server,
+        port,
+        auth,
+        password,
+    })
+    .await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::SqlChecks { checks } => Some(checks),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return checks".to_string())
+}
+
 /// Back up a SQL Server database over VDI to a local file, streaming progress.
 #[tauri::command]
 async fn backup_sql_to_file(
@@ -381,6 +409,7 @@ pub fn run() {
         restore,
         discover_sql,
         probe_sql,
+        check_sql,
         backup_sql_to_file,
         pick_save_file,
         pick_destination,

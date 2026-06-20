@@ -162,6 +162,26 @@ pub struct SqlDatabase {
     pub is_preferred_backup_replica: Option<bool>,
 }
 
+/// The outcome of a single readiness check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+/// One readiness check for backing up an instance, with a fix hint on failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlCheck {
+    pub name: String,
+    pub status: CheckStatus,
+    pub detail: String,
+    /// How to fix it (shown when the check is not Ok).
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
 /// Details obtained by connecting to an instance (the probe step).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlProbe {
@@ -271,6 +291,16 @@ pub enum Request {
         #[serde(default)]
         password: Option<String>,
     },
+    /// Run readiness checks against an instance (connectivity, login identity,
+    /// and the sysadmin role VDI requires), returning a hint for each failure.
+    CheckSql {
+        server: String,
+        #[serde(default)]
+        port: Option<u16>,
+        auth: SqlAuth,
+        #[serde(default)]
+        password: Option<String>,
+    },
     /// Back up a database over VDI to a local `.bak` file (the validation step
     /// before streaming to PBS). Streams progress; the connection must be
     /// `sysadmin`.
@@ -306,6 +336,8 @@ pub enum Reply {
     SqlInstances { instances: Vec<SqlInstance> },
     /// Reply to [`Request::ProbeSql`].
     SqlProbe { probe: SqlProbe },
+    /// Reply to [`Request::CheckSql`].
+    SqlChecks { checks: Vec<SqlCheck> },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -331,6 +363,7 @@ impl Reply {
                 | Reply::Files { .. }
                 | Reply::SqlInstances { .. }
                 | Reply::SqlProbe { .. }
+                | Reply::SqlChecks { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )

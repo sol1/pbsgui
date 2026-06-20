@@ -10,7 +10,7 @@ pub mod protocol;
 pub mod transport;
 
 pub use protocol::{
-    FileInfo, Job, PbsDestination, Reply, Request, Schedule, SnapshotInfo, SqlAuth, SqlAuthMode,
-    SqlDatabase, SqlDiscoverySource, SqlInstance, SqlProbe, SqlTopology,
+    CheckStatus, FileInfo, Job, PbsDestination, Reply, Request, Schedule, SnapshotInfo, SqlAuth,
+    SqlAuthMode, SqlCheck, SqlDatabase, SqlDiscoverySource, SqlInstance, SqlProbe, SqlTopology,
 };
 pub use transport::{send_request, serve, socket_name, Responder, DEFAULT_SOCKET};
