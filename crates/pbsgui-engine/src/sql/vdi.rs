@@ -322,7 +322,7 @@ mod windows_impl {
         match (backup, upload) {
             (Ok(()), Ok(stats)) => Ok(stats),
             (Ok(()), Err(pbs)) => Err(anyhow::Error::new(pbs).context("PBS upload failed")),
-            (Err(sql), Ok(())) => Err(sql.context("BACKUP DATABASE failed")),
+            (Err(sql), Ok(_)) => Err(sql.context("BACKUP DATABASE failed")),
             (Err(sql), Err(pbs)) => Err(anyhow::anyhow!(
                 "PBS upload failed: {:#}; BACKUP DATABASE also failed: {sql:#}",
                 anyhow::Error::new(pbs)
