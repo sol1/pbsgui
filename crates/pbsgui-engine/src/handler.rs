@@ -18,7 +18,10 @@ const ARCHIVE_NAME: &str = "files.didx";
 /// Backup type used for filesystem backups.
 const BACKUP_TYPE: &str = "host";
 /// Backup type used for SQL Server backups.
-const SQL_BACKUP_TYPE: &str = "mssql";
+// PBS only accepts the backup types vm, ct, and host, so SQL Server backups use
+// "host" and are kept distinct by their snapshot group id (which carries the
+// database name).
+const SQL_BACKUP_TYPE: &str = "host";
 
 /// Handle one IPC request against the shared job store.
 pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Responder) {

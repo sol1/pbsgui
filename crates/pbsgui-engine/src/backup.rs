@@ -245,7 +245,9 @@ async fn backup_sql_to_pbs(
     for db in databases {
         let group = format!("{backup_id}-{}", sanitize(db));
         let archive = format!("{}.didx", sanitize(db));
-        let params = pbs_session_params(server_id, &group, "mssql", unix_now())?;
+        // PBS only allows the backup types vm/ct/host; SQL backups use "host"
+        // and stay distinct by their per-database group id.
+        let params = pbs_session_params(server_id, &group, "host", unix_now())?;
         let _ = events
             .send(Reply::Log {
                 line: format!("backing up [{db}] to PBS (group {group})"),
