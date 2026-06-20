@@ -13,10 +13,48 @@
 use std::io::Read;
 use std::sync::mpsc::Receiver;
 
+use pbs_client::BackupStats;
 #[cfg(not(windows))]
-use pbs_client::{BackupStats, SessionParams};
+use pbs_client::SessionParams;
 #[cfg(not(windows))]
 use pbsgui_ipc::SqlAuth;
+
+/// Combine the two halves of a VDI-to-PBS backup into one result.
+///
+/// `backup` is the `BACKUP DATABASE` statement outcome; `upload` is the PBS
+/// upload outcome. A PBS upload failure breaks the device stream, which in turn
+/// makes `BACKUP` fail, so when both fail the PBS error is usually the root
+/// cause: report it first and include the `BACKUP` error too. Kept
+/// cross-platform (not inside the Windows-only module) so this logic is
+/// typechecked on every build.
+fn combine_pbs_result(
+    backup: anyhow::Result<()>,
+    upload: pbs_client::Result<BackupStats>,
+) -> anyhow::Result<BackupStats> {
+    match (backup, upload) {
+        (Ok(()), Ok(stats)) => Ok(stats),
+        (Ok(()), Err(pbs)) => Err(anyhow::Error::new(pbs).context("PBS upload failed")),
+        (Err(sql), Ok(_)) => Err(sql.context("BACKUP DATABASE failed")),
+        (Err(sql), Err(pbs)) => Err(anyhow::anyhow!(
+            "PBS upload failed: {:#}; BACKUP DATABASE also failed: {sql:#}",
+            anyhow::Error::new(pbs)
+        )),
+    }
+}
+
+/// Combine the two halves of a VDI-to-file backup. `bytes` is the device-loop
+/// byte count. A failed `BACKUP` is the source of truth even if the device
+/// drained cleanly.
+fn combine_file_result(
+    backup: anyhow::Result<()>,
+    device: anyhow::Result<u64>,
+) -> anyhow::Result<u64> {
+    match (backup, device) {
+        (Ok(()), Ok(bytes)) => Ok(bytes),
+        (Err(sql), _) => Err(sql.context("BACKUP DATABASE failed")),
+        (Ok(()), Err(device)) => Err(device),
+    }
+}
 
 /// Adapts a channel of byte buffers into a blocking [`Read`], so the VDI device
 /// thread can hand its backup stream to the PBS uploader without staging to
@@ -263,11 +301,7 @@ mod windows_impl {
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
 
-        match (backup, device_result) {
-            (Ok(()), Ok(bytes)) => Ok(bytes),
-            (Err(sql), _) => Err(sql.context("BACKUP DATABASE failed")),
-            (Ok(()), Err(device)) => Err(device),
-        }
+        super::vdi::combine_file_result(backup, device_result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -315,19 +349,10 @@ mod windows_impl {
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
 
-        // A PBS upload failure breaks the device stream, which in turn makes
-        // BACKUP fail; so when both fail the PBS error is usually the root cause.
-        // Report it first, but include the BACKUP error when both are present.
+        // The device-loop result only matters when it is the lone failure; the
+        // BACKUP and PBS errors are more informative when present.
         let _ = device_result;
-        match (backup, upload) {
-            (Ok(()), Ok(stats)) => Ok(stats),
-            (Ok(()), Err(pbs)) => Err(anyhow::Error::new(pbs).context("PBS upload failed")),
-            (Err(sql), Ok(_)) => Err(sql.context("BACKUP DATABASE failed")),
-            (Err(sql), Err(pbs)) => Err(anyhow::anyhow!(
-                "PBS upload failed: {:#}; BACKUP DATABASE also failed: {sql:#}",
-                anyhow::Error::new(pbs)
-            )),
-        }
+        super::vdi::combine_pbs_result(backup, upload)
     }
 
     /// Run the COM device-set lifecycle on the current (blocking) thread,
@@ -451,6 +476,18 @@ mod windows_impl {
 mod tests {
     use super::ChannelReader;
     use std::io::Read;
+
+    #[test]
+    fn combine_results_pick_the_informative_error() {
+        // Both succeed.
+        assert!(super::combine_file_result(Ok(()), Ok(42)).is_ok());
+        // BACKUP failed (device may be anything) -> BACKUP error.
+        let e = super::combine_file_result(Err(anyhow::anyhow!("sql boom")), Ok(0)).unwrap_err();
+        assert!(format!("{e:#}").contains("sql boom"));
+        // Device failed alone -> device error.
+        let e = super::combine_file_result(Ok(()), Err(anyhow::anyhow!("disk full"))).unwrap_err();
+        assert!(format!("{e:#}").contains("disk full"));
+    }
 
     #[test]
     fn channel_reader_concatenates_buffers_and_ends_on_drop() {
