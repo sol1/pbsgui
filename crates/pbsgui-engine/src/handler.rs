@@ -560,7 +560,8 @@ async fn run_job(store: Arc<JobStore>, id: String, mut responder: Responder) {
 
     let (success, message) = match run.await {
         Ok(Ok(summary)) => (true, summary),
-        Ok(Err(e)) => (false, e.to_string()),
+        // `{:#}` includes the full error chain (the SQL Server message lives there).
+        Ok(Err(e)) => (false, format!("{e:#}")),
         Err(e) => (false, format!("job task failed: {e}")),
     };
     let status = if success {

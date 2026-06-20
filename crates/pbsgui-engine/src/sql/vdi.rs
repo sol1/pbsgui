@@ -315,10 +315,18 @@ mod windows_impl {
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
 
-        match (backup, upload, device_result) {
-            (Ok(()), Ok(stats), _) => Ok(stats),
-            (Err(sql), _, _) => Err(sql.context("BACKUP DATABASE failed")),
-            (Ok(()), Err(pbs), _) => Err(anyhow::Error::new(pbs).context("PBS upload failed")),
+        // A PBS upload failure breaks the device stream, which in turn makes
+        // BACKUP fail; so when both fail the PBS error is usually the root cause.
+        // Report it first, but include the BACKUP error when both are present.
+        let _ = device_result;
+        match (backup, upload) {
+            (Ok(()), Ok(stats)) => Ok(stats),
+            (Ok(()), Err(pbs)) => Err(anyhow::Error::new(pbs).context("PBS upload failed")),
+            (Err(sql), Ok(())) => Err(sql.context("BACKUP DATABASE failed")),
+            (Err(sql), Err(pbs)) => Err(anyhow::anyhow!(
+                "PBS upload failed: {:#}; BACKUP DATABASE also failed: {sql:#}",
+                anyhow::Error::new(pbs)
+            )),
         }
     }
 
