@@ -6,12 +6,56 @@
 //! interfaces and the device command loop are Windows-only; the exact ABI is
 //! documented in `research/notes/08-vdi-abi.md`.
 //!
-//! Stage 1 (this module) streams the backup to a local `.bak` file to validate
-//! the device handshake on real hardware. Stage 2 will replace the file sink
-//! with the PBS fixed-index uploader.
+//! The same device loop feeds either a local `.bak` file (for validating the
+//! device handshake) or, streamed through [`ChannelReader`], the PBS uploader as
+//! a deduplicated dynamic-index snapshot.
+
+use std::io::Read;
+use std::sync::mpsc::Receiver;
 
 #[cfg(not(windows))]
+use pbs_client::{BackupStats, SessionParams};
+#[cfg(not(windows))]
 use pbsgui_ipc::SqlAuth;
+
+/// Adapts a channel of byte buffers into a blocking [`Read`], so the VDI device
+/// thread can hand its backup stream to the PBS uploader without staging to
+/// disk. Reading returns EOF once every sender has been dropped.
+pub(crate) struct ChannelReader {
+    rx: Receiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl ChannelReader {
+    pub(crate) fn new(rx: Receiver<Vec<u8>>) -> Self {
+        Self {
+            rx,
+            buf: Vec::new(),
+            pos: 0,
+        }
+    }
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        // Pull the next non-empty buffer, blocking until one arrives or the
+        // senders drop (EOF).
+        while self.pos >= self.buf.len() {
+            match self.rx.recv() {
+                Ok(next) => {
+                    self.buf = next;
+                    self.pos = 0;
+                }
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = (self.buf.len() - self.pos).min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
 
 /// Back up `database` over VDI, writing the native backup stream to
 /// `output_path`. The connection issuing `BACKUP` must be `sysadmin`.
@@ -27,8 +71,23 @@ pub async fn backup_database_to_file(
     anyhow::bail!("VDI backup is only available on Windows")
 }
 
+/// Back up `database` over VDI, streaming it to PBS as a dynamic-index snapshot.
+#[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
+pub async fn backup_database_to_pbs(
+    _server: &str,
+    _port: Option<u16>,
+    _auth: &SqlAuth,
+    _password: Option<&str>,
+    _database: &str,
+    _params: &SessionParams,
+    _archive_name: &str,
+) -> anyhow::Result<BackupStats> {
+    anyhow::bail!("VDI backup is only available on Windows")
+}
+
 #[cfg(windows)]
-pub use windows_impl::backup_database_to_file;
+pub use windows_impl::{backup_database_to_file, backup_database_to_pbs};
 
 #[cfg(windows)]
 mod windows_impl {
@@ -39,8 +98,10 @@ mod windows_impl {
     use std::ffi::c_void;
     use std::fs::File;
     use std::io::Write;
+    use std::sync::mpsc::SyncSender;
 
     use anyhow::Context;
+    use pbs_client::{BackupStats, SessionParams};
     use pbsgui_ipc::SqlAuth;
     use uuid::Uuid;
     use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, HRESULT, PCWSTR};
@@ -48,6 +109,9 @@ mod windows_impl {
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_MULTITHREADED,
     };
+
+    use super::ChannelReader;
+    use crate::sql::probe::{self, SqlClient};
 
     // The coclass CLSID equals IID_IClientVirtualDeviceSet (see vdiguid.h /
     // research/notes/08-vdi-abi.md).
@@ -125,8 +189,46 @@ mod windows_impl {
         ) -> HRESULT;
     }
 
+    /// Where the device loop writes the backup stream.
+    enum Sink {
+        File(File),
+        /// Bounded channel to the PBS uploader; full = backpressure onto SQL.
+        Channel(SyncSender<Vec<u8>>),
+    }
+
+    impl Sink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+            match self {
+                Sink::File(file) => file.write_all(data),
+                Sink::Channel(tx) => tx.send(data.to_vec()).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PBS upload stopped")
+                }),
+            }
+        }
+
+        fn flush(&mut self) {
+            if let Sink::File(file) = self {
+                let _ = file.flush();
+            }
+        }
+    }
+
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Issue `BACKUP DATABASE ... TO VIRTUAL_DEVICE`. COPY_ONLY so an ad-hoc
+    /// backup never disturbs the customer's differential/log chain.
+    async fn issue_backup(
+        client: &mut SqlClient,
+        database: &str,
+        set_name: &str,
+    ) -> anyhow::Result<()> {
+        let escaped = database.replace(']', "]]");
+        let sql =
+            format!("BACKUP DATABASE [{escaped}] TO VIRTUAL_DEVICE = '{set_name}' WITH COPY_ONLY");
+        client.simple_query(sql).await?.into_results().await?;
+        Ok(())
     }
 
     pub async fn backup_database_to_file(
@@ -137,56 +239,95 @@ mod windows_impl {
         database: &str,
         output_path: &str,
     ) -> anyhow::Result<u64> {
-        let mut client = crate::sql::probe::connect(server, port, auth, password).await?;
-
+        let mut client = probe::connect(server, port, auth, password).await?;
         let set_name = format!("pbsgui-{}", Uuid::new_v4());
 
-        // The COM device loop is blocking; run it on a dedicated thread. It does
-        // CreateEx, signals readiness, then drains the device into the file.
+        if let Some(parent) = std::path::Path::new(output_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = File::create(output_path)
+            .with_context(|| format!("creating backup file {output_path}"))?;
+
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let loop_name = set_name.clone();
-        let loop_out = output_path.to_string();
-        let device_loop =
-            tokio::task::spawn_blocking(move || run_device_loop(&loop_name, &loop_out, ready_tx));
+        let device_loop = tokio::task::spawn_blocking(move || {
+            run_device_loop(&loop_name, Sink::File(file), ready_tx)
+        });
 
-        // Wait until the device set exists before issuing BACKUP, so SQL can find it.
         ready_rx
             .await
             .map_err(|_| anyhow::anyhow!("VDI thread exited before signaling readiness"))??;
 
-        // COPY_ONLY so an ad-hoc backup never disturbs the customer's diff/log chain.
-        let escaped = database.replace(']', "]]");
-        let backup_sql =
-            format!("BACKUP DATABASE [{escaped}] TO VIRTUAL_DEVICE = '{set_name}' WITH COPY_ONLY");
-        let backup = client.simple_query(backup_sql).await;
-        let backup = match backup {
-            Ok(stream) => stream.into_results().await.map(|_| ()),
-            Err(e) => Err(e),
-        };
+        let backup = issue_backup(&mut client, database, &set_name).await;
+        let device_result = device_loop
+            .await
+            .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
+
+        match (backup, device_result) {
+            (Ok(()), Ok(bytes)) => Ok(bytes),
+            (Err(sql), _) => Err(sql.context("BACKUP DATABASE failed")),
+            (Ok(()), Err(device)) => Err(device),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn backup_database_to_pbs(
+        server: &str,
+        port: Option<u16>,
+        auth: &SqlAuth,
+        password: Option<&str>,
+        database: &str,
+        params: &SessionParams,
+        archive_name: &str,
+    ) -> anyhow::Result<BackupStats> {
+        let mut client = probe::connect(server, port, auth, password).await?;
+        let set_name = format!("pbsgui-{}", Uuid::new_v4());
+
+        // Bounded so SQL throttles to the PBS upload rate rather than buffering
+        // the whole database in memory.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+        let loop_name = set_name.clone();
+        let device_loop = tokio::task::spawn_blocking(move || {
+            run_device_loop(&loop_name, Sink::Channel(tx), ready_tx)
+        });
+
+        ready_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("VDI thread exited before signaling readiness"))??;
+
+        // BACKUP (pushes bytes into the device) and the PBS upload (drains them)
+        // run concurrently; the device loop bridges the two on its own thread.
+        let backup_fut = issue_backup(&mut client, database, &set_name);
+        let upload_fut = pbs_client::backup_dynamic_reader(
+            params,
+            archive_name,
+            true,
+            ChannelReader::new(rx),
+            0,
+            None,
+            |_done, _total| {},
+        );
+        let (backup, upload) = tokio::join!(backup_fut, upload_fut);
 
         let device_result = device_loop
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
 
-        // Surface whichever side failed. When BACKUP fails, the SQL Server error
-        // text (carried by the tiberius error) is the useful part; when both fail,
-        // the device-side cause (e.g. cannot write the file) is usually the root.
-        match (backup, device_result) {
-            (Ok(()), Ok(bytes)) => Ok(bytes),
-            (Err(sql), Ok(_)) => Err(anyhow::anyhow!("BACKUP DATABASE failed: {sql}")),
-            (Ok(()), Err(device)) => Err(device),
-            (Err(sql), Err(device)) => Err(anyhow::anyhow!(
-                "BACKUP DATABASE failed: {sql}; device side: {device:#}"
-            )),
+        match (backup, upload, device_result) {
+            (Ok(()), Ok(stats), _) => Ok(stats),
+            (Err(sql), _, _) => Err(sql.context("BACKUP DATABASE failed")),
+            (Ok(()), Err(pbs), _) => Err(anyhow::Error::new(pbs).context("PBS upload failed")),
         }
     }
 
-    /// Run the full COM device-set lifecycle on the current (blocking) thread,
-    /// writing the backup stream to `output_path`. Signals `ready` once the
-    /// device set is created (so the caller can issue BACKUP).
+    /// Run the COM device-set lifecycle on the current (blocking) thread,
+    /// draining the device into `sink`. Signals `ready` once the device set is
+    /// created (so the caller can issue BACKUP).
     fn run_device_loop(
         set_name: &str,
-        output_path: &str,
+        sink: Sink,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
     ) -> anyhow::Result<u64> {
         unsafe {
@@ -195,14 +336,14 @@ mod windows_impl {
                 .ok()
                 .context("CoInitializeEx failed")?;
         }
-        let result = run_device_loop_inner(set_name, output_path, ready);
+        let result = run_device_loop_inner(set_name, sink, ready);
         unsafe { CoUninitialize() };
         result
     }
 
     fn run_device_loop_inner(
         set_name: &str,
-        output_path: &str,
+        mut sink: Sink,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
     ) -> anyhow::Result<u64> {
         let vds: IClientVirtualDeviceSet2 = unsafe {
@@ -224,7 +365,7 @@ mod windows_impl {
         // here must close the set so a failed BACKUP does not hang the caller.
         let _ = ready.send(Ok(()));
 
-        let outcome = drain_device(&vds, set_name, output_path);
+        let outcome = drain_device(&vds, set_name, &mut sink);
         unsafe { vds.Close().ok().ok() };
         outcome
     }
@@ -232,7 +373,7 @@ mod windows_impl {
     fn drain_device(
         vds: &IClientVirtualDeviceSet2,
         set_name: &str,
-        output_path: &str,
+        sink: &mut Sink,
     ) -> anyhow::Result<u64> {
         let mut config: VDConfig = unsafe { std::mem::zeroed() };
         // Wait for SQL Server to attach to the set (it does so as BACKUP starts).
@@ -252,13 +393,7 @@ mod windows_impl {
             .context("VDI OpenDevice failed")?;
         let device = unsafe { IClientVirtualDevice::from_raw(device_ptr) };
 
-        if let Some(parent) = std::path::Path::new(output_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let mut file = File::create(output_path)
-            .with_context(|| format!("creating backup file {output_path}"))?;
         let mut total: u64 = 0;
-
         loop {
             let mut cmd_ptr: *mut VDCCommand = std::ptr::null_mut();
             let hr = unsafe { device.GetCommand(u32::MAX, &mut cmd_ptr) };
@@ -272,7 +407,7 @@ mod windows_impl {
             let completion_code = match cmd.command_code {
                 VDC_WRITE => {
                     let data = unsafe { std::slice::from_raw_parts(cmd.buffer, cmd.size as usize) };
-                    match file.write_all(data) {
+                    match sink.write(data) {
                         Ok(()) => {
                             bytes_transferred = cmd.size;
                             total += u64::from(cmd.size);
@@ -282,7 +417,7 @@ mod windows_impl {
                     }
                 }
                 VDC_FLUSH => {
-                    let _ = file.flush();
+                    sink.flush();
                     ERROR_SUCCESS
                 }
                 VDC_CLEAR_ERROR => ERROR_SUCCESS,
@@ -296,11 +431,29 @@ mod windows_impl {
                 .context("VDI CompleteCommand failed")?;
 
             if completion_code == ERROR_WRITE_FAULT {
-                anyhow::bail!("failed writing backup data to {output_path}");
+                anyhow::bail!("failed writing backup data to the sink");
             }
         }
 
-        file.flush().ok();
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChannelReader;
+    use std::io::Read;
+
+    #[test]
+    fn channel_reader_concatenates_buffers_and_ends_on_drop() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        tx.send(b"hello ".to_vec()).unwrap();
+        tx.send(Vec::new()).unwrap(); // empty buffers are skipped
+        tx.send(b"world".to_vec()).unwrap();
+        drop(tx); // signals EOF
+
+        let mut out = Vec::new();
+        ChannelReader::new(rx).read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"hello world");
     }
 }

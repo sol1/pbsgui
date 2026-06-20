@@ -444,8 +444,11 @@ function renderSqlDatabases(databases) {
           ? ` · log wait: ${escapeHtml(db.log_reuse_wait)}`
           : "";
       const ag = db.in_availability_group ? " · in AG" : "";
+      const db64 = escapeHtml(db.name);
       const button = canBackup(db)
-        ? `<span class="spacer"></span><button type="button" class="sql-db-backup" data-db="${escapeHtml(db.name)}">Back up</button>`
+        ? `<span class="spacer"></span>` +
+          `<button type="button" class="sql-db-pbs" data-db="${db64}">To PBS</button>` +
+          `<button type="button" class="sql-db-backup" data-db="${db64}">To file</button>`
         : "";
       return (
         `<div class="sql-db"><span class="sql-db-name">${escapeHtml(db.name)}</span>` +
@@ -468,6 +471,51 @@ async function backupDatabase(inst, dbName) {
     database: dbName,
     outputPath: path,
   });
+}
+
+// Back up a database over VDI straight to PBS, reusing a job's PBS connection.
+async function backupDatabaseToPbs(inst, dbName) {
+  const pbsJobId = el("sql-pbs-job").value;
+  if (!pbsJobId) {
+    return alert("Create a backup job first; the SQL backup reuses its PBS connection as the target.");
+  }
+  streamRun(`Backing up ${dbName} to PBS`, "backup_sql_to_pbs", {
+    server: inst.server,
+    port: inst.port ?? null,
+    auth: { kind: "integrated" },
+    password: null,
+    database: dbName,
+    pbsJobId,
+    backupId: `mssql-${slug(dbName)}`,
+  });
+}
+
+// Populate the PBS target dropdown from saved backup jobs (their PBS connection
+// is reused as the destination for SQL backups).
+async function populatePbsJobs() {
+  let jobs = [];
+  try {
+    jobs = await invoke("list_jobs");
+  } catch (err) {
+    /* engine offline; leave empty */
+  }
+  const sel = el("sql-pbs-job");
+  const previous = sel.value;
+  sel.innerHTML = "";
+  if (!jobs.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "no backup jobs yet";
+    sel.append(opt);
+    return;
+  }
+  for (const job of jobs) {
+    const opt = document.createElement("option");
+    opt.value = job.id;
+    opt.textContent = `${job.name} (${job.destination.repository})`;
+    sel.append(opt);
+  }
+  if (previous) sel.value = previous;
 }
 
 function renderSqlInstanceCard(inst, card) {
@@ -511,6 +559,9 @@ function renderSqlInstanceCard(inst, card) {
   card.querySelector(".sql-check-btn").onclick = () => checkInstance(inst, card);
   card.querySelectorAll(".sql-db-backup").forEach((btn) => {
     btn.onclick = () => backupDatabase(inst, btn.dataset.db);
+  });
+  card.querySelectorAll(".sql-db-pbs").forEach((btn) => {
+    btn.onclick = () => backupDatabaseToPbs(inst, btn.dataset.db);
   });
 }
 
@@ -599,7 +650,10 @@ window.addEventListener("DOMContentLoaded", () => {
     showView("browse");
     populateBrowseJobs();
   };
-  el("tab-sql").onclick = () => showView("sql");
+  el("tab-sql").onclick = () => {
+    showView("sql");
+    populatePbsJobs();
+  };
   el("discover-sql").onclick = discoverSql;
   el("new-job").onclick = () => openEditor(null);
   el("job-form").addEventListener("submit", saveJob);

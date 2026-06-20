@@ -254,6 +254,37 @@ async fn backup_sql_to_file(
     .map_err(|e| e.to_string())
 }
 
+/// Back up a SQL Server database over VDI, streaming it to PBS, with progress.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn backup_sql_to_pbs(
+    server: String,
+    port: Option<u16>,
+    auth: SqlAuth,
+    password: Option<String>,
+    database: String,
+    pbs_job_id: String,
+    backup_id: String,
+    on_event: Channel<Reply>,
+) -> Result<(), String> {
+    ensure_engine().await?;
+    let name = pbsgui_ipc::socket_name(DEFAULT_SOCKET).map_err(|e| e.to_string())?;
+    let request = Request::BackupSqlToPbs {
+        server,
+        port,
+        auth,
+        password,
+        database,
+        pbs_job_id,
+        backup_id,
+    };
+    pbsgui_ipc::send_request(name, &request, move |reply| {
+        let _ = on_event.send(reply);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Native save-file picker (for choosing where to write a .bak).
 #[tauri::command]
 async fn pick_save_file(default_name: String) -> Option<String> {
@@ -411,6 +442,7 @@ pub fn run() {
         probe_sql,
         check_sql,
         backup_sql_to_file,
+        backup_sql_to_pbs,
         pick_save_file,
         pick_destination,
         pick_folders,

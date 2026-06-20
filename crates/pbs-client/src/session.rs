@@ -699,9 +699,37 @@ pub async fn backup_dynamic_file_with_progress(
     path: &Path,
     dedup_with_previous: bool,
     catalog: Option<(String, Vec<u8>)>,
-    mut on_progress: impl FnMut(u64, u64),
+    on_progress: impl FnMut(u64, u64),
 ) -> Result<BackupStats> {
     let total_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let file = std::fs::File::open(path)
+        .map_err(|e| PbsError::Protocol(format!("opening {}: {e}", path.display())))?;
+    backup_dynamic_reader(
+        params,
+        archive_name,
+        dedup_with_previous,
+        file,
+        total_bytes,
+        catalog,
+        on_progress,
+    )
+    .await
+}
+
+/// Back up an arbitrary byte stream as a deduplicated dynamic-index archive,
+/// then finish the snapshot. `total_bytes` is used only for progress reporting
+/// (pass 0 if unknown). The reader is consumed on a blocking thread while
+/// chunking and upload proceed concurrently, so a streamed source (e.g. a SQL
+/// Server VDI backup) never has to be staged to disk first.
+pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
+    params: &SessionParams,
+    archive_name: &str,
+    dedup_with_previous: bool,
+    reader: R,
+    total_bytes: u64,
+    catalog: Option<(String, Vec<u8>)>,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<BackupStats> {
     let mut writer = BackupWriter::connect(params).await?;
 
     let mut known: HashSet<[u8; DIGEST_LEN]> = HashSet::new();
@@ -715,11 +743,9 @@ pub async fn backup_dynamic_file_with_progress(
 
     let wid = writer.create_dynamic_index(archive_name).await?;
 
-    let path_buf = path.to_path_buf();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<([u8; DIGEST_LEN], Vec<u8>)>(8);
     let chunker_task = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let file = std::fs::File::open(&path_buf)?;
-        for chunk in chunker::chunk_reader(file) {
+        for chunk in chunker::chunk_reader(reader) {
             let data = chunk?;
             let digest = index::chunk_digest(&data);
             if tx.blocking_send((digest, data)).is_err() {

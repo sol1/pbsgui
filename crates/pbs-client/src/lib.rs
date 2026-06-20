@@ -49,6 +49,6 @@ pub use index::{DynamicIndex, DynamicIndexBuilder, FixedIndex, FixedIndexBuilder
 pub use manifest::BackupManifest;
 pub use repository::Repository;
 pub use session::{
-    backup_dynamic_file, backup_dynamic_file_with_progress, BackupStats, BackupWriter,
-    ReaderClient, SessionParams,
+    backup_dynamic_file, backup_dynamic_file_with_progress, backup_dynamic_reader, BackupStats,
+    BackupWriter, ReaderClient, SessionParams,
 };

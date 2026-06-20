@@ -15,8 +15,10 @@ use crate::{backup, restore, secrets};
 
 /// Archive name for a job's filesystem backup.
 const ARCHIVE_NAME: &str = "files.didx";
-/// Backup type used for all backups for now.
+/// Backup type used for filesystem backups.
 const BACKUP_TYPE: &str = "host";
+/// Backup type used for SQL Server backups.
+const SQL_BACKUP_TYPE: &str = "mssql";
 
 /// Handle one IPC request against the shared job store.
 pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Responder) {
@@ -146,7 +148,117 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             )
             .await;
         }
+
+        Request::BackupSqlToPbs {
+            server,
+            port,
+            auth,
+            password,
+            database,
+            pbs_job_id,
+            backup_id,
+        } => {
+            backup_sql_to_pbs(
+                store, server, port, auth, password, database, pbs_job_id, backup_id, responder,
+            )
+            .await;
+        }
     }
+}
+
+/// A PBS-safe archive name derived from a database name.
+fn sql_archive_name(database: &str) -> String {
+    let safe: String = database
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{safe}.didx")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn backup_sql_to_pbs(
+    store: Arc<JobStore>,
+    server: String,
+    port: Option<u16>,
+    auth: SqlAuth,
+    password: Option<String>,
+    database: String,
+    pbs_job_id: String,
+    backup_id: String,
+    mut responder: Responder,
+) {
+    let _ = responder
+        .send(&Reply::Accepted {
+            job_id: database.clone(),
+        })
+        .await;
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!("backing up [{database}] over VDI to PBS (group {backup_id})"),
+        })
+        .await;
+
+    let result = run_backup_sql_to_pbs(
+        &store,
+        &server,
+        port,
+        &auth,
+        password.as_deref(),
+        &database,
+        &pbs_job_id,
+        &backup_id,
+    )
+    .await;
+
+    let reply = match result {
+        Ok(message) => Reply::Finished {
+            success: true,
+            message,
+        },
+        Err(e) => Reply::Finished {
+            success: false,
+            message: format!("{e:#}"),
+        },
+    };
+    let _ = responder.send(&reply).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_backup_sql_to_pbs(
+    store: &JobStore,
+    server: &str,
+    port: Option<u16>,
+    auth: &SqlAuth,
+    password: Option<&str>,
+    database: &str,
+    pbs_job_id: &str,
+    backup_id: &str,
+) -> anyhow::Result<String> {
+    let (job, secret, repo) = job_context(store, pbs_job_id)?;
+    let backup_time = unix_now();
+    let archive = sql_archive_name(database);
+    let params = SessionParams::from_repository(
+        &repo,
+        secret,
+        &job.destination.fingerprint,
+        SQL_BACKUP_TYPE,
+        backup_id,
+        backup_time,
+    )?;
+    let stats = crate::sql::vdi::backup_database_to_pbs(
+        server, port, auth, password, database, &params, &archive,
+    )
+    .await?;
+    Ok(format!(
+        "backed up {database}: {} chunks, {} uploaded, {} reused, {} bytes",
+        stats.chunks, stats.uploaded, stats.reused, stats.bytes
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
