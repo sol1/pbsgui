@@ -50,8 +50,6 @@ CI on Windows and exercised manually.
 
 - **Transaction-log backups and log-chain management** for FULL and BULK_LOGGED
   databases (frequent log backups, copy-only policy, log-reuse monitoring).
-- **SQL connection without TCP/IP**: connect to local instances over Shared
-  Memory via the Microsoft ODBC driver, keeping TCP for remote instances.
 - **Network SQL discovery**: SQL Browser (UDP 1434), host/subnet scanning, and
   Active Directory lookups, including Availability Group listeners.
 - **Additional authentication**: explicit Windows accounts and Azure AD / Entra.
@@ -64,10 +62,11 @@ CI on Windows and exercised manually.
 
 ## Known limitations and notes
 
-- SQL Server connections currently require TCP/IP to be enabled on the instance,
-  because the TDS driver is TCP-only. Fresh installs often ship with TCP/IP
-  disabled; the Shared Memory path above removes this requirement for local
-  instances.
+- SQL Server connections require TCP/IP to be enabled on the instance (the client
+  uses the TDS protocol over TCP). Fresh installs often ship with TCP/IP disabled;
+  pbsgui detects and flags this during discovery, and the per-instance Check
+  reports it with the fix, which is a one-time step in SQL Server Configuration
+  Manager.
 - VDI backup requires the connecting login to be in the `sysadmin` server role.
 - The in-process scheduler runs only while the engine process is running, which is
   fine when the engine runs as the always-on service.

@@ -113,8 +113,9 @@ Two one-time bits of SQL Server setup are needed on the instance under test:
 1. **Enable TCP/IP.** The TDS driver connects over TCP, and fresh installs often
    ship with TCP/IP disabled. In SQL Server Configuration Manager, enable TCP/IP
    under the instance's protocols, set the IPAll TCP Port (for example 1433),
-   clear any dynamic port, and restart the SQL Server service. (A future Shared
-   Memory path will remove this requirement for local instances.)
+   clear any dynamic port, and restart the SQL Server service. The SQL Servers
+   tab flags instances with TCP/IP disabled, and the per-instance Check reports
+   it with the fix.
 
 2. **Grant the service identity access.** The engine connects as its service
    identity (LocalSystem, `NT AUTHORITY\SYSTEM`), and VDI requires the connecting
