@@ -301,7 +301,7 @@ mod windows_impl {
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
 
-        super::vdi::combine_file_result(backup, device_result)
+        super::combine_file_result(backup, device_result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -352,7 +352,7 @@ mod windows_impl {
         // The device-loop result only matters when it is the lone failure; the
         // BACKUP and PBS errors are more informative when present.
         let _ = device_result;
-        super::vdi::combine_pbs_result(backup, upload)
+        super::combine_pbs_result(backup, upload)
     }
 
     /// Run the COM device-set lifecycle on the current (blocking) thread,
