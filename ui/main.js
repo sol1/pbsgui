@@ -66,7 +66,10 @@ function scheduleSummary(s) {
 
 function sourceSummary(job) {
   const s = job.source || {};
-  if (s.type === "sql") return `SQL: ${(s.databases || []).length} db(s)`;
+  if (s.type === "sql") {
+    const kind = s.backup_type === "log" ? "log" : "full";
+    return `SQL ${kind}: ${(s.databases || []).length} db(s)`;
+  }
   return `Files: ${(s.sources || []).length} source(s)`;
 }
 
@@ -192,6 +195,19 @@ function updateSourceType() {
   const sql = el("f-source-type").value === "sql";
   el("src-sql").classList.toggle("hidden", !sql);
   el("src-files").classList.toggle("hidden", sql);
+}
+
+// Reflect the SQL backup type: log backups truncate the log so they are always
+// non-copy-only (the checkbox is forced off and disabled). Updates the hint.
+function updateSqlBackupType() {
+  const log = el("f-sql-backup-type").value === "log";
+  const copyRow = el("f-sql-copy-only");
+  copyRow.disabled = log;
+  if (log) copyRow.checked = false;
+  el("f-sql-copy-only-row").classList.toggle("muted", log);
+  el("f-sql-type-help").textContent = log
+    ? "Backs up and truncates the transaction log so it does not grow without bound. Requires a prior full backup and the FULL or BULK_LOGGED recovery model. Stored in a separate -log snapshot group."
+    : "Full database backup. Copy-only by default so it does not disturb another backup tool's chain; turn copy-only off to make pbsgui own the chain (needed before log backups can run).";
 }
 
 function updateDestType() {
@@ -376,6 +392,9 @@ async function openEditor(job) {
   } else {
     el("sql-db-pick").innerHTML = '<div class="muted">Pick a connection and load its databases.</div>';
   }
+  el("f-sql-backup-type").value = source.type === "sql" ? source.backup_type || "full" : "full";
+  el("f-sql-copy-only").checked = source.type === "sql" ? source.copy_only !== false : true;
+  updateSqlBackupType();
   updateSourceType();
 
   const dest = job?.destination || { type: "pbs" };
@@ -417,12 +436,15 @@ function gatherSchedule() {
 function gatherSource() {
   if (el("f-source-type").value === "sql") {
     const databases = Array.from(el("sql-db-pick").querySelectorAll("input:checked")).map((c) => c.value);
+    const backupType = el("f-sql-backup-type").value;
+    // Log backups must be non-copy-only to truncate the log.
+    const copyOnly = backupType === "log" ? false : el("f-sql-copy-only").checked;
     return {
       type: "sql",
       connection_id: el("f-sql-conn").value,
       databases,
-      backup_type: "full",
-      copy_only: true,
+      backup_type: backupType,
+      copy_only: copyOnly,
     };
   }
   return {
@@ -1130,6 +1152,7 @@ window.addEventListener("DOMContentLoaded", () => {
   el("wiz-back").onclick = () => showWizStep(wizStep - 1);
   el("wiz-save").onclick = saveJob;
   el("f-source-type").onchange = updateSourceType;
+  el("f-sql-backup-type").onchange = updateSqlBackupType;
   el("f-dest-type").onchange = updateDestType;
   el("f-encrypt").onchange = updateEncryptArea;
   el("enc-generate").onclick = generateKey;

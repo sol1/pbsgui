@@ -6,7 +6,7 @@ use std::sync::Arc;
 use pbs_client::api::ApiClient;
 use pbs_client::session::{ReaderClient, SessionParams};
 use pbs_client::{CryptConfig, Repository};
-use pbsgui_ipc::{FileInfo, Reply, Request, Responder, SnapshotInfo, SqlAuth};
+use pbsgui_ipc::{FileInfo, Reply, Request, Responder, SnapshotInfo, SqlAuth, SqlBackupType};
 use tokio::sync::mpsc;
 
 use crate::config::unix_now;
@@ -373,9 +373,19 @@ async fn run_backup_sql_to_pbs(
         backup_time,
     )?;
     // This one-off backup request is not tied to a saved job, so there is no key
-    // to encrypt with; encryption is a job-level option.
+    // to encrypt with; encryption is a job-level option. Always a full,
+    // copy-only backup (the ad-hoc validation path).
     let stats = crate::sql::vdi::backup_database_to_pbs(
-        server, port, auth, password, database, &params, &archive, None,
+        server,
+        port,
+        auth,
+        password,
+        database,
+        &params,
+        &archive,
+        None,
+        SqlBackupType::Full,
+        true,
     )
     .await?;
     Ok(format!(
@@ -493,7 +503,9 @@ async fn list_sql_snapshots(
     database: &str,
 ) -> anyhow::Result<Vec<SnapshotInfo>> {
     let ctx = sql_job_pbs(store, job_id)?;
-    let (group, _archive) = backup::sql_group_and_archive(&ctx.backup_id, database);
+    // Browse/restore target the full-backup group (log restore is not wired yet).
+    let (group, _archive) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
     let api = ApiClient::from_repository(&ctx.repo, ctx.secret, &ctx.fingerprint)?;
     let snapshots = api
         .list_snapshots(&ctx.repo.datastore, SQL_BACKUP_TYPE, &group)
@@ -551,7 +563,8 @@ async fn run_restore_sql(
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
     let ctx = sql_job_pbs(store, job_id)?;
-    let (group, archive) = backup::sql_group_and_archive(&ctx.backup_id, database);
+    let (group, archive) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
     let params = SessionParams::from_repository(
         &ctx.repo,
         ctx.secret,

@@ -74,7 +74,17 @@
             </label>
             <button id="load-dbs" type="button">Load databases</button>
             <div id="sql-db-pick"><div class="muted">Pick a connection and load its databases.</div></div>
-            <p class="help muted">Backs up the selected databases as full, copy-only backups.</p>
+            <label>Backup type
+              <select id="f-sql-backup-type">
+                <option value="full">Full database</option>
+                <option value="log">Transaction log</option>
+              </select>
+            </label>
+            <label id="f-sql-copy-only-row" class="enc-toggle">
+              <input id="f-sql-copy-only" type="checkbox" checked />
+              <span>Copy-only (does not disturb another tool's backup chain)</span>
+            </label>
+            <p id="f-sql-type-help" class="help muted"></p>
           </div>
         </div>
 

@@ -129,7 +129,7 @@ async fn do_backup(
                 connection_id,
                 databases,
                 backup_type,
-                ..
+                copy_only,
             },
             JobDestination::Pbs {
                 server_id,
@@ -141,6 +141,7 @@ async fn do_backup(
                 connection_id,
                 databases,
                 *backup_type,
+                *copy_only,
                 server_id,
                 backup_id,
                 crypt,
@@ -239,12 +240,13 @@ async fn backup_sql_to_pbs(
     connection_id: &str,
     databases: &[String],
     backup_type: SqlBackupType,
+    copy_only: bool,
     server_id: &str,
     backup_id: &str,
     crypt: Option<CryptConfig>,
     events: &Sender<Reply>,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
-    require_full(backup_type)?;
+    require_full_or_log(backup_type)?;
     if databases.is_empty() {
         anyhow::bail!("no databases selected");
     }
@@ -252,9 +254,10 @@ async fn backup_sql_to_pbs(
 
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     for db in databases {
-        let (group, archive) = sql_group_and_archive(backup_id, db);
+        let (group, archive) = sql_group_and_archive(backup_id, db, backup_type);
         // PBS only allows the backup types vm/ct/host; SQL backups use "host"
-        // and stay distinct by their per-database group id.
+        // and stay distinct by their per-database group id (log backups get a
+        // separate `-log` group so they do not mix with the fulls).
         let params = pbs_session_params(server_id, &group, "host", unix_now())?;
         let _ = events
             .send(Reply::Log {
@@ -270,6 +273,8 @@ async fn backup_sql_to_pbs(
             &params,
             &archive,
             crypt.clone(),
+            backup_type,
+            copy_only,
         )
         .await?;
         chunks += stats.chunks;
@@ -334,6 +339,17 @@ fn require_full(backup_type: SqlBackupType) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// PBS SQL backups support full and log (for transaction-log management);
+/// differential is not implemented yet.
+fn require_full_or_log(backup_type: SqlBackupType) -> anyhow::Result<()> {
+    match backup_type {
+        SqlBackupType::Full | SqlBackupType::Log => Ok(()),
+        SqlBackupType::Differential => {
+            anyhow::bail!("differential SQL Server backups are not supported yet")
+        }
+    }
+}
+
 /// Resolve a saved PBS server into session parameters for one snapshot group.
 fn pbs_session_params(
     server_id: &str,
@@ -372,10 +388,20 @@ fn sql_conn_and_password(
 }
 
 /// The PBS snapshot group and archive name for a database in a SQL job. Kept in
-/// one place so backup and restore agree on the naming.
-pub(crate) fn sql_group_and_archive(backup_id: &str, database: &str) -> (String, String) {
+/// one place so backup and restore agree on the naming. Log backups land in a
+/// separate `-log` group so they do not interleave with the full snapshots;
+/// full (and differential, once supported) share the base group.
+pub(crate) fn sql_group_and_archive(
+    backup_id: &str,
+    database: &str,
+    backup_type: SqlBackupType,
+) -> (String, String) {
     let db = sanitize(database);
-    (format!("{backup_id}-{db}"), format!("{db}.didx"))
+    let group = match backup_type {
+        SqlBackupType::Log => format!("{backup_id}-{db}-log"),
+        _ => format!("{backup_id}-{db}"),
+    };
+    (group, format!("{db}.didx"))
 }
 
 /// PBS-safe slug for snapshot groups and archive names.

@@ -18,6 +18,7 @@ use pbs_client::BackupStats;
 use pbs_client::{CryptConfig, SessionParams};
 #[cfg(not(windows))]
 use pbsgui_ipc::SqlAuth;
+use pbsgui_ipc::SqlBackupType;
 
 /// Combine the two halves of a VDI-to-PBS backup into one result.
 ///
@@ -34,9 +35,9 @@ fn combine_pbs_result(
     match (backup, upload) {
         (Ok(()), Ok(stats)) => Ok(stats),
         (Ok(()), Err(pbs)) => Err(anyhow::Error::new(pbs).context("PBS upload failed")),
-        (Err(sql), Ok(_)) => Err(sql.context("BACKUP DATABASE failed")),
+        (Err(sql), Ok(_)) => Err(sql.context("BACKUP failed")),
         (Err(sql), Err(pbs)) => Err(anyhow::anyhow!(
-            "PBS upload failed: {:#}; BACKUP DATABASE also failed: {sql:#}",
+            "PBS upload failed: {:#}; BACKUP also failed: {sql:#}",
             anyhow::Error::new(pbs)
         )),
     }
@@ -51,9 +52,37 @@ fn combine_file_result(
 ) -> anyhow::Result<u64> {
     match (backup, device) {
         (Ok(()), Ok(bytes)) => Ok(bytes),
-        (Err(sql), _) => Err(sql.context("BACKUP DATABASE failed")),
+        (Err(sql), _) => Err(sql.context("BACKUP failed")),
         (Ok(()), Err(device)) => Err(device),
     }
+}
+
+/// Build the `BACKUP` statement for a VDI device set.
+///
+/// Full backups may be copy-only (the default) so they do not disturb another
+/// tool's differential/log chain. Log backups are never copy-only: their purpose
+/// is to back up and truncate the transaction log so it does not grow without
+/// bound (a copy-only log backup would not truncate). Cross-platform so the SQL
+/// text is typechecked and unit-tested on every build.
+fn backup_statement(
+    database: &str,
+    set_name: &str,
+    backup_type: SqlBackupType,
+    copy_only: bool,
+) -> anyhow::Result<String> {
+    let db = database.replace(']', "]]");
+    Ok(match backup_type {
+        SqlBackupType::Full => {
+            let copy = if copy_only { " WITH COPY_ONLY" } else { "" };
+            format!("BACKUP DATABASE [{db}] TO VIRTUAL_DEVICE = '{set_name}'{copy}")
+        }
+        SqlBackupType::Log => {
+            format!("BACKUP LOG [{db}] TO VIRTUAL_DEVICE = '{set_name}'")
+        }
+        SqlBackupType::Differential => {
+            anyhow::bail!("differential SQL backups are not supported yet")
+        }
+    })
 }
 
 /// Adapts a channel of byte buffers into a blocking [`Read`], so the VDI device
@@ -121,6 +150,8 @@ pub async fn backup_database_to_pbs(
     _params: &SessionParams,
     _archive_name: &str,
     _crypt: Option<CryptConfig>,
+    _backup_type: SqlBackupType,
+    _copy_only: bool,
 ) -> anyhow::Result<BackupStats> {
     anyhow::bail!("VDI backup is only available on Windows")
 }
@@ -159,7 +190,7 @@ mod windows_impl {
 
     use anyhow::Context;
     use pbs_client::{BackupStats, CryptConfig, SessionParams};
-    use pbsgui_ipc::SqlAuth;
+    use pbsgui_ipc::{SqlAuth, SqlBackupType};
     use tiberius::Row;
     use uuid::Uuid;
     use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, HRESULT, PCWSTR};
@@ -276,16 +307,16 @@ mod windows_impl {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Issue `BACKUP DATABASE ... TO VIRTUAL_DEVICE`. COPY_ONLY so an ad-hoc
-    /// backup never disturbs the customer's differential/log chain.
+    /// Issue the `BACKUP` statement for `backup_type` against the VDI device set
+    /// (see [`super::backup_statement`] for the copy-only / log truncation rules).
     async fn issue_backup(
         client: &mut SqlClient,
         database: &str,
         set_name: &str,
+        backup_type: SqlBackupType,
+        copy_only: bool,
     ) -> anyhow::Result<()> {
-        let escaped = database.replace(']', "]]");
-        let sql =
-            format!("BACKUP DATABASE [{escaped}] TO VIRTUAL_DEVICE = '{set_name}' WITH COPY_ONLY");
+        let sql = super::backup_statement(database, set_name, backup_type, copy_only)?;
         client.simple_query(sql).await?.into_results().await?;
         Ok(())
     }
@@ -317,7 +348,9 @@ mod windows_impl {
             .await
             .map_err(|_| anyhow::anyhow!("VDI thread exited before signaling readiness"))??;
 
-        let backup = issue_backup(&mut client, database, &set_name).await;
+        // The ad-hoc "to file" path is always a full, copy-only backup.
+        let backup =
+            issue_backup(&mut client, database, &set_name, SqlBackupType::Full, true).await;
         let device_result = device_loop
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
@@ -335,6 +368,8 @@ mod windows_impl {
         params: &SessionParams,
         archive_name: &str,
         crypt: Option<CryptConfig>,
+        backup_type: SqlBackupType,
+        copy_only: bool,
     ) -> anyhow::Result<BackupStats> {
         let mut client = probe::connect(server, port, auth, password).await?;
         let set_name = format!("pbsgui-{}", Uuid::new_v4());
@@ -355,7 +390,7 @@ mod windows_impl {
 
         // BACKUP (pushes bytes into the device) and the PBS upload (drains them)
         // run concurrently; the device loop bridges the two on its own thread.
-        let backup_fut = issue_backup(&mut client, database, &set_name);
+        let backup_fut = issue_backup(&mut client, database, &set_name, backup_type, copy_only);
         let upload_fut = pbs_client::backup_dynamic_reader(
             params,
             archive_name,
@@ -781,8 +816,29 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
-    use super::ChannelReader;
+    use super::{backup_statement, ChannelReader};
+    use pbsgui_ipc::SqlBackupType;
     use std::io::Read;
+
+    #[test]
+    fn backup_statement_full_log_and_escaping() {
+        let full = backup_statement("MyDb", "pbsgui-1", SqlBackupType::Full, true).unwrap();
+        assert_eq!(
+            full,
+            "BACKUP DATABASE [MyDb] TO VIRTUAL_DEVICE = 'pbsgui-1' WITH COPY_ONLY"
+        );
+        // Non-copy-only full omits the clause (resets the chain base).
+        let base = backup_statement("MyDb", "s", SqlBackupType::Full, false).unwrap();
+        assert_eq!(base, "BACKUP DATABASE [MyDb] TO VIRTUAL_DEVICE = 's'");
+        // Log backups are always BACKUP LOG and never copy-only (so they truncate).
+        let log = backup_statement("MyDb", "s", SqlBackupType::Log, true).unwrap();
+        assert_eq!(log, "BACKUP LOG [MyDb] TO VIRTUAL_DEVICE = 's'");
+        // A `]` in the name is doubled to stay inside the identifier.
+        let weird = backup_statement("we]rd", "s", SqlBackupType::Full, false).unwrap();
+        assert!(weird.contains("[we]]rd]"));
+        // Differential is rejected for now.
+        assert!(backup_statement("D", "s", SqlBackupType::Differential, false).is_err());
+    }
 
     #[test]
     fn combine_results_pick_the_informative_error() {
