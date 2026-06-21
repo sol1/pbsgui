@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let mut reader = ReaderClient::connect(&p2).await?;
-    let restored = reader.restore_dynamic_archive(ARCHIVE).await?;
+    let restored = reader.restore_dynamic_archive(ARCHIVE, None).await?;
     if restored == data {
         println!(
             "OK: restored {} bytes match the latest backup",

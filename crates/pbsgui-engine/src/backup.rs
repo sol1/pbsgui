@@ -4,12 +4,12 @@
 //! pre/post scripts around it.
 
 use pbs_client::session::{backup_dynamic_file_with_progress, BackupStats, SessionParams};
-use pbs_client::Repository;
+use pbs_client::{CryptConfig, Repository};
 use pbsgui_ipc::{FileInfo, Job, JobDestination, JobSource, Reply, SqlAuth, SqlBackupType};
 use tokio::sync::mpsc::Sender;
 
 use crate::config::unix_now;
-use crate::{archive, changedet, connstore, scripts, secrets};
+use crate::{archive, changedet, connstore, enckey, scripts, secrets};
 
 /// Archive name for a job's filesystem backup (a tar in a dynamic index).
 const ARCHIVE_NAME: &str = "files.didx";
@@ -114,8 +114,10 @@ async fn do_backup(
                 backup_id,
             },
         ) => {
+            let crypt = enckey::for_job(job)?;
             let stats =
-                backup_files_to_pbs(job, sources, excludes, server_id, backup_id, events).await?;
+                backup_files_to_pbs(job, sources, excludes, server_id, backup_id, crypt, events)
+                    .await?;
             let summary = format!(
                 "backed up {} bytes: {} chunks, {} uploaded, {} reused",
                 stats.bytes, stats.chunks, stats.uploaded, stats.reused
@@ -134,12 +136,14 @@ async fn do_backup(
                 backup_id,
             },
         ) => {
+            let crypt = enckey::for_job(job)?;
             backup_sql_to_pbs(
                 connection_id,
                 databases,
                 *backup_type,
                 server_id,
                 backup_id,
+                crypt,
                 events,
             )
             .await
@@ -159,12 +163,14 @@ async fn do_backup(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn backup_files_to_pbs(
     job: &Job,
     sources: &[String],
     excludes: &[String],
     server_id: &str,
     backup_id: &str,
+    crypt: Option<CryptConfig>,
     events: &Sender<Reply>,
 ) -> anyhow::Result<BackupStats> {
     if sources.is_empty() {
@@ -209,6 +215,7 @@ async fn backup_files_to_pbs(
         &tmp,
         true,
         catalog,
+        crypt,
         move |done, total| {
             let fraction = if total > 0 {
                 done as f32 / total as f32
@@ -227,12 +234,14 @@ async fn backup_files_to_pbs(
     Ok(result?)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn backup_sql_to_pbs(
     connection_id: &str,
     databases: &[String],
     backup_type: SqlBackupType,
     server_id: &str,
     backup_id: &str,
+    crypt: Option<CryptConfig>,
     events: &Sender<Reply>,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
     require_full(backup_type)?;
@@ -260,6 +269,7 @@ async fn backup_sql_to_pbs(
             db,
             &params,
             &archive,
+            crypt.clone(),
         )
         .await?;
         chunks += stats.chunks;

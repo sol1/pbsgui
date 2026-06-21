@@ -94,6 +94,23 @@
             <label>Backup id (snapshot group)
               <input id="f-backup-id" type="text" placeholder="auto from name" />
             </label>
+            <div class="enc-panel">
+              <label class="enc-toggle">
+                <input id="f-encrypt" type="checkbox" />
+                <span>Encrypt this backup (client-side, AES-256-GCM)</span>
+              </label>
+              <div id="enc-key-area" class="hidden">
+                <p class="help muted">Backups are encrypted on this machine before upload, so the
+                  server never sees the key. If you lose the key the backups cannot be restored, so
+                  copy it into a password manager. You can reuse one key across jobs by importing it.</p>
+                <div id="enc-key-status" class="muted">No key yet.</div>
+                <div class="actions">
+                  <button id="enc-generate" type="button">Generate key</button>
+                  <button id="enc-import" type="button">Import key...</button>
+                  <button id="enc-reveal" type="button" class="hidden">Show key</button>
+                </div>
+              </div>
+            </div>
           </div>
           <div id="dest-folder" class="hidden">
             <div class="sources-head">
@@ -242,6 +259,42 @@
         <pre id="log" class="log"></pre>
       </section>
     </main>
+
+    <!-- Reveal a backup encryption key (shown so it can be copied into a password manager) -->
+    <div id="key-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Backup encryption key</h2>
+        <p class="warn">Copy this key into a password manager now. Without it, backups made with
+          it cannot be restored, even by us or by Proxmox. Anyone with this key can read the
+          backups, so keep it secret.</p>
+        <label>Key (base64)
+          <textarea id="key-modal-key" rows="2" readonly></textarea>
+        </label>
+        <label>Fingerprint
+          <input id="key-modal-fp" type="text" readonly />
+        </label>
+        <div class="actions">
+          <button id="key-modal-copy" class="primary" type="button">Copy key</button>
+          <button id="key-modal-close" type="button">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Import an existing backup encryption key -->
+    <div id="import-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Import an encryption key</h2>
+        <p class="help muted">Paste a base64 key from a password manager (e.g. one generated for
+          another job or machine) to reuse it here.</p>
+        <label>Key (base64)
+          <textarea id="import-modal-key" rows="2" placeholder="base64 key"></textarea>
+        </label>
+        <div class="actions">
+          <button id="import-modal-ok" class="primary" type="button">Import</button>
+          <button id="import-modal-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
 
     <script src="main.js"></script>
   </body>

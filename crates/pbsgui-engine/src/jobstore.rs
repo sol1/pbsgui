@@ -110,6 +110,7 @@ mod tests {
             post_script: None,
             last_run: None,
             last_status: None,
+            encrypted: false,
         }
     }
 

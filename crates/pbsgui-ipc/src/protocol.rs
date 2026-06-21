@@ -101,6 +101,23 @@ pub struct Job {
     /// Outcome of the last run ("ok" or an error message).
     #[serde(default)]
     pub last_status: Option<String>,
+    /// Whether the backup is client-side encrypted (AES-256-GCM, the PBS scheme).
+    /// The key is stored separately under `enc:<id>` in the credential store and
+    /// never travels in this struct; restores decrypt transparently using it.
+    #[serde(default)]
+    pub encrypted: bool,
+}
+
+/// A backup encryption key, for display and import. `key` is the raw key the
+/// user copies into a password manager; `fingerprint` identifies which key a
+/// backup needs (the PBS key-fingerprint scheme), so two keys can be told apart
+/// without revealing either.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptionKeyInfo {
+    /// Base64 of the 32-byte key.
+    pub key: String,
+    /// Colon-grouped lowercase hex of the key fingerprint.
+    pub fingerprint: String,
 }
 
 /// Summary of a snapshot for the browse view.
@@ -415,6 +432,20 @@ pub enum Request {
     },
     /// Delete a PBS server and its stored secret.
     DeletePbsServer { id: String },
+
+    /// Generate a fresh random encryption key for a job and store it under
+    /// `enc:<job_id>`. Replies with the key (for the user to copy to a password
+    /// manager) and its fingerprint. Fails if a key already exists.
+    GenerateEncryptionKey { job_id: String },
+    /// Import an existing base64 encryption key for a job (to reuse one key
+    /// across jobs or machines), storing it under `enc:<job_id>`. Replies with
+    /// the key and fingerprint.
+    ImportEncryptionKey { job_id: String, key: String },
+    /// Reveal a job's stored encryption key (to copy it again), or report that
+    /// none is stored.
+    GetEncryptionKey { job_id: String },
+    /// Delete a job's stored encryption key.
+    ClearEncryptionKey { job_id: String },
 }
 
 /// A message from the engine to the GUI.
@@ -443,6 +474,9 @@ pub enum Reply {
     SqlConnections { connections: Vec<SqlConnection> },
     /// Reply to [`Request::ListPbsServers`].
     PbsServers { servers: Vec<PbsServer> },
+    /// Reply to the encryption-key requests. `info` is `None` when the job has
+    /// no stored key (a `GetEncryptionKey` miss, or after `ClearEncryptionKey`).
+    EncryptionKey { info: Option<EncryptionKeyInfo> },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -471,6 +505,7 @@ impl Reply {
                 | Reply::SqlChecks { .. }
                 | Reply::SqlConnections { .. }
                 | Reply::PbsServers { .. }
+                | Reply::EncryptionKey { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )

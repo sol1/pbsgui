@@ -15,7 +15,7 @@ use std::sync::mpsc::Receiver;
 
 use pbs_client::BackupStats;
 #[cfg(not(windows))]
-use pbs_client::SessionParams;
+use pbs_client::{CryptConfig, SessionParams};
 #[cfg(not(windows))]
 use pbsgui_ipc::SqlAuth;
 
@@ -120,6 +120,7 @@ pub async fn backup_database_to_pbs(
     _database: &str,
     _params: &SessionParams,
     _archive_name: &str,
+    _crypt: Option<CryptConfig>,
 ) -> anyhow::Result<BackupStats> {
     anyhow::bail!("VDI backup is only available on Windows")
 }
@@ -157,7 +158,7 @@ mod windows_impl {
     use std::sync::mpsc::SyncSender;
 
     use anyhow::Context;
-    use pbs_client::{BackupStats, SessionParams};
+    use pbs_client::{BackupStats, CryptConfig, SessionParams};
     use pbsgui_ipc::SqlAuth;
     use tiberius::Row;
     use uuid::Uuid;
@@ -333,6 +334,7 @@ mod windows_impl {
         database: &str,
         params: &SessionParams,
         archive_name: &str,
+        crypt: Option<CryptConfig>,
     ) -> anyhow::Result<BackupStats> {
         let mut client = probe::connect(server, port, auth, password).await?;
         let set_name = format!("pbsgui-{}", Uuid::new_v4());
@@ -361,6 +363,7 @@ mod windows_impl {
             ChannelReader::new(rx),
             0,
             None,
+            crypt,
             |_done, _total| {},
         );
         let (backup, upload) = tokio::join!(backup_fut, upload_fut);

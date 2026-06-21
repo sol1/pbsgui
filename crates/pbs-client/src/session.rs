@@ -33,6 +33,7 @@ use tokio_rustls::TlsConnector;
 
 use crate::blob;
 use crate::chunker;
+use crate::crypt::CryptConfig;
 use crate::error::{PbsError, Result};
 use crate::index::{
     self, DynamicIndex, DynamicIndexBuilder, FixedIndex, FixedIndexBuilder, DEFAULT_CHUNK_SIZE,
@@ -685,20 +686,22 @@ pub async fn backup_dynamic_file(
         path,
         dedup_with_previous,
         None,
+        None,
         |_, _| {},
     )
     .await
 }
 
 /// Like [`backup_dynamic_file`] but reports progress as `(bytes_done, total_bytes)`
-/// after each chunk. Chunking and hashing run on a blocking thread; uploads run
-/// on this task.
+/// after each chunk, and optionally encrypts with `crypt`. Chunking and hashing
+/// run on a blocking thread; uploads run on this task.
 pub async fn backup_dynamic_file_with_progress(
     params: &SessionParams,
     archive_name: &str,
     path: &Path,
     dedup_with_previous: bool,
     catalog: Option<(String, Vec<u8>)>,
+    crypt: Option<CryptConfig>,
     on_progress: impl FnMut(u64, u64),
 ) -> Result<BackupStats> {
     let total_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -711,6 +714,7 @@ pub async fn backup_dynamic_file_with_progress(
         file,
         total_bytes,
         catalog,
+        crypt,
         on_progress,
     )
     .await
@@ -718,9 +722,11 @@ pub async fn backup_dynamic_file_with_progress(
 
 /// Back up an arbitrary byte stream as a deduplicated dynamic-index archive,
 /// then finish the snapshot. `total_bytes` is used only for progress reporting
-/// (pass 0 if unknown). The reader is consumed on a blocking thread while
-/// chunking and upload proceed concurrently, so a streamed source (e.g. a SQL
-/// Server VDI backup) never has to be staged to disk first.
+/// (pass 0 if unknown). With `crypt`, chunks (and the catalog) are AES-256-GCM
+/// encrypted and the chunk digests are keyed, matching the PBS scheme. The
+/// reader is consumed on a blocking thread while chunking and upload proceed
+/// concurrently, so a streamed source (e.g. a SQL VDI backup) is never staged.
+#[allow(clippy::too_many_arguments)]
 pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     params: &SessionParams,
     archive_name: &str,
@@ -728,6 +734,7 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     reader: R,
     total_bytes: u64,
     catalog: Option<(String, Vec<u8>)>,
+    crypt: Option<CryptConfig>,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Result<BackupStats> {
     let mut writer = BackupWriter::connect(params).await?;
@@ -743,11 +750,17 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
 
     let wid = writer.create_dynamic_index(archive_name).await?;
 
+    // Digests are computed on the chunker thread; keyed when encrypting so that
+    // dedup still works under one key.
+    let digest_crypt = crypt.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<([u8; DIGEST_LEN], Vec<u8>)>(8);
     let chunker_task = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         for chunk in chunker::chunk_reader(reader) {
             let data = chunk?;
-            let digest = index::chunk_digest(&data);
+            let digest = match &digest_crypt {
+                Some(c) => c.compute_digest(&data),
+                None => index::chunk_digest(&data),
+            };
             if tx.blocking_send((digest, data)).is_err() {
                 break;
             }
@@ -770,7 +783,10 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
         if known.contains(&digest) {
             reused += 1;
         } else {
-            let encoded = blob::encode_uncompressed(&data);
+            let encoded = match &crypt {
+                Some(c) => c.encrypt_blob(&data)?,
+                None => blob::encode_uncompressed(&data),
+            };
             writer
                 .upload_dynamic_chunk(wid, &digest, data.len() as u64, &encoded)
                 .await?;
@@ -806,13 +822,17 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
 
     // Optional catalog blob (e.g. a file listing) so browsing does not require
     // downloading the whole archive. Stored alongside the archive; not in the
-    // manifest (the reader serves it by name regardless).
+    // manifest (the reader serves it by name regardless). Encrypted with the
+    // chunks, since it contains file paths.
     if let Some((name, content)) = &catalog {
-        let catalog_blob = blob::encode_uncompressed(content);
+        let catalog_blob = match &crypt {
+            Some(c) => c.encrypt_blob(content)?,
+            None => blob::encode_uncompressed(content),
+        };
         writer.upload_blob(name, &catalog_blob).await?;
     }
 
-    let entry = FileEntry::new(archive_name, size, &csum);
+    let entry = FileEntry::with_crypt(archive_name, size, &csum, crypt.is_some());
     let backup_manifest = BackupManifest::new(
         &params.backup_type,
         &params.backup_id,
@@ -866,14 +886,23 @@ impl ReaderClient {
         Ok(body)
     }
 
-    /// Download a named blob and return its decoded contents.
-    pub async fn download_blob(&mut self, file_name: &str) -> Result<Vec<u8>> {
+    /// Download a named blob and return its decoded (and, if encrypted,
+    /// decrypted) contents. `crypt` is needed only for encrypted blobs.
+    pub async fn download_blob(
+        &mut self,
+        file_name: &str,
+        crypt: Option<&CryptConfig>,
+    ) -> Result<Vec<u8>> {
         let raw = self.download(file_name).await?;
-        blob::decode(&raw)
+        decode_blob(&raw, crypt)
     }
 
     /// Download a fixed-index archive and reassemble the original image bytes.
-    pub async fn restore_fixed_image(&mut self, archive_name: &str) -> Result<Vec<u8>> {
+    pub async fn restore_fixed_image(
+        &mut self,
+        archive_name: &str,
+        crypt: Option<&CryptConfig>,
+    ) -> Result<Vec<u8>> {
         let index_bytes = self.download(archive_name).await?;
         let fixed = FixedIndex::parse(&index_bytes)?;
         if !fixed.verify_csum() {
@@ -884,7 +913,7 @@ impl ReaderClient {
         let mut image = Vec::with_capacity(fixed.size as usize);
         for digest in &fixed.digests {
             let chunk_blob = self.download_chunk(digest).await?;
-            let chunk = blob::decode(&chunk_blob)?;
+            let chunk = decode_blob(&chunk_blob, crypt)?;
             image.extend_from_slice(&chunk);
         }
         image.truncate(fixed.size as usize);
@@ -892,7 +921,11 @@ impl ReaderClient {
     }
 
     /// Download a dynamic-index archive and reassemble the original bytes.
-    pub async fn restore_dynamic_archive(&mut self, archive_name: &str) -> Result<Vec<u8>> {
+    pub async fn restore_dynamic_archive(
+        &mut self,
+        archive_name: &str,
+        crypt: Option<&CryptConfig>,
+    ) -> Result<Vec<u8>> {
         let index_bytes = self.download(archive_name).await?;
         let index = DynamicIndex::parse(&index_bytes)?;
         if !index.verify_csum() {
@@ -903,9 +936,25 @@ impl ReaderClient {
         let mut out = Vec::with_capacity(index.total_size() as usize);
         for digest in index.digests() {
             let chunk_blob = self.download_chunk(digest).await?;
-            out.extend_from_slice(&blob::decode(&chunk_blob)?);
+            out.extend_from_slice(&decode_blob(&chunk_blob, crypt)?);
         }
         Ok(out)
+    }
+}
+
+/// Decode a downloaded blob, decrypting it when it is an encrypted blob.
+/// Encrypted blobs are recognized by their magic, so plaintext blobs (e.g. the
+/// manifest) still decode without a key.
+fn decode_blob(raw: &[u8], crypt: Option<&CryptConfig>) -> Result<Vec<u8>> {
+    if raw.len() >= 8 && raw[0..8] == blob::MAGIC_ENCRYPTED {
+        match crypt {
+            Some(c) => c.decrypt_blob(raw),
+            None => Err(PbsError::Protocol(
+                "this snapshot is encrypted but no encryption key was provided".into(),
+            )),
+        }
+    } else {
+        blob::decode(raw)
     }
 }
 

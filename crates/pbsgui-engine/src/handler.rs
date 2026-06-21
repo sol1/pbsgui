@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use pbs_client::api::ApiClient;
 use pbs_client::session::{ReaderClient, SessionParams};
-use pbs_client::Repository;
+use pbs_client::{CryptConfig, Repository};
 use pbsgui_ipc::{FileInfo, Reply, Request, Responder, SnapshotInfo, SqlAuth};
 use tokio::sync::mpsc;
 
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
-use crate::{backup, connstore, restore, secrets};
+use crate::{backup, connstore, enckey, restore, secrets};
 
 /// Archive name for a job's filesystem backup.
 const ARCHIVE_NAME: &str = "files.didx";
@@ -40,6 +40,8 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
         }
 
         Request::DeleteJob { id } => {
+            // Remove the job's encryption key too; nothing else references it.
+            let _ = enckey::clear(&id);
             let _ = responder.send(&deleted_reply(store.delete(&id))).await;
         }
 
@@ -223,6 +225,43 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
                 .send(&deleted_reply(connstore::pbs_servers().delete(&id)))
                 .await;
         }
+
+        Request::GenerateEncryptionKey { job_id } => {
+            let _ = responder.send(&enc_key_reply(enckey::generate(&job_id))).await;
+        }
+        Request::ImportEncryptionKey { job_id, key } => {
+            let _ = responder
+                .send(&enc_key_reply(enckey::import(&job_id, &key)))
+                .await;
+        }
+        Request::GetEncryptionKey { job_id } => {
+            let reply = match enckey::get(&job_id) {
+                Ok(info) => Reply::EncryptionKey { info },
+                Err(e) => Reply::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
+        Request::ClearEncryptionKey { job_id } => {
+            let reply = match enckey::clear(&job_id) {
+                Ok(()) => Reply::EncryptionKey { info: None },
+                Err(e) => Reply::Error {
+                    message: e.to_string(),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
+    }
+}
+
+/// Wrap a generate/import result (which always yields a key) into a reply.
+fn enc_key_reply(result: anyhow::Result<pbsgui_ipc::EncryptionKeyInfo>) -> Reply {
+    match result {
+        Ok(info) => Reply::EncryptionKey { info: Some(info) },
+        Err(e) => Reply::Error {
+            message: e.to_string(),
+        },
     }
 }
 
@@ -331,8 +370,10 @@ async fn run_backup_sql_to_pbs(
         backup_id,
         backup_time,
     )?;
+    // This one-off backup request is not tied to a saved job, so there is no key
+    // to encrypt with; encryption is a job-level option.
     let stats = crate::sql::vdi::backup_database_to_pbs(
-        server, port, auth, password, database, &params, &archive,
+        server, port, auth, password, database, &params, &archive, None,
     )
     .await?;
     Ok(format!(
@@ -394,12 +435,19 @@ struct SqlJobPbs {
     secret: String,
     fingerprint: String,
     backup_id: String,
+    /// The job's encryption key, when it is an encrypted job (for transparent
+    /// decryption on restore).
+    crypt: Option<CryptConfig>,
 }
 
 fn sql_job_pbs(store: &JobStore, job_id: &str) -> anyhow::Result<SqlJobPbs> {
     let job = store
         .get(job_id)
         .ok_or_else(|| anyhow::anyhow!("no such job: {job_id}"))?;
+    // Load the key if one is stored, regardless of the job's current `encrypted`
+    // flag, so snapshots made while encrypted stay restorable even if the flag is
+    // later turned off. Plaintext blobs decode fine even with a key present.
+    let crypt = enckey::load_config(&job.id)?;
     let connection_id = match &job.source {
         pbsgui_ipc::JobSource::Sql { connection_id, .. } => connection_id.clone(),
         _ => anyhow::bail!("not a SQL Server backup job"),
@@ -433,6 +481,7 @@ fn sql_job_pbs(store: &JobStore, job_id: &str) -> anyhow::Result<SqlJobPbs> {
         secret,
         fingerprint: server.fingerprint,
         backup_id,
+        crypt,
     })
 }
 
@@ -521,7 +570,9 @@ async fn run_restore_sql(
             line: "downloading the database backup".to_string(),
         })
         .await;
-    let image = reader.restore_dynamic_archive(&archive).await?;
+    let image = reader
+        .restore_dynamic_archive(&archive, ctx.crypt.as_ref())
+        .await?;
     let _ = responder
         .send(&Reply::Progress {
             fraction: 0.5,
@@ -561,6 +612,9 @@ struct PbsContext {
     secret: String,
     fingerprint: String,
     backup_id: String,
+    /// The job's encryption key, when it is an encrypted job (for transparent
+    /// decryption on browse/restore).
+    crypt: Option<CryptConfig>,
 }
 
 fn job_pbs_context(store: &JobStore, job_id: &str) -> anyhow::Result<PbsContext> {
@@ -570,6 +624,9 @@ fn job_pbs_context(store: &JobStore, job_id: &str) -> anyhow::Result<PbsContext>
     if !matches!(job.source, pbsgui_ipc::JobSource::Files { .. }) {
         anyhow::bail!("browsing and restore are only available for file backups for now");
     }
+    // Load any stored key regardless of the current `encrypted` flag (see
+    // `sql_job_pbs`); plaintext blobs still decode without using it.
+    let crypt = enckey::load_config(&job.id)?;
     let (server_id, backup_id) = match &job.destination {
         pbsgui_ipc::JobDestination::Pbs {
             server_id,
@@ -590,6 +647,7 @@ fn job_pbs_context(store: &JobStore, job_id: &str) -> anyhow::Result<PbsContext>
         secret,
         fingerprint: server.fingerprint,
         backup_id,
+        crypt,
     })
 }
 
@@ -625,10 +683,15 @@ async fn list_files(
     let mut reader = ReaderClient::connect(&params).await?;
     // Prefer the small catalog blob; fall back to listing the full archive for
     // snapshots made before the catalog existed.
-    match reader.download_blob("catalog.json.blob").await {
+    match reader
+        .download_blob("catalog.json.blob", ctx.crypt.as_ref())
+        .await
+    {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(_) => {
-            let archive = reader.restore_dynamic_archive(ARCHIVE_NAME).await?;
+            let archive = reader
+                .restore_dynamic_archive(ARCHIVE_NAME, ctx.crypt.as_ref())
+                .await?;
             restore::list_tar(&archive)
         }
     }
@@ -702,7 +765,9 @@ async fn run_restore(
             line: "downloading archive".to_string(),
         })
         .await;
-    let bytes = reader.restore_dynamic_archive(ARCHIVE_NAME).await?;
+    let bytes = reader
+        .restore_dynamic_archive(ARCHIVE_NAME, ctx.crypt.as_ref())
+        .await?;
     let _ = responder
         .send(&Reply::Progress {
             fraction: 0.5,

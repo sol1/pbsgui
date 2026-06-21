@@ -8,8 +8,8 @@
 //! GUI never stops backups.
 
 use pbsgui_ipc::{
-    FileInfo, Job, PbsServer, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection,
-    SqlInstance, SqlProbe, DEFAULT_SOCKET,
+    EncryptionKeyInfo, FileInfo, Job, PbsServer, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck,
+    SqlConnection, SqlInstance, SqlProbe, DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -226,6 +226,37 @@ async fn save_pbs_server(server: PbsServer, secret: Option<String>) -> Result<St
 #[tauri::command]
 async fn delete_pbs_server(id: String) -> Result<(), String> {
     let replies = request_all(Request::DeletePbsServer { id }).await?;
+    match first_error(&replies) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// Generate a fresh encryption key for a job; returns it (to copy) + fingerprint.
+#[tauri::command]
+async fn generate_encryption_key(job_id: String) -> Result<EncryptionKeyInfo, String> {
+    let replies = request_all(Request::GenerateEncryptionKey { job_id }).await?;
+    enc_key_info(replies)?.ok_or_else(|| "engine did not return a key".to_string())
+}
+
+/// Import an existing base64 key for a job; returns it + fingerprint.
+#[tauri::command]
+async fn import_encryption_key(job_id: String, key: String) -> Result<EncryptionKeyInfo, String> {
+    let replies = request_all(Request::ImportEncryptionKey { job_id, key }).await?;
+    enc_key_info(replies)?.ok_or_else(|| "engine did not return a key".to_string())
+}
+
+/// The stored key for a job (to copy/reveal), or `None` if it has none.
+#[tauri::command]
+async fn get_encryption_key(job_id: String) -> Result<Option<EncryptionKeyInfo>, String> {
+    let replies = request_all(Request::GetEncryptionKey { job_id }).await?;
+    enc_key_info(replies)
+}
+
+/// Delete a job's stored encryption key.
+#[tauri::command]
+async fn clear_encryption_key(job_id: String) -> Result<(), String> {
+    let replies = request_all(Request::ClearEncryptionKey { job_id }).await?;
     match first_error(&replies) {
         Some(err) => Err(err),
         None => Ok(()),
@@ -450,6 +481,21 @@ async fn request_all(request: Request) -> Result<Vec<Reply>, String> {
     Ok(replies)
 }
 
+/// Extract the key info from an encryption-key reply (`None` when no key), or
+/// surface the engine error.
+fn enc_key_info(replies: Vec<Reply>) -> Result<Option<EncryptionKeyInfo>, String> {
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::EncryptionKey { info } => Some(info),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return a key result".to_string())
+}
+
 fn first_error(replies: &[Reply]) -> Option<String> {
     replies.iter().find_map(|r| match r {
         Reply::Error { message } => Some(message.clone()),
@@ -565,6 +611,10 @@ pub fn run() {
         list_pbs_servers,
         save_pbs_server,
         delete_pbs_server,
+        generate_encryption_key,
+        import_encryption_key,
+        get_encryption_key,
+        clear_encryption_key,
         pick_save_file,
         pick_destination,
         pick_folders,

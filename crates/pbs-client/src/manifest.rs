@@ -37,6 +37,21 @@ impl FileEntry {
     pub fn fixed_image(filename: impl Into<String>, size: u64, index_csum: &[u8; 32]) -> Self {
         Self::new(filename, size, index_csum)
     }
+
+    /// An archive entry, marking it encrypted when a key is in use.
+    pub fn with_crypt(
+        filename: impl Into<String>,
+        size: u64,
+        index_csum: &[u8; 32],
+        encrypted: bool,
+    ) -> Self {
+        Self {
+            filename: filename.into(),
+            crypt_mode: if encrypted { "encrypt" } else { "none" }.to_string(),
+            size,
+            csum: hex::encode(index_csum),
+        }
+    }
 }
 
 /// A backup snapshot manifest.

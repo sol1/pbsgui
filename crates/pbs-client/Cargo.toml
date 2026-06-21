@@ -22,6 +22,11 @@ hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 fastcdc = "3"
 
+# Client-side encryption (PBS scheme: AES-256-GCM per chunk, keyed digests).
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+getrandom = "0.2"
+
 # Backup / reader session transport
 h2 = "0.4"
 http = "1"
@@ -30,6 +35,3 @@ percent-encoding = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-pki-types = "1"
-
-# Added when client side encryption lands:
-#   aes-gcm or openssl (AES-256-GCM), zstd (compressed blobs)

@@ -523,3 +523,76 @@ button:disabled {
   font-size: 12px;
   white-space: pre-wrap;
 }
+
+/* Client-side encryption panel (job wizard, Destination step) */
+.enc-panel {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.enc-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.enc-toggle input {
+  width: auto;
+}
+
+#enc-key-area {
+  margin-top: 10px;
+}
+
+#enc-key-status {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  margin: 6px 0;
+  word-break: break-all;
+}
+
+/* Modal overlays (key reveal / import) */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal {
+  width: min(560px, 92vw);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.modal h2 {
+  margin: 0 0 10px;
+}
+
+.modal textarea {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+  word-break: break-all;
+}
+
+.modal .warn {
+  padding: 10px 12px;
+  background: rgba(229, 112, 0, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-size: 13px;
+  margin: 0 0 12px;
+}

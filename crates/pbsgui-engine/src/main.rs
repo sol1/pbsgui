@@ -19,6 +19,7 @@ mod backup;
 mod changedet;
 mod config;
 mod connstore;
+mod enckey;
 mod handler;
 mod jobstore;
 mod restore;

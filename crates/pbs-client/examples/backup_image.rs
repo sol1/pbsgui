@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("restoring and verifying...");
     let mut reader = ReaderClient::connect(&params).await?;
-    let restored = reader.restore_fixed_image(archive).await?;
+    let restored = reader.restore_fixed_image(archive, None).await?;
 
     if restored == image {
         println!("OK: restored {} bytes match the original", restored.len());

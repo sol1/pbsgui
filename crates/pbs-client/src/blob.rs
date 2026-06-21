@@ -30,7 +30,8 @@ const HEADER_SIZE: usize = 12;
 /// Maximum blob payload size accepted by PBS.
 pub const MAX_BLOB_SIZE: usize = 128 * 1024 * 1024;
 
-fn crc32(payload: &[u8]) -> u32 {
+/// CRC-32/IEEE over the given bytes (the zlib polynomial).
+pub(crate) fn crc32(payload: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(payload);
     hasher.finalize()

@@ -116,6 +116,12 @@ async fn demo_handler(request: Request, mut responder: Responder) {
         Request::DeletePbsServer { .. } => {
             let _ = responder.send(&Reply::Deleted).await;
         }
+        Request::GenerateEncryptionKey { .. }
+        | Request::ImportEncryptionKey { .. }
+        | Request::GetEncryptionKey { .. }
+        | Request::ClearEncryptionKey { .. } => {
+            let _ = responder.send(&Reply::EncryptionKey { info: None }).await;
+        }
     }
 }
 
@@ -156,6 +162,7 @@ fn sample_job() -> Job {
         post_script: None,
         last_run: None,
         last_status: None,
+        encrypted: false,
     }
 }
 

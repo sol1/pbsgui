@@ -31,6 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 interprocess = { version = "2", features = ["tokio"] }
+base64 = "0.22"
 
 [profile.release]
 strip = true

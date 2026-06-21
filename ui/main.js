@@ -11,6 +11,8 @@ let snapshotTime = null;
 let backupIdTouched = false; // has the user edited the Backup id directly?
 let wizStep = 0; // current job-wizard step
 let sqlConnCache = []; // saved SQL connections, for the wizard's source step
+let wizJobId = null; // stable id for the job being edited (used to key its encryption key)
+let wizKeySet = false; // does the job being edited have an encryption key stored?
 
 // Derive a PBS-safe snapshot group id from a job name.
 function slug(s) {
@@ -70,7 +72,8 @@ function sourceSummary(job) {
 
 function destSummary(job) {
   const d = job.destination || {};
-  return d.type === "folder" ? `folder ${d.path}` : "PBS";
+  if (d.type === "folder") return `folder ${d.path}`;
+  return job.encrypted ? "PBS (encrypted)" : "PBS";
 }
 
 // Browse/restore supports file and SQL backups to PBS.
@@ -197,6 +200,86 @@ function updateDestType() {
   el("dest-pbs").classList.toggle("hidden", folder);
 }
 
+// --- Client-side encryption key management (per job, keyed by wizJobId) ---
+
+function updateEncryptArea() {
+  el("enc-key-area").classList.toggle("hidden", !el("f-encrypt").checked);
+}
+
+// Reflect whether a key is stored: show its fingerprint and the Show-key button.
+function setKeyStatus(info) {
+  wizKeySet = !!info;
+  const status = el("enc-key-status");
+  status.classList.toggle("muted", !info);
+  status.textContent = info ? `Key set. Fingerprint ${info.fingerprint}` : "No key yet.";
+  el("enc-reveal").classList.toggle("hidden", !info);
+}
+
+async function refreshKeyStatus() {
+  let info = null;
+  try {
+    info = await invoke("get_encryption_key", { jobId: wizJobId });
+  } catch (err) {
+    info = null; // engine offline or no key: treat as none
+  }
+  setKeyStatus(info);
+}
+
+function showKeyModal(info) {
+  el("key-modal-key").value = info.key;
+  el("key-modal-fp").value = info.fingerprint;
+  el("key-modal-copy").textContent = "Copy key";
+  el("key-modal").classList.remove("hidden");
+}
+
+async function generateKey() {
+  if (wizKeySet && !confirm("Replace the existing key? Backups made with the old key will need it to restore.")) {
+    return;
+  }
+  try {
+    // Replacing means clearing the old key first (generate refuses to overwrite).
+    if (wizKeySet) await invoke("clear_encryption_key", { jobId: wizJobId });
+    const info = await invoke("generate_encryption_key", { jobId: wizJobId });
+    setKeyStatus(info);
+    showKeyModal(info);
+  } catch (err) {
+    alert("could not generate a key: " + err);
+  }
+}
+
+async function importKey() {
+  const key = el("import-modal-key").value.trim();
+  if (!key) return alert("Paste a base64 key to import.");
+  try {
+    const info = await invoke("import_encryption_key", { jobId: wizJobId, key });
+    setKeyStatus(info);
+    el("import-modal").classList.add("hidden");
+    showKeyModal(info);
+  } catch (err) {
+    alert("could not import the key: " + err);
+  }
+}
+
+async function revealKey() {
+  try {
+    const info = await invoke("get_encryption_key", { jobId: wizJobId });
+    if (!info) return alert("No key is stored for this job.");
+    showKeyModal(info);
+  } catch (err) {
+    alert("could not read the key: " + err);
+  }
+}
+
+async function copyKeyToClipboard() {
+  try {
+    await navigator.clipboard.writeText(el("key-modal-key").value);
+    el("key-modal-copy").textContent = "Copied";
+    setTimeout(() => (el("key-modal-copy").textContent = "Copy key"), 1500);
+  } catch (err) {
+    el("key-modal-key").select(); // clipboard blocked: let the user copy manually
+  }
+}
+
 function renderDbCheckboxes(databases, checked) {
   const checkedSet = new Set(checked || []);
   const c = el("sql-db-pick");
@@ -276,6 +359,9 @@ async function populateJobPickers(job) {
 
 async function openEditor(job) {
   editing = job || null;
+  // A stable id from the start so an encryption key can be stored under it
+  // before the job is first saved.
+  wizJobId = job?.id || crypto.randomUUID();
   el("editor-title").textContent = job ? "Edit job" : "New job";
   el("f-name").value = job?.name || "";
   await populateJobPickers(job);
@@ -298,6 +384,9 @@ async function openEditor(job) {
   el("f-folder").value = dest.type === "folder" ? dest.path || "" : "";
   backupIdTouched = !!(dest.type === "pbs" && dest.backup_id);
   updateDestType();
+  el("f-encrypt").checked = !!job?.encrypted;
+  updateEncryptArea();
+  await refreshKeyStatus();
 
   const s = job?.schedule || { kind: "manual" };
   el("f-schedule-kind").value = s.kind;
@@ -355,8 +444,10 @@ function gatherDestination() {
 }
 
 function gatherJob() {
+  // Encryption applies to PBS destinations only (folders get a plain .bak).
+  const encrypted = el("f-dest-type").value === "pbs" && el("f-encrypt").checked;
   return {
-    id: editing?.id || crypto.randomUUID(),
+    id: wizJobId,
     name: el("f-name").value.trim(),
     source: gatherSource(),
     destination: gatherDestination(),
@@ -365,6 +456,7 @@ function gatherJob() {
     post_script: el("f-post-script").value.trim() || null,
     last_run: editing?.last_run ?? null,
     last_status: editing?.last_status ?? null,
+    encrypted,
   };
 }
 
@@ -381,6 +473,9 @@ async function saveJob() {
   if (job.destination.type === "pbs") {
     if (!job.destination.server_id) return alert("Pick a PBS server (add one in the PBS servers tab)");
     if (!job.destination.backup_id) return alert("Backup id is required");
+    if (job.encrypted && !wizKeySet) {
+      return alert("Generate or import an encryption key, or turn off encryption.");
+    }
   } else if (!job.destination.path) {
     return alert("Folder path is required");
   }
@@ -1036,6 +1131,18 @@ window.addEventListener("DOMContentLoaded", () => {
   el("wiz-save").onclick = saveJob;
   el("f-source-type").onchange = updateSourceType;
   el("f-dest-type").onchange = updateDestType;
+  el("f-encrypt").onchange = updateEncryptArea;
+  el("enc-generate").onclick = generateKey;
+  el("enc-import").onclick = () => {
+    el("import-modal-key").value = "";
+    el("import-modal").classList.remove("hidden");
+    el("import-modal-key").focus();
+  };
+  el("enc-reveal").onclick = revealKey;
+  el("key-modal-copy").onclick = copyKeyToClipboard;
+  el("key-modal-close").onclick = () => el("key-modal").classList.add("hidden");
+  el("import-modal-ok").onclick = importKey;
+  el("import-modal-cancel").onclick = () => el("import-modal").classList.add("hidden");
   el("load-dbs").onclick = loadDatabasesForConn;
   el("pick-folder").onclick = async () => {
     const dir = await invoke("pick_destination");

@@ -31,19 +31,15 @@
 pub mod api;
 pub mod blob;
 pub mod chunker;
+pub mod crypt;
 pub mod error;
 pub mod index;
 pub mod manifest;
 pub mod repository;
 pub mod session;
 
-// Implemented incrementally as the protocol client comes online:
-//
-// pub mod chunker;   // Buzhash content-defined chunking for dynamic indexes
-// pub mod crypto;    // AES-256-GCM client side encryption and key handling
-// pub mod api_types; // serde types mirrored from the documented PBS API
-
 pub use api::{ApiClient, Snapshot};
+pub use crypt::{random_key, CryptConfig};
 pub use error::{PbsError, Result};
 pub use index::{DynamicIndex, DynamicIndexBuilder, FixedIndex, FixedIndexBuilder};
 pub use manifest::BackupManifest;
