@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "pbs-client"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "pbsgui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "pbsgui-ipc",
  "rfd",
@@ -2515,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "pbsgui-engine"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "pbsgui-ipc"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "interprocess",
  "serde",
