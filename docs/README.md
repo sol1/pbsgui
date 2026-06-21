@@ -15,6 +15,8 @@ own license (GPL-3.0).
 - Back up generic Windows files and folders to PBS with content-defined chunking
   and incremental, server-side deduplication.
 - Browse snapshots by date and time and restore them in full or in part.
+- Optionally encrypt backups on the client with AES-256-GCM, byte-compatible with
+  the PBS encryption scheme, so the server never sees the key.
 - Run unattended as a Windows service, with a tray-based GUI for configuration
   and monitoring that can be closed without stopping backups.
 - Be easy to operate: discover SQL Server instances, store secrets in the OS
@@ -53,7 +55,21 @@ chunking, and incremental deduplication against a previous snapshot.
 | `ui/` | Static front end (HTML/CSS/JS) served by the Tauri app. |
 | `docs/` | This documentation. |
 
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Jobs](screenshots/jobs.png) | ![Job wizard: source](screenshots/wizard-source.png) |
+| Jobs list | Job wizard (source) |
+| ![Job wizard: destination with encryption](screenshots/wizard-destination.png) | ![SQL Servers](screenshots/sql-servers.png) |
+| Job wizard (destination + encryption) | SQL Server discovery and connections |
+| ![Browse and restore](screenshots/browse-restore.png) | ![PBS servers](screenshots/pbs-servers.png) |
+| Browse and restore | PBS servers |
+
+See [screenshots/README.md](screenshots/README.md) for how these are captured.
+
 ## More
 
 - [STATUS.md](STATUS.md) - what works today, what is in progress, and the roadmap.
 - [DEVELOPMENT.md](DEVELOPMENT.md) - prerequisites, building, testing, and the dev loop.
+- [ARCHITECTURE.md](ARCHITECTURE.md) - components, the SQL Server backup strategy, and the storage model.

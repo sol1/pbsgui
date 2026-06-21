@@ -52,14 +52,19 @@ provide point-in-time recovery. The log chain must not be broken.
 
 ## Storage model
 
-Each SQL backup operation becomes one PBS snapshot containing the VDI byte stream
-as a fixed-index image plus a metadata blob (backup type, recovery model, the
-relevant LSNs, and the instance / database / cluster identity). Restore order is
-reconstructed from this metadata: base full, then the best differential, then the
-contiguous log chain up to the chosen point in time.
+Each SQL backup operation becomes one PBS snapshot per database. The VDI byte
+stream is stored as a deduplicated dynamic-index archive (a fixed index needs the
+size up front, which a VDI stream does not provide). Full and log backups use
+separate snapshot groups so they do not interleave. Restore today reassembles a
+full snapshot and streams it back over VDI. Point-in-time restore from a full
+plus a differential and a log chain, driven by per-snapshot metadata (backup
+type, recovery model, LSNs, and the instance / database / cluster identity), is
+the intended direction and not yet implemented.
 
 ## IPC
 
 The GUI and engine exchange newline-delimited JSON over a named pipe. The GUI
 sends requests and receives an immediate response; long running jobs then stream
-progress and log events. See `crates/pbsgui-engine/src/ipc.rs`.
+progress and log events. The message types and transport live in
+`crates/pbsgui-ipc`; the engine's request handler is
+`crates/pbsgui-engine/src/handler.rs`.

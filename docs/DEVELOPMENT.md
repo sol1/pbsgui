@@ -81,6 +81,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+### Cross-checking the Windows-only code from Linux
+
+Clippy on Linux compiles out the `cfg(windows)` modules, so it cannot catch
+errors in the service, tray, credential store, or SQL Server code. To compile
+those without a Windows machine, add the GNU Windows target once
+(`rustup target add x86_64-pc-windows-gnu` plus the `gcc-mingw-w64-x86-64`
+package) and run, before pushing changes that touch them:
+
+```
+cargo clippy -p pbsgui-engine --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+cargo check  -p pbsgui        --target x86_64-pc-windows-gnu
+```
+
 ## Building the Windows installer
 
 CI builds the engine, stages it as a Tauri sidecar, and produces an NSIS
@@ -129,6 +142,23 @@ Two one-time bits of SQL Server setup are needed on the instance under test:
 
 Then, in the GUI's SQL Servers tab, click Discover, Probe an instance to list its
 databases, and back one up.
+
+### Transaction-log backups
+
+To keep a FULL or BULK_LOGGED database's transaction log from growing without
+bound, schedule log backups:
+
+1. Run a full backup with copy-only turned off once, so pbsgui owns the backup
+   chain. (A copy-only full does not start a log chain, so `BACKUP LOG` would
+   fail until a regular full exists.)
+2. Create a second job over the same databases with the backup type set to
+   Transaction log and a frequent schedule. Each run takes `BACKUP LOG` (never
+   copy-only), which truncates the inactive log. Log snapshots are stored in a
+   separate `-log` snapshot group.
+
+If you do not need point-in-time recovery, setting the database to the SIMPLE
+recovery model is the alternative: the log truncates automatically and log
+backups are neither needed nor allowed.
 
 ## Continuous integration
 
