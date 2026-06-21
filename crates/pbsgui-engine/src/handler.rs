@@ -227,7 +227,9 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
         }
 
         Request::GenerateEncryptionKey { job_id } => {
-            let _ = responder.send(&enc_key_reply(enckey::generate(&job_id))).await;
+            let _ = responder
+                .send(&enc_key_reply(enckey::generate(&job_id)))
+                .await;
         }
         Request::ImportEncryptionKey { job_id, key } => {
             let _ = responder

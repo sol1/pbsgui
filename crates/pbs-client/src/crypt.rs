@@ -182,7 +182,10 @@ mod tests {
         // Different key => different digest (no cross-key correlation).
         assert_ne!(a.compute_digest(b"chunk"), b.compute_digest(b"chunk"));
         // A keyed digest differs from the plain SHA-256.
-        assert_ne!(a.compute_digest(b"chunk"), crate::index::chunk_digest(b"chunk"));
+        assert_ne!(
+            a.compute_digest(b"chunk"),
+            crate::index::chunk_digest(b"chunk")
+        );
     }
 
     #[test]

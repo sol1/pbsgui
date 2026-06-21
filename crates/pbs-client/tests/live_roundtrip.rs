@@ -60,7 +60,10 @@ async fn fixed_image_backup_and_restore() {
     let mut reader = ReaderClient::connect(&params)
         .await
         .expect("reader connect");
-    let restored = reader.restore_fixed_image(archive, None).await.expect("restore");
+    let restored = reader
+        .restore_fixed_image(archive, None)
+        .await
+        .expect("restore");
 
     assert_eq!(restored, image, "restored image must match the original");
 }
