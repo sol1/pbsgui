@@ -1199,14 +1199,25 @@ async function loadSqlConnections() {
     list.innerHTML = '<div class="muted">No saved connections yet.</div>';
     return;
   }
+  const authLabel = {
+    integrated: "Windows integrated",
+    sql_login: "SQL login",
+    windows_account: "Windows account",
+    azure_ad: "Azure AD",
+  };
   for (const conn of conns) {
     const row = document.createElement("div");
     row.className = "job-row";
+    const icon = document.createElement("div");
+    icon.className = "row-avatar avatar-sql";
+    icon.textContent = "SQL";
     const main = document.createElement("div");
     main.className = "job-main";
+    const fci = conn.failover_cluster ? ' <span class="badge">FCI</span>' : "";
     main.innerHTML =
-      `<div class="job-name">${escapeHtml(conn.name)}</div>` +
-      `<div class="job-meta">${escapeHtml(conn.server)} · ${escapeHtml(conn.auth.kind)}</div>`;
+      `<div class="job-name">${escapeHtml(conn.name)}${fci}</div>` +
+      `<div class="job-meta">${escapeHtml(conn.server)} <span class="dot-sep"></span> ` +
+      `${escapeHtml(authLabel[conn.auth.kind] || conn.auth.kind)}</div>`;
     const actions = document.createElement("div");
     actions.className = "job-actions";
     actions.append(
@@ -1220,7 +1231,7 @@ async function loadSqlConnections() {
         loadSqlConnections();
       }),
     );
-    row.append(main, actions);
+    row.append(icon, main, actions);
     list.append(row);
   }
 }
@@ -1286,6 +1297,9 @@ async function loadPbsServers() {
   for (const server of servers) {
     const row = document.createElement("div");
     row.className = "job-row";
+    const icon = document.createElement("div");
+    icon.className = "row-avatar avatar-pbs";
+    icon.textContent = "PBS";
     const main = document.createElement("div");
     main.className = "job-main";
     main.innerHTML =
@@ -1305,7 +1319,7 @@ async function loadPbsServers() {
         loadPbsServers();
       }),
     );
-    row.append(main, actions);
+    row.append(icon, main, actions);
     list.append(row);
   }
 }
