@@ -59,12 +59,12 @@ chunking, and incremental deduplication against a previous snapshot.
 
 | | |
 | --- | --- |
-| ![Jobs](screenshots/jobs.png) | ![Job wizard: source](screenshots/wizard-source.png) |
-| Jobs list | Job wizard (source) |
-| ![Job wizard: destination with encryption](screenshots/wizard-destination.png) | ![SQL Servers](screenshots/sql-servers.png) |
-| Job wizard (destination + encryption) | SQL Server discovery and connections |
-| ![Browse and restore](screenshots/browse-restore.png) | ![PBS servers](screenshots/pbs-servers.png) |
-| Browse and restore | PBS servers |
+| ![Jobs dashboard](screenshots/pbsgui-joblist.png) | ![SQL Servers](screenshots/pbsgui-mssql.png) |
+| Jobs dashboard with status and size-over-time graphs | SQL Server discovery, connections, and databases |
+| ![Point-in-time restore](screenshots/pbsgui-restore.png) | ![Notifications](screenshots/pbsgui-notifications.png) |
+| Browse and point-in-time restore | Notifications |
+| ![PBS servers](screenshots/pbsgui-pbsservers.png) | |
+| PBS servers | |
 
 See [screenshots/README.md](screenshots/README.md) for how these are captured.
 
