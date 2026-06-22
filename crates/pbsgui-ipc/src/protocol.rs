@@ -88,17 +88,33 @@ pub enum SqlRestorePoint {
     PointInTime { unix_time: i64 },
 }
 
+/// One full restore point: its snapshot time and size.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlFullPoint {
+    /// Snapshot time, unix seconds.
+    pub backup_time: i64,
+    /// Snapshot size in bytes, if PBS reported it.
+    #[serde(default)]
+    pub size: Option<u64>,
+}
+
 /// The restore options available for one database of a SQL job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlRestoreWindow {
-    /// Full restore points (snapshot times, unix seconds), newest first.
-    pub full_points: Vec<i64>,
+    /// Full restore points, newest first.
+    pub full_points: Vec<SqlFullPoint>,
     /// Earliest restorable instant for point-in-time (the oldest full), if any.
     #[serde(default)]
     pub pit_earliest: Option<i64>,
     /// Latest restorable instant for point-in-time (newest log, or newest full).
     #[serde(default)]
     pub pit_latest: Option<i64>,
+    /// Number of log backups available (point-in-time jobs).
+    #[serde(default)]
+    pub log_count: u32,
+    /// Total size of those log backups in bytes, if known.
+    #[serde(default)]
+    pub log_total_size: Option<u64>,
 }
 
 /// Where a job sends its backup.

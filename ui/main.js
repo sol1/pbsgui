@@ -761,10 +761,14 @@ async function loadSqlRestore(job) {
     const latest = new Date(win.pit_latest * 1000);
     const box = document.createElement("div");
     box.className = "pit-box";
+    const logSummary =
+      win.log_count > 0
+        ? ` (${win.log_count} log backup${win.log_count === 1 ? "" : "s"}, ${escapeHtml(formatBytes(win.log_total_size))} total)`
+        : "";
     box.innerHTML =
       `<div class="pit-title">Restore to any moment</div>` +
       `<div class="help muted">Recovers the database to the exact second you choose, between ` +
-      `${escapeHtml(earliest.toLocaleString())} and ${escapeHtml(latest.toLocaleString())}.</div>`;
+      `${escapeHtml(earliest.toLocaleString())} and ${escapeHtml(latest.toLocaleString())}${logSummary}.</div>`;
     const input = document.createElement("input");
     input.type = "datetime-local";
     input.min = toLocalInput(earliest);
@@ -789,13 +793,14 @@ async function loadSqlRestore(job) {
     list.append(placeholderDiv("No full backups yet."));
     return;
   }
-  for (const t of win.full_points) {
+  for (const fp of win.full_points) {
     const row = document.createElement("div");
     row.className = "snap-row";
     row.innerHTML =
-      `<span class="snap-time">${escapeHtml(new Date(t * 1000).toLocaleString())}</span>` +
+      `<span class="snap-time">${escapeHtml(new Date(fp.backup_time * 1000).toLocaleString())}</span>` +
+      `<span class="snap-size muted">${escapeHtml(formatBytes(fp.size))}</span>` +
       `<span class="spacer"></span><span class="snap-action">Restore</span>`;
-    row.onclick = () => restoreSqlFull(job.id, database, t);
+    row.onclick = () => restoreSqlFull(job.id, database, fp.backup_time);
     list.append(row);
   }
 }

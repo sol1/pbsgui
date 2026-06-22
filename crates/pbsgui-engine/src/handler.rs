@@ -582,36 +582,41 @@ async fn get_sql_restore_window(
     let api = ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)?;
     let ns = ctx.repo.namespace.as_deref();
 
-    let mut full_times: Vec<i64> = api
+    let mut fulls = api
         .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, &full_group)
-        .await?
-        .into_iter()
-        .map(|s| s.backup_time)
-        .collect();
-    full_times.sort_unstable();
-    let log_times: Vec<i64> = api
+        .await?;
+    fulls.sort_by_key(|s| std::cmp::Reverse(s.backup_time)); // newest first
+    let logs = api
         .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, &log_group)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| s.backup_time)
-        .collect();
+        .unwrap_or_default();
 
     // Point-in-time is available only when there are logs to replay over a full.
-    let (pit_earliest, pit_latest) = if !log_times.is_empty() && !full_times.is_empty() {
-        let earliest = full_times.first().copied();
-        let latest = log_times.iter().chain(full_times.iter()).copied().max();
+    let (pit_earliest, pit_latest) = if !logs.is_empty() && !fulls.is_empty() {
+        let earliest = fulls.iter().map(|s| s.backup_time).min();
+        let latest = fulls.iter().chain(logs.iter()).map(|s| s.backup_time).max();
         (earliest, latest)
     } else {
         (None, None)
     };
 
-    let mut full_points = full_times;
-    full_points.reverse(); // newest first
+    // None total if any log's size is unknown.
+    let log_total_size = logs
+        .iter()
+        .map(|s| s.size)
+        .try_fold(0u64, |acc, s| s.map(|v| acc + v));
     Ok(SqlRestoreWindow {
-        full_points,
+        full_points: fulls
+            .into_iter()
+            .map(|s| pbsgui_ipc::SqlFullPoint {
+                backup_time: s.backup_time,
+                size: s.size,
+            })
+            .collect(),
         pit_earliest,
         pit_latest,
+        log_count: logs.len() as u32,
+        log_total_size,
     })
 }
 

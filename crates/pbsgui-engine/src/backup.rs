@@ -11,7 +11,7 @@ use pbsgui_ipc::{
 use tokio::sync::mpsc::Sender;
 
 use crate::config::unix_now;
-use crate::{archive, changedet, connstore, enckey, notify, scripts, secrets};
+use crate::{archive, changedet, connstore, enckey, notify, scripts, secrets, sqlsched};
 
 /// Archive name for a job's filesystem backup (a tar in a dynamic index).
 const ARCHIVE_NAME: &str = "files.didx";
@@ -80,6 +80,17 @@ pub async fn run_job_kind(
                     line: format!("[post] failed to run: {e}"),
                 })
                 .await;
+        }
+    }
+
+    // A successful SQL backup anchors/advances the point-in-time chain timers, so
+    // a manual run starts the log cadence just like a scheduled one.
+    if outcome.is_ok() {
+        if let JobSource::Sql { .. } = job.source {
+            match sql_run {
+                SqlRun::Full => sqlsched::record_full(&job.id, unix_now()),
+                SqlRun::Log => sqlsched::record_log(&job.id, unix_now()),
+            }
         }
     }
 

@@ -41,20 +41,14 @@ async fn run_due(store: &Arc<JobStore>, job: Job, kind: SqlRun) {
         }
     }
 
-    let run_at = unix_now();
     let status = match handle.await {
         Ok(Ok(_)) => "ok".to_string(),
         Ok(Err(e)) => e.to_string(),
         Err(e) => format!("task failed: {e}"),
     };
-    // Record the SQL full/log timer only on success, so a failed log keeps trying.
-    if status == "ok" && matches!(job.source, JobSource::Sql { .. }) {
-        match kind {
-            SqlRun::Full => sqlsched::record_full(&job.id, run_at),
-            SqlRun::Log => sqlsched::record_log(&job.id, run_at),
-        }
-    }
-    let _ = store.record_run(&job.id, run_at, status);
+    // The SQL full/log chain timers are recorded inside run_job_kind on success,
+    // so both manual and scheduled runs advance them.
+    let _ = store.record_run(&job.id, unix_now(), status);
 }
 
 /// Whether a job is due now and, for a SQL job, whether a full or log is due. A

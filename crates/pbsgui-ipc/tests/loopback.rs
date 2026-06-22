@@ -85,6 +85,8 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                         full_points: vec![],
                         pit_earliest: None,
                         pit_latest: None,
+                        log_count: 0,
+                        log_total_size: None,
                     },
                 })
                 .await;
