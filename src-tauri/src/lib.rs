@@ -8,8 +8,8 @@
 //! GUI never stops backups.
 
 use pbsgui_ipc::{
-    EncryptionKeyInfo, FileInfo, Job, PbsServer, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck,
-    SqlConnection, SqlInstance, SqlProbe, DEFAULT_SOCKET,
+    EncryptionKeyInfo, FileInfo, Job, NotificationSettings, NotifyChannel, PbsServer, Reply,
+    Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection, SqlInstance, SqlProbe, DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -261,6 +261,72 @@ async fn clear_encryption_key(job_id: String) -> Result<(), String> {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// Notification settings plus which secrets are stored (for the settings form).
+#[derive(serde::Serialize)]
+struct NotificationsView {
+    settings: NotificationSettings,
+    has_smtp_password: bool,
+    has_webhook_url: bool,
+}
+
+/// Get the global notification settings.
+#[tauri::command]
+async fn get_notifications() -> Result<NotificationsView, String> {
+    let replies = request_all(Request::GetNotifications).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Notifications {
+                settings,
+                has_smtp_password,
+                has_webhook_url,
+            } => Some(NotificationsView {
+                settings,
+                has_smtp_password,
+                has_webhook_url,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return notification settings".to_string())
+}
+
+/// Save the global notification settings; secrets are stored only when present.
+#[tauri::command]
+async fn save_notifications(
+    settings: NotificationSettings,
+    smtp_password: Option<String>,
+    webhook_url: Option<String>,
+) -> Result<String, String> {
+    let replies = request_all(Request::SaveNotifications {
+        settings,
+        smtp_password,
+        webhook_url,
+    })
+    .await?;
+    saved_id(replies)
+}
+
+/// Send a test notification through one channel; returns the engine's message.
+#[tauri::command]
+async fn test_notification(channel: NotifyChannel) -> Result<String, String> {
+    let replies = request_all(Request::TestNotification { channel }).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Finished { success, message } => {
+                Some(if success { Ok(message) } else { Err(message) })
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| Err("engine did not return a test result".to_string()))
 }
 
 /// Connect to one instance and report its version, topology, and databases.
@@ -615,6 +681,9 @@ pub fn run() {
         import_encryption_key,
         get_encryption_key,
         clear_encryption_key,
+        get_notifications,
+        save_notifications,
+        test_notification,
         pick_save_file,
         pick_destination,
         pick_folders,

@@ -10,8 +10,9 @@ pub mod protocol;
 pub mod transport;
 
 pub use protocol::{
-    CheckStatus, EncryptionKeyInfo, FileInfo, Job, JobDestination, JobSource, PbsServer, Reply,
-    Request, Schedule, SnapshotInfo, SqlAuth, SqlAuthMode, SqlBackupType, SqlCheck, SqlConnection,
-    SqlDatabase, SqlDiscoverySource, SqlInstance, SqlProbe, SqlTopology,
+    CheckStatus, EmailSecurity, EmailSettings, EncryptionKeyInfo, FileInfo, Job, JobDestination,
+    JobSource, NotificationSettings, NotifyChannel, PbsServer, Reply, Request, Schedule,
+    SnapshotInfo, SqlAuth, SqlAuthMode, SqlBackupType, SqlCheck, SqlConnection, SqlDatabase,
+    SqlDiscoverySource, SqlInstance, SqlProbe, SqlTopology, WebhookSettings,
 };
 pub use transport::{send_request, serve, socket_name, Responder, DEFAULT_SOCKET};

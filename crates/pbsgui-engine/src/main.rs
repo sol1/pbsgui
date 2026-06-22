@@ -22,6 +22,7 @@ mod connstore;
 mod enckey;
 mod handler;
 mod jobstore;
+mod notify;
 mod restore;
 mod scheduler;
 mod scripts;

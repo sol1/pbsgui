@@ -524,6 +524,16 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+/* Two fields side by side (e.g. SMTP port + security). */
+.row-2 {
+  display: flex;
+  gap: 12px;
+}
+
+.row-2 > label {
+  flex: 1;
+}
+
 /* Client-side encryption panel (job wizard, Destination step) */
 .enc-panel {
   margin-top: 12px;

@@ -93,10 +93,12 @@ function showView(which) {
   el("browse-view").classList.toggle("hidden", which !== "browse");
   el("sql-view").classList.toggle("hidden", which !== "sql");
   el("pbs-view").classList.toggle("hidden", which !== "pbs");
+  el("notify-view").classList.toggle("hidden", which !== "notify");
   el("tab-jobs").classList.toggle("active", which === "jobs" || which === "editor");
   el("tab-browse").classList.toggle("active", which === "browse");
   el("tab-sql").classList.toggle("active", which === "sql");
   el("tab-pbs").classList.toggle("active", which === "pbs");
+  el("tab-notify").classList.toggle("active", which === "notify");
 }
 
 async function checkEngine() {
@@ -1000,6 +1002,87 @@ async function loadPbsServers() {
   }
 }
 
+// --- Notifications ---
+
+function updateNotifyFields() {
+  el("n-email-fields").classList.toggle("hidden", !el("n-email-enabled").checked);
+  el("n-webhook-fields").classList.toggle("hidden", !el("n-webhook-enabled").checked);
+}
+
+async function loadNotifications() {
+  let view;
+  try {
+    view = await invoke("get_notifications");
+  } catch (err) {
+    return; // engine offline; leave the form at its defaults
+  }
+  const s = view.settings;
+  el("n-on-failure").checked = !!s.on_failure;
+  el("n-on-success").checked = !!s.on_success;
+  el("n-email-enabled").checked = !!s.email.enabled;
+  el("n-email-host").value = s.email.host || "";
+  el("n-email-port").value = s.email.port || 587;
+  el("n-email-security").value = s.email.security || "starttls";
+  el("n-email-username").value = s.email.username || "";
+  el("n-email-from").value = s.email.from || "";
+  el("n-email-to").value = (s.email.to || []).join("\n");
+  el("n-email-password").value = "";
+  el("n-email-password-note").textContent = view.has_smtp_password
+    ? "A password is stored; leave blank to keep it."
+    : "";
+  el("n-webhook-enabled").checked = !!s.webhook.enabled;
+  el("n-webhook-url").value = "";
+  el("n-webhook-url-note").textContent = view.has_webhook_url
+    ? "A URL is stored; leave blank to keep it."
+    : "";
+  updateNotifyFields();
+}
+
+function gatherNotifications() {
+  return {
+    on_failure: el("n-on-failure").checked,
+    on_success: el("n-on-success").checked,
+    email: {
+      enabled: el("n-email-enabled").checked,
+      host: el("n-email-host").value.trim(),
+      port: parseInt(el("n-email-port").value, 10) || 587,
+      security: el("n-email-security").value,
+      username: el("n-email-username").value.trim(),
+      from: el("n-email-from").value.trim(),
+      to: el("n-email-to")
+        .value.split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    },
+    webhook: {
+      enabled: el("n-webhook-enabled").checked,
+    },
+  };
+}
+
+async function saveNotifications(e) {
+  e.preventDefault();
+  const settings = gatherNotifications();
+  // Empty secret field = keep the stored one (send null, not "").
+  const smtpPassword = el("n-email-password").value || null;
+  const webhookUrl = el("n-webhook-url").value.trim() || null;
+  try {
+    await invoke("save_notifications", { settings, smtpPassword, webhookUrl });
+  } catch (err) {
+    return alert("save failed: " + err);
+  }
+  loadNotifications();
+}
+
+async function testNotificationChannel(channel) {
+  try {
+    const message = await invoke("test_notification", { channel });
+    alert("Test sent: " + message);
+  } catch (err) {
+    alert("Test failed: " + err);
+  }
+}
+
 function renderSqlInstanceCard(inst, card) {
   const badges = [`<span class="badge">${escapeHtml(sourceLabel[inst.source] || inst.source)}</span>`];
   if (inst.port) badges.push(`<span class="badge">tcp ${inst.port}</span>`);
@@ -1143,9 +1226,18 @@ window.addEventListener("DOMContentLoaded", () => {
     showView("pbs");
     loadPbsServers();
   };
+  el("tab-notify").onclick = () => {
+    showView("notify");
+    loadNotifications();
+  };
   el("discover-sql").onclick = discoverSql;
   el("pbs-form").addEventListener("submit", savePbsServer);
   el("pbs-clear").onclick = resetPbsForm;
+  el("notify-form").addEventListener("submit", saveNotifications);
+  el("n-email-enabled").onchange = updateNotifyFields;
+  el("n-webhook-enabled").onchange = updateNotifyFields;
+  el("n-test-email").onclick = () => testNotificationChannel("email");
+  el("n-test-webhook").onclick = () => testNotificationChannel("webhook");
   el("new-job").onclick = () => openEditor(null);
   el("cancel-edit").onclick = () => showView("jobs");
   el("wiz-next").onclick = () => showWizStep(wizStep + 1);

@@ -14,6 +14,7 @@
         <button id="tab-browse" class="tab" type="button">Browse &amp; restore</button>
         <button id="tab-sql" class="tab" type="button">SQL Servers</button>
         <button id="tab-pbs" class="tab" type="button">PBS servers</button>
+        <button id="tab-notify" class="tab" type="button">Notifications</button>
       </nav>
       <span class="spacer"></span>
       <span id="build-info" class="build muted"></span>
@@ -257,6 +258,86 @@
         </form>
         <h2>Saved servers</h2>
         <div id="pbs-list"></div>
+      </section>
+
+      <!-- Notifications -->
+      <section id="notify-view" class="hidden">
+        <div class="section-head">
+          <h1>Notifications</h1>
+        </div>
+        <p class="help muted">Get told when a job finishes. Settings are global (they apply to
+          every job). Secrets (the SMTP password and webhook URL) are stored in the Windows
+          Credential Manager, not in the config file.</p>
+        <form id="notify-form" autocomplete="off">
+          <label class="enc-toggle">
+            <input id="n-on-failure" type="checkbox" />
+            <span>Notify when a job fails</span>
+          </label>
+          <label class="enc-toggle">
+            <input id="n-on-success" type="checkbox" />
+            <span>Notify when a job succeeds</span>
+          </label>
+
+          <h2>Email (SMTP)</h2>
+          <label class="enc-toggle">
+            <input id="n-email-enabled" type="checkbox" />
+            <span>Enable email notifications</span>
+          </label>
+          <div id="n-email-fields">
+            <label>SMTP host
+              <input id="n-email-host" type="text" placeholder="smtp.example.com" />
+            </label>
+            <div class="row-2">
+              <label>Port
+                <input id="n-email-port" type="number" min="1" value="587" />
+              </label>
+              <label>Security
+                <select id="n-email-security">
+                  <option value="starttls">STARTTLS (587)</option>
+                  <option value="tls">TLS (465)</option>
+                  <option value="none">None</option>
+                </select>
+              </label>
+            </div>
+            <label>Username (blank for an unauthenticated relay)
+              <input id="n-email-username" type="text" placeholder="backup@example.com" />
+            </label>
+            <label>Password
+              <input id="n-email-password" type="password" placeholder="leave blank to keep current" />
+              <span id="n-email-password-note" class="muted"></span>
+            </label>
+            <label>From
+              <input id="n-email-from" type="text" placeholder="pbsgui <backup@example.com>" />
+            </label>
+            <label>To (one address per line)
+              <textarea id="n-email-to" rows="2" placeholder="alerts@example.com"></textarea>
+            </label>
+            <div class="actions">
+              <button id="n-test-email" type="button">Send test email</button>
+            </div>
+          </div>
+
+          <h2>Webhook (Slack-compatible)</h2>
+          <label class="enc-toggle">
+            <input id="n-webhook-enabled" type="checkbox" />
+            <span>Enable webhook notifications</span>
+          </label>
+          <div id="n-webhook-fields">
+            <p class="help muted">Paste a Slack incoming-webhook URL or any endpoint that accepts a
+              JSON POST. The payload has a <code>text</code> summary plus structured fields.</p>
+            <label>Webhook URL
+              <input id="n-webhook-url" type="password" placeholder="leave blank to keep current" />
+              <span id="n-webhook-url-note" class="muted"></span>
+            </label>
+            <div class="actions">
+              <button id="n-test-webhook" type="button">Send test webhook</button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button type="submit" class="primary">Save notifications</button>
+          </div>
+        </form>
       </section>
 
       <!-- Shared run / restore output -->

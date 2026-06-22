@@ -120,6 +120,71 @@ pub struct EncryptionKeyInfo {
     pub fingerprint: String,
 }
 
+/// Transport security for the SMTP connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailSecurity {
+    /// Plain connection upgraded with STARTTLS (typical on port 587).
+    Starttls,
+    /// Implicit TLS for the whole connection (typical on port 465).
+    Tls,
+    /// No transport security (for a trusted local relay only).
+    None,
+}
+
+/// Email (SMTP) notification settings. The password is stored separately in the
+/// credential store under `notify:smtp`, never in this struct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailSettings {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub security: EmailSecurity,
+    /// SMTP username; empty for an unauthenticated relay.
+    #[serde(default)]
+    pub username: String,
+    /// From address (may be `Name <addr@host>`).
+    pub from: String,
+    /// Recipient addresses.
+    #[serde(default)]
+    pub to: Vec<String>,
+}
+
+/// Webhook notification settings. The URL is stored separately in the credential
+/// store under `notify:webhook` (it is a capability secret). The payload is JSON
+/// with a `text` summary (so a Slack incoming webhook renders it) plus structured
+/// fields for generic consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookSettings {
+    pub enabled: bool,
+}
+
+/// Global notification settings. Secrets (SMTP password, webhook URL) live in the
+/// credential store, not here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationSettings {
+    /// Notify when a job finishes successfully (including "no changes").
+    #[serde(default)]
+    pub on_success: bool,
+    /// Notify when a job fails.
+    #[serde(default = "default_true")]
+    pub on_failure: bool,
+    pub email: EmailSettings,
+    pub webhook: WebhookSettings,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// A notification channel, for the Test action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyChannel {
+    Email,
+    Webhook,
+}
+
 /// Summary of a snapshot for the browse view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotInfo {
@@ -446,6 +511,22 @@ pub enum Request {
     GetEncryptionKey { job_id: String },
     /// Delete a job's stored encryption key.
     ClearEncryptionKey { job_id: String },
+
+    /// Get the global notification settings (without secrets; flags report which
+    /// secrets are stored).
+    GetNotifications,
+    /// Save the global notification settings. `smtp_password` / `webhook_url` are
+    /// stored when present; `None` keeps the existing secret.
+    SaveNotifications {
+        settings: NotificationSettings,
+        #[serde(default)]
+        smtp_password: Option<String>,
+        #[serde(default)]
+        webhook_url: Option<String>,
+    },
+    /// Send a test notification through one channel, using the saved settings and
+    /// secrets, and report the outcome.
+    TestNotification { channel: NotifyChannel },
 }
 
 /// A message from the engine to the GUI.
@@ -477,6 +558,13 @@ pub enum Reply {
     /// Reply to the encryption-key requests. `info` is `None` when the job has
     /// no stored key (a `GetEncryptionKey` miss, or after `ClearEncryptionKey`).
     EncryptionKey { info: Option<EncryptionKeyInfo> },
+    /// Reply to [`Request::GetNotifications`]. The flags report whether each
+    /// secret is stored, so the UI can show "set" without revealing it.
+    Notifications {
+        settings: NotificationSettings,
+        has_smtp_password: bool,
+        has_webhook_url: bool,
+    },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -506,6 +594,7 @@ impl Reply {
                 | Reply::SqlConnections { .. }
                 | Reply::PbsServers { .. }
                 | Reply::EncryptionKey { .. }
+                | Reply::Notifications { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )

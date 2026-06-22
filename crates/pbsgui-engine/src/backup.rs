@@ -9,7 +9,7 @@ use pbsgui_ipc::{FileInfo, Job, JobDestination, JobSource, Reply, SqlAuth, SqlBa
 use tokio::sync::mpsc::Sender;
 
 use crate::config::unix_now;
-use crate::{archive, changedet, connstore, enckey, scripts, secrets};
+use crate::{archive, changedet, connstore, enckey, notify, scripts, secrets};
 
 /// Archive name for a job's filesystem backup (a tar in a dynamic index).
 const ARCHIVE_NAME: &str = "files.didx";
@@ -48,7 +48,29 @@ pub async fn run_job(job: &Job, events: Sender<Reply>) -> anyhow::Result<String>
         }
     }
 
+    notify_outcome(job, &outcome).await;
     outcome.map(|(message, _)| message)
+}
+
+/// Fire notifications for a finished job (best-effort; never affects the result).
+async fn notify_outcome(job: &Job, outcome: &anyhow::Result<(String, Option<BackupStats>)>) {
+    let (success, status, message, stats) = match outcome {
+        Ok((message, stats)) => (
+            true,
+            if stats.is_some() { "ok" } else { "no-change" },
+            message.clone(),
+            stats.as_ref(),
+        ),
+        Err(e) => (false, "error", format!("{e:#}"), None),
+    };
+    notify::job_finished(notify::JobOutcome {
+        job_name: &job.name,
+        success,
+        status,
+        message: &message,
+        stats,
+    })
+    .await;
 }
 
 async fn run_inner(

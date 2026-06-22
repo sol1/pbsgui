@@ -29,6 +29,18 @@ glob = "0.3"
 sha2 = "0.10"
 base64 = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Notifications: HTTP (Slack/generic webhook) and SMTP email. rustls TLS to match
+# the rest of the stack (no OpenSSL/native-tls).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls-tls",
+] }
 # TDS client for SQL Server: identity/topology/database queries (the probe step)
 # and, later, issuing BACKUP ... TO VIRTUAL_DEVICE. rustls TLS to match pbs-client.
 tiberius = { version = "0.12", default-features = false, features = [

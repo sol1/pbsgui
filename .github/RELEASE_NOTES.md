@@ -31,6 +31,8 @@ Two installers are attached; pick one:
   restore (over the original database or to a new name).
 - Optional client-side AES-256-GCM encryption, byte-compatible with the PBS
   scheme; keys are stored in the Windows Credential Manager.
+- Notifications on job success/failure via email (SMTP) and a Slack-compatible
+  webhook, each with a Test button.
 - Runs as a Windows service with a tray icon; scheduled jobs run without the GUI
   open.
 

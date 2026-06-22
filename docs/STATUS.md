@@ -65,6 +65,10 @@ CI on Windows and exercised manually.
   the key), with a dedup-preserving keyed chunk digest. Keys are generated or
   imported per job, shown once to copy into a password manager, and stored in the
   credential store; backups encrypt and restores decrypt transparently.
+- **Notifications.** Global settings notify when a job succeeds and/or fails,
+  through email (SMTP, with STARTTLS/TLS) and a Slack-compatible webhook. Each
+  channel has a Test button; the SMTP password and webhook URL are stored in the
+  credential store. The message carries the job name, status, and backup metrics.
 
 ## In progress
 
@@ -77,9 +81,9 @@ CI on Windows and exercised manually.
 - **Network SQL discovery**: SQL Browser (UDP 1434), host/subnet scanning, and
   Active Directory lookups, including Availability Group listeners.
 - **Additional authentication**: explicit Windows accounts and Azure AD / Entra.
-- **Notifications**: email (SMTP), Slack and Microsoft Teams webhooks, a generic
-  webhook, and a heartbeat / dead-man's-switch, on success and failure, with
-  metrics and a durable retry queue.
+- **More notifications**: Microsoft Teams cards, a heartbeat / dead-man's-switch,
+  per-job routing, a durable retry queue, and daily digests (email and a
+  Slack-compatible webhook already work).
 - **VSS-based filesystem backup** for consistent snapshots of open files.
 - **Code signing** of the installer and binaries (currently deferred).
 

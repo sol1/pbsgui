@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
-use crate::{backup, connstore, enckey, restore, secrets};
+use crate::{backup, connstore, enckey, notify, restore, secrets};
 
 /// Archive name for a job's filesystem backup.
 const ARCHIVE_NAME: &str = "files.didx";
@@ -250,6 +250,45 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
                 Ok(()) => Reply::EncryptionKey { info: None },
                 Err(e) => Reply::Error {
                     message: e.to_string(),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
+
+        Request::GetNotifications => {
+            let settings = notify::load();
+            let (has_smtp_password, has_webhook_url) = notify::secret_flags();
+            let _ = responder
+                .send(&Reply::Notifications {
+                    settings,
+                    has_smtp_password,
+                    has_webhook_url,
+                })
+                .await;
+        }
+        Request::SaveNotifications {
+            settings,
+            smtp_password,
+            webhook_url,
+        } => {
+            let result = (|| -> anyhow::Result<()> {
+                notify::set_smtp_password(smtp_password.as_deref())?;
+                notify::set_webhook_url(webhook_url.as_deref())?;
+                notify::save(&settings)
+            })();
+            let _ = responder
+                .send(&saved_reply("notifications".to_string(), result))
+                .await;
+        }
+        Request::TestNotification { channel } => {
+            let reply = match notify::send_test(channel).await {
+                Ok(()) => Reply::Finished {
+                    success: true,
+                    message: "test notification sent".to_string(),
+                },
+                Err(e) => Reply::Finished {
+                    success: false,
+                    message: format!("{e:#}"),
                 },
             };
             let _ = responder.send(&reply).await;

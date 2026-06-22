@@ -122,6 +122,48 @@ async fn demo_handler(request: Request, mut responder: Responder) {
         | Request::ClearEncryptionKey { .. } => {
             let _ = responder.send(&Reply::EncryptionKey { info: None }).await;
         }
+        Request::GetNotifications => {
+            let _ = responder
+                .send(&Reply::Notifications {
+                    settings: sample_notifications(),
+                    has_smtp_password: false,
+                    has_webhook_url: false,
+                })
+                .await;
+        }
+        Request::SaveNotifications { .. } => {
+            let _ = responder
+                .send(&Reply::Saved {
+                    id: "notify".into(),
+                })
+                .await;
+        }
+        Request::TestNotification { .. } => {
+            let _ = responder
+                .send(&Reply::Finished {
+                    success: true,
+                    message: "test sent".into(),
+                })
+                .await;
+        }
+    }
+}
+
+fn sample_notifications() -> pbsgui_ipc::NotificationSettings {
+    use pbsgui_ipc::{EmailSecurity, EmailSettings, NotificationSettings, WebhookSettings};
+    NotificationSettings {
+        on_success: false,
+        on_failure: true,
+        email: EmailSettings {
+            enabled: false,
+            host: String::new(),
+            port: 587,
+            security: EmailSecurity::Starttls,
+            username: String::new(),
+            from: String::new(),
+            to: vec![],
+        },
+        webhook: WebhookSettings { enabled: false },
     }
 }
 
