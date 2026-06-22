@@ -75,10 +75,18 @@ jobs:
           $small = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
           Copy-Item $small.FullName ("dist/{0}-online{1}" -f $small.BaseName, $small.Extension)
       # Signing is wired but gated on the DigiCert secrets (see release.yml); CI
-      # builds are unsigned.
-      - name: Upload installers
+      # builds are unsigned. Upload the two installers as SEPARATE artifacts so the
+      # small online one (~5 MB) can be downloaded without the ~200 MB offline one.
+      - name: Upload online installer (small)
         uses: actions/upload-artifact@v4
         with:
-          name: pbsgui-installer-${{ env.PBSGUI_VERSION }}-${{ env.PBSGUI_SHORT }}
-          path: dist/*.exe
+          name: pbsgui-installer-online-${{ env.PBSGUI_VERSION }}-${{ env.PBSGUI_SHORT }}
+          path: dist/*-setup-online.exe
+          if-no-files-found: error
+      - name: Upload offline installer (full)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pbsgui-installer-offline-${{ env.PBSGUI_VERSION }}-${{ env.PBSGUI_SHORT }}
+          path: dist/*_x64-setup.exe
+          if-no-files-found: error
           if-no-files-found: error
