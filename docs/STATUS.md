@@ -57,6 +57,13 @@ CI on Windows and exercised manually.
   database (with the exact `ALTER DATABASE ... SET RECOVERY FULL` to run) and
   warns when a FULL-recovery database is on a full-only plan (the log-growth
   trap). The engine schedules the full and log cadences independently.
+- **High-availability aware backups.** Install the engine on each node and it
+  coordinates through SQL Server, with no connection between the pbsgui instances:
+  an Always On database is backed up only on the preferred backup replica
+  (`sys.fn_hadr_backup_is_preferred_replica`), forcing a copy-only full on a
+  secondary; a Failover Cluster Instance is skipped on whichever node is not the
+  active one. System databases (master/model/msdb) are offered for backup
+  (tempdb is hidden); the wizard explains the restore caveats.
 - **SQL Server point-in-time restore.** Restore a database to any moment within
   the retained window: pbsgui picks the covering full plus the log chain, restores
   the full `WITH NORECOVERY`, replays the logs `WITH STOPAT`, and recovers at the

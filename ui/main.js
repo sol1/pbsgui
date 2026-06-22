@@ -13,6 +13,7 @@ let wizStep = 0; // current job-wizard step
 let sqlConnCache = []; // saved SQL connections, for the wizard's source step
 let sqlDbModels = {}; // database name -> recovery model, from the last probe (for guidance)
 let sqlDbAg = {}; // database name -> in an Always On availability group (from the last probe)
+let sqlDbSystem = {}; // database name -> system database (master/model/msdb), from the last probe
 let wizJobId = null; // stable id for the job being edited (used to key its encryption key)
 let wizKeySet = false; // does the job being edited have an encryption key stored?
 
@@ -267,6 +268,13 @@ function renderSqlGuidance() {
       ag.textContent = `${name} is in an Always On group. Install pbsgui on each replica and point each at the same backup group; it backs up automatically on whichever replica SQL Server prefers (a copy-only full on a secondary). No connection between the pbsgui instances is needed.`;
       host.append(ag);
     }
+
+    if (sqlDbSystem[name]) {
+      const sys = document.createElement("div");
+      sys.className = "check-row check-warn";
+      sys.textContent = `${name} is a system database: use "Daily restore points" (it cannot do point-in-time). Back up master, model, and msdb on every node, since they are not part of an Availability Group. Restoring master needs the instance started in single-user mode, a manual step.`;
+      host.append(sys);
+    }
   }
 }
 
@@ -390,6 +398,7 @@ async function loadDatabasesForConn() {
     for (const d of probe.databases) {
       sqlDbModels[d.name] = d.recovery_model;
       sqlDbAg[d.name] = !!d.in_availability_group;
+      sqlDbSystem[d.name] = !!d.system;
     }
     renderDbCheckboxes(
       probe.databases.map((d) => d.name),
@@ -964,6 +973,7 @@ function renderSqlDatabases(databases) {
           : "";
       const ag = db.in_availability_group ? " · in AG" : "";
       const db64 = escapeHtml(db.name);
+      const sysBadge = db.system ? '<span class="badge">system</span>' : "";
       const button = canBackup(db)
         ? `<span class="spacer"></span>` +
           `<button type="button" class="sql-db-pbs" data-db="${db64}">To PBS</button>` +
@@ -971,7 +981,7 @@ function renderSqlDatabases(databases) {
         : "";
       return (
         `<div class="sql-db"><span class="sql-db-name">${escapeHtml(db.name)}</span>` +
-        `${recoveryBadge(db.recovery_model)}` +
+        `${recoveryBadge(db.recovery_model)}${sysBadge}` +
         `<span class="muted">${escapeHtml(db.state)}${ag}${wait}</span>${button}</div>`
       );
     })
@@ -1042,6 +1052,9 @@ async function saveSqlConnection(inst) {
   const name = prompt("Name for this SQL connection:", inst.server);
   if (!name) return;
   try {
+    // A Failover Cluster Instance runs on one node at a time; mark it so a backup
+    // that cannot reach it locally is skipped (not failed) on the passive nodes.
+    const fci = inst.probe?.topology?.topology === "failover_cluster_instance";
     await invoke("save_sql_connection", {
       connection: {
         id: crypto.randomUUID(),
@@ -1049,6 +1062,7 @@ async function saveSqlConnection(inst) {
         server: inst.server,
         port: inst.port ?? null,
         auth: { kind: "integrated" },
+        failover_cluster: fci,
       },
       secret: null,
     });

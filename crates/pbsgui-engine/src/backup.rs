@@ -340,9 +340,28 @@ async fn backup_sql_to_pbs(
 
     // One connection to ask SQL whether this replica should back up each database
     // (Always On preferred-replica gating; standalone databases always proceed).
+    // For a Failover Cluster Instance, failing to reach it locally means it is
+    // active on another node, so skip rather than fail.
     let mut gate =
-        crate::sql::probe::connect(&conn.server, conn.port, &conn.auth, password.as_deref())
-            .await?;
+        match crate::sql::probe::connect(&conn.server, conn.port, &conn.auth, password.as_deref())
+            .await
+        {
+            Ok(client) => client,
+            Err(e) if conn.failover_cluster => {
+                let _ = events
+                    .send(Reply::Log {
+                        line: format!(
+                        "the failover cluster instance is not active on this node; skipping ({e:#})"
+                    ),
+                    })
+                    .await;
+                return Ok((
+                    "skipped: the failover cluster instance is not active on this node".to_string(),
+                    None,
+                ));
+            }
+            Err(e) => return Err(e),
+        };
 
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     let mut backed_up = 0u32;

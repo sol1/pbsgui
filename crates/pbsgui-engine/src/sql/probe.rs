@@ -27,10 +27,12 @@ SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), \
 const DATABASES_SQL: &str = "\
 SELECT d.name, d.recovery_model_desc, d.state_desc, d.log_reuse_wait_desc, \
        CASE WHEN drs.database_id IS NOT NULL THEN 1 ELSE 0 END, \
-       CAST(sys.fn_hadr_backup_is_preferred_replica(d.name) AS int) \
+       CAST(sys.fn_hadr_backup_is_preferred_replica(d.name) AS int), \
+       CASE WHEN d.database_id <= 4 THEN 1 ELSE 0 END \
 FROM sys.databases d \
 LEFT JOIN sys.dm_hadr_database_replica_states drs \
        ON drs.database_id = d.database_id AND drs.is_local = 1 \
+WHERE d.database_id <> 2 \
 ORDER BY d.name";
 
 const AG_DETAILS_SQL: &str = "\
@@ -107,6 +109,7 @@ async fn databases(client: &mut SqlClient) -> anyhow::Result<Vec<SqlDatabase>> {
                 // Only meaningful for AG databases; on a standalone the function
                 // returns 1 for every database, which would be misleading.
                 is_preferred_backup_replica: in_ag.then(|| row.get::<i32, _>(5) == Some(1)),
+                system: int_at(&row, 6) == 1,
             }
         })
         .collect())

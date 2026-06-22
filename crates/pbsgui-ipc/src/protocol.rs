@@ -321,6 +321,11 @@ pub struct SqlConnection {
     #[serde(default)]
     pub port: Option<u16>,
     pub auth: SqlAuth,
+    /// Failover Cluster Instance: the instance runs on one node at a time. When
+    /// set, a backup that cannot reach it locally is skipped (this node is not the
+    /// active one) instead of failing.
+    #[serde(default)]
+    pub failover_cluster: bool,
 }
 
 /// The detected deployment archetype of a SQL Server instance (probe result).
@@ -360,6 +365,10 @@ pub struct SqlDatabase {
     /// Whether this replica is the preferred backup replica for the database.
     #[serde(default)]
     pub is_preferred_backup_replica: Option<bool>,
+    /// A system database (master/model/msdb). Full backups only; restoring master
+    /// is a special single-user procedure.
+    #[serde(default)]
+    pub system: bool,
 }
 
 /// The outcome of a single readiness check.
