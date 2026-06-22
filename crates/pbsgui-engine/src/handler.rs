@@ -547,7 +547,12 @@ async fn list_sql_snapshots(
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
     let api = ApiClient::from_repository(&ctx.repo, ctx.secret, &ctx.fingerprint)?;
     let snapshots = api
-        .list_snapshots(&ctx.repo.datastore, SQL_BACKUP_TYPE, &group)
+        .list_snapshots(
+            &ctx.repo.datastore,
+            ctx.repo.namespace.as_deref(),
+            SQL_BACKUP_TYPE,
+            &group,
+        )
         .await?;
     Ok(snapshots
         .into_iter()
@@ -709,7 +714,12 @@ async fn list_snapshots(store: &JobStore, job_id: &str) -> anyhow::Result<Vec<Sn
     let ctx = job_pbs_context(store, job_id)?;
     let api = ApiClient::from_repository(&ctx.repo, ctx.secret, &ctx.fingerprint)?;
     let snapshots = api
-        .list_snapshots(&ctx.repo.datastore, BACKUP_TYPE, &ctx.backup_id)
+        .list_snapshots(
+            &ctx.repo.datastore,
+            ctx.repo.namespace.as_deref(),
+            BACKUP_TYPE,
+            &ctx.backup_id,
+        )
         .await?;
     Ok(snapshots
         .into_iter()

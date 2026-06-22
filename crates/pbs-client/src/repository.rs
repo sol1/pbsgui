@@ -1,15 +1,22 @@
 //! Parsing of a PBS repository string.
 //!
-//! A repository is written as `[[auth-id@]host[:port]:]datastore`, for example:
+//! A repository is written as `[[auth-id@]host[:port]:]datastore[/namespace]`,
+//! for example:
 //!   - `backups`
 //!   - `pbs.example.com:backups`
 //!   - `pbs.example.com:8007:backups`
 //!   - `svc@pbs!token@pbs.example.com:backups`
 //!   - `root@pam@[2001:db8::1]:8007:backups`
+//!   - `svc@pbs!token@pbs.example.com:8007:backups/team/project`
 //!
 //! The auth id may itself contain `@` (it is `user@realm`, optionally with a
 //! `!tokenname` API token suffix), so the host is separated at the last `@`.
 //! The host part of the string never contains `@`.
+//!
+//! A PBS datastore name cannot contain `/`, so a `/` in the datastore field
+//! separates the datastore from an optional namespace path (which itself may be
+//! nested, e.g. `team/project`). The namespace is sent to PBS as a separate `ns`
+//! parameter, never folded into the datastore name.
 
 use std::fmt;
 use std::str::FromStr;
@@ -28,8 +35,10 @@ pub struct Repository {
     pub host: Option<String>,
     /// TCP port. `None` means the [`DEFAULT_PORT`].
     pub port: Option<u16>,
-    /// Datastore name (required).
+    /// Datastore name (required), never including a namespace.
     pub datastore: String,
+    /// Optional namespace path within the datastore (e.g. `team/project`).
+    pub namespace: Option<String>,
 }
 
 impl Repository {
@@ -55,7 +64,14 @@ impl FromStr for Repository {
             None => (None, s),
         };
 
-        let (host, port, datastore) = parse_host_part(rest)?;
+        let (host, port, store_and_ns) = parse_host_part(rest)?;
+
+        // A datastore name cannot contain '/', so split an optional namespace
+        // path off the datastore field.
+        let (datastore, namespace) = match store_and_ns.split_once('/') {
+            Some((ds, ns)) if !ns.is_empty() => (ds.to_string(), Some(ns.to_string())),
+            _ => (store_and_ns, None),
+        };
 
         if datastore.is_empty() {
             return Err(PbsError::InvalidRepository(format!(
@@ -68,6 +84,7 @@ impl FromStr for Repository {
             host,
             port,
             datastore,
+            namespace,
         })
     }
 }
@@ -133,7 +150,11 @@ impl fmt::Display for Repository {
             }
             write!(f, ":")?;
         }
-        write!(f, "{}", self.datastore)
+        write!(f, "{}", self.datastore)?;
+        if let Some(ns) = &self.namespace {
+            write!(f, "/{ns}")?;
+        }
+        Ok(())
     }
 }
 
@@ -205,6 +226,27 @@ mod tests {
     }
 
     #[test]
+    fn namespace_split_from_datastore() {
+        let r = parse("svc@pbs!tok@pbs.example.com:8007:sanctum-backups/hq-testing");
+        assert_eq!(r.datastore, "sanctum-backups");
+        assert_eq!(r.namespace.as_deref(), Some("hq-testing"));
+    }
+
+    #[test]
+    fn nested_namespace() {
+        let r = parse("pbs.example.com:store/team/project");
+        assert_eq!(r.datastore, "store");
+        assert_eq!(r.namespace.as_deref(), Some("team/project"));
+    }
+
+    #[test]
+    fn no_namespace_is_none() {
+        assert_eq!(parse("pbs.example.com:backups").namespace, None);
+        // A trailing slash with no namespace is treated as no namespace.
+        assert_eq!(parse("pbs.example.com:backups/").namespace, None);
+    }
+
+    #[test]
     fn round_trips_via_display() {
         for s in [
             "backups",
@@ -212,6 +254,7 @@ mod tests {
             "pbs.example.com:8007:backups",
             "root@pam@pbs.example.com:8007:backups",
             "[2001:db8::1]:8007:backups",
+            "svc@pbs!tok@pbs.example.com:8007:backups/team/project",
         ] {
             assert_eq!(parse(s).to_string(), s, "round trip failed for {s}");
         }

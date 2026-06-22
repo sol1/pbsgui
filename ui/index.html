@@ -242,7 +242,10 @@
           </label>
           <label>Repository
             <input id="pbs-repository" type="text" required
-                   placeholder="user@pbs!token@host:8007:datastore" />
+                   placeholder="user@pbs!token@host:8007:datastore[/namespace]" />
+            <span class="help muted">Add a namespace after the datastore with a slash, e.g.
+              <code>host:8007:store/team/project</code>. The token needs DatastoreBackup on that
+              namespace.</span>
           </label>
           <label>Server fingerprint (SHA-256)
             <input id="pbs-fingerprint" type="text" required placeholder="AA:BB:..:FF" />

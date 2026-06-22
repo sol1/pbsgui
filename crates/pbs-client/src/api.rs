@@ -82,18 +82,25 @@ impl ApiClient {
     }
 
     /// List the snapshots in a backup group, newest data as returned by PBS.
+    /// `namespace` selects a namespace within the datastore (`None` = the root).
     pub async fn list_snapshots(
         &self,
         datastore: &str,
+        namespace: Option<&str>,
         backup_type: &str,
         backup_id: &str,
     ) -> Result<Vec<Snapshot>> {
-        let path = format!(
+        let mut path = format!(
             "/api2/json/admin/datastore/{}/snapshots?backup-type={}&backup-id={}",
             enc(datastore),
             enc(backup_type),
             enc(backup_id)
         );
+        if let Some(ns) = namespace {
+            if !ns.is_empty() {
+                path.push_str(&format!("&ns={}", enc(ns)));
+            }
+        }
         let data = self.get_data(&path).await?;
         serde_json::from_value(data)
             .map_err(|e| PbsError::Protocol(format!("parsing snapshots: {e}")))

@@ -119,7 +119,7 @@ impl SessionParams {
             backup_type: backup_type.into(),
             backup_id: backup_id.into(),
             backup_time,
-            namespace: None,
+            namespace: repo.namespace.clone(),
         })
     }
 
