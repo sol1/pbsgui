@@ -1278,6 +1278,14 @@ function renderSqlInstanceCard(inst, card) {
     ? `<div class="sql-checks">${inst.checks.map(renderCheck).join("")}</div>`
     : "";
 
+  // A network-discovered (remote) instance can be probed from here, but VDI backup
+  // runs on the SQL Server host, so it needs pbsgui installed on that machine.
+  const remote = inst.source !== "local_registry";
+  const nudge = remote
+    ? `<div class="install-nudge">Remote server: install pbsgui on <b>${escapeHtml(inst.host)}</b> to back it up. ` +
+      `Backups stream over VDI on the SQL Server host, so they run there, not from this machine.</div>`
+    : "";
+
   card.innerHTML =
     `<div class="sql-head"><span class="sql-server">${escapeHtml(inst.server)}</span>` +
     badges.join("") +
@@ -1286,6 +1294,7 @@ function renderSqlInstanceCard(inst, card) {
     `<button type="button" class="sql-check-btn">Check</button>` +
     `<button type="button" class="sql-probe-btn">${inst.probe ? "Re-probe" : "Probe"}</button>` +
     `</div><div class="sql-meta muted">instance: ${escapeHtml(inst.instance_name)}</div>` +
+    nudge +
     body +
     checksHtml;
   card.querySelector(".sql-probe-btn").onclick = () => probeInstance(inst, card);

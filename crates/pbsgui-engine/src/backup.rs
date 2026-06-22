@@ -338,8 +338,25 @@ async fn backup_sql_to_pbs(
     }
     let (conn, password) = sql_conn_and_password(connection_id)?;
 
+    // One connection to ask SQL whether this replica should back up each database
+    // (Always On preferred-replica gating; standalone databases always proceed).
+    let mut gate =
+        crate::sql::probe::connect(&conn.server, conn.port, &conn.auth, password.as_deref())
+            .await?;
+
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
+    let mut backed_up = 0u32;
     for db in databases {
+        if !crate::sql::probe::should_back_up(&mut gate, db).await? {
+            let _ = events
+                .send(Reply::Log {
+                    line: format!(
+                        "skipping [{db}]: this node is not the Always On preferred backup replica"
+                    ),
+                })
+                .await;
+            continue;
+        }
         let (group, archive) = sql_group_and_archive(backup_id, db, backup_type);
         // PBS only allows the backup types vm/ct/host; SQL backups use "host"
         // and stay distinct by their per-database group id (log backups get a
@@ -367,11 +384,21 @@ async fn backup_sql_to_pbs(
         uploaded += stats.uploaded;
         reused += stats.reused;
         bytes += stats.bytes;
+        backed_up += 1;
+    }
+
+    // Every selected database was on a non-preferred replica: nothing to do here
+    // (the preferred node's engine handles it). Report it as a no-op, not a backup.
+    if backed_up == 0 {
+        return Ok((
+            "skipped: not the Always On preferred backup replica for any selected database"
+                .to_string(),
+            None,
+        ));
     }
 
     let summary = format!(
-        "backed up {} database(s) to PBS: {bytes} bytes, {chunks} chunks, {uploaded} uploaded, {reused} reused",
-        databases.len()
+        "backed up {backed_up} database(s) to PBS: {bytes} bytes, {chunks} chunks, {uploaded} uploaded, {reused} reused"
     );
     // Return the aggregated stats so the run reports "ok" (not "no-change", which
     // only the change-detection skip should give) and notifications carry metrics.

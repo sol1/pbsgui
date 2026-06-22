@@ -513,6 +513,17 @@ button:disabled {
   font-weight: 500;
 }
 
+/* Nudge to install pbsgui on a remote (network-discovered) SQL Server. */
+.install-nudge {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: rgba(229, 112, 0, 0.08);
+  font-size: 13px;
+}
+
 /* Per-database protection guidance (wizard SQL step). */
 #f-sql-guidance {
   margin-top: 8px;
