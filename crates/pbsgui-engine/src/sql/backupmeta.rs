@@ -59,10 +59,15 @@ pub fn select_chain(items: &[ChainItem], target: i64) -> Vec<ChainItem> {
         return Vec::new();
     };
 
+    // After restoring the full, the database sits at the full's last_lsn. The
+    // logs that carry it forward are those whose range *ends* past that point
+    // (last_lsn > base) - including the "bridging" log that began before the full
+    // finished. Filtering on first_lsn would skip that bridging log and leave a
+    // gap (SQL error 4305, "the log ... is too recent to apply").
     let base_lsn = parse_lsn(&full.meta.last_lsn);
     let mut logs: Vec<&ChainItem> = items
         .iter()
-        .filter(|i| i.meta.is_log() && parse_lsn(&i.meta.first_lsn) >= base_lsn)
+        .filter(|i| i.meta.is_log() && parse_lsn(&i.meta.last_lsn) > base_lsn)
         .collect();
     logs.sort_by_key(|i| parse_lsn(&i.meta.first_lsn));
 
@@ -158,6 +163,23 @@ mod tests {
     fn no_full_covering_target_is_empty() {
         let items = vec![full(200, "30", "40"), log(210, "40", "50")];
         assert!(select_chain(&items, 150).is_empty());
+    }
+
+    #[test]
+    fn includes_the_log_that_bridges_the_full() {
+        // The first log after a full begins *before* the full's last_lsn (it was
+        // running while the full was taken) and ends after it. It must be applied
+        // first, or SQL rejects the next log as "too recent" (error 4305).
+        let items = vec![
+            full(200, "30", "40"),
+            log(210, "35", "50"), // bridging: first_lsn 35 < full last_lsn 40
+            log(220, "50", "60"),
+        ];
+        let chain = select_chain(&items, 215);
+        assert_eq!(
+            chain.iter().map(|c| c.snapshot_time).collect::<Vec<_>>(),
+            vec![200, 210, 220]
+        );
     }
 
     #[test]
