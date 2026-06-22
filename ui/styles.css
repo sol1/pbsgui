@@ -6,6 +6,9 @@
   --muted: #9aa0ab;
   --accent: #e57000;
   --border: #383b45;
+  --ok: #3fb950;
+  --fail: #f85149;
+  --idle: #8b949e;
 }
 
 * {
@@ -122,6 +125,226 @@ h2 {
   gap: 6px;
 }
 
+/* Dashboard: summary strip */
+.summary-strip {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  flex: 1;
+  min-width: 90px;
+  padding: 12px 14px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.stat-num {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.stat-label {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stat-ok .stat-num {
+  color: var(--ok);
+}
+.stat-fail .stat-num {
+  color: var(--fail);
+}
+.stat-idle .stat-num {
+  color: var(--idle);
+}
+.stat-enc .stat-num {
+  color: var(--accent);
+}
+
+/* Dashboard: job cards */
+.job-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.job-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 10px;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.job-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+.job-card.status-ok {
+  border-left-color: var(--ok);
+}
+.job-card.status-fail {
+  border-left-color: var(--fail);
+}
+.job-card.status-never {
+  border-left-color: var(--idle);
+}
+
+.job-card-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.job-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--idle);
+}
+
+.status-ok .status-dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.18);
+}
+.status-fail .status-dot {
+  background: var(--fail);
+  box-shadow: 0 0 0 3px rgba(248, 81, 73, 0.18);
+}
+
+.job-card .job-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.chip-ok {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--ok);
+}
+.chip-fail {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--fail);
+}
+.chip-never {
+  background: var(--panel-2);
+  color: var(--idle);
+}
+
+.job-card .job-meta {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.job-card .arrow {
+  color: var(--accent);
+}
+
+.dot-sep {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.6;
+}
+
+.job-error {
+  margin-top: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #f2a59f;
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.25);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  max-height: 54px;
+  overflow: hidden;
+}
+
+.badge-src {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.badge-enc {
+  color: var(--accent);
+}
+
+/* Dashboard: size-over-time sparkline */
+.job-spark {
+  flex: none;
+  width: 160px;
+  text-align: right;
+}
+
+.spark {
+  width: 160px;
+  height: 40px;
+  display: block;
+}
+
+.spark-bar {
+  fill: var(--muted);
+  opacity: 0.45;
+}
+
+.spark-bar-last {
+  fill: var(--accent);
+  opacity: 1;
+}
+
+.spark-label {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.spark-empty {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.job-card .job-actions {
+  flex: none;
+}
+
 /* Form */
 label {
   display: block;
@@ -227,6 +450,14 @@ button.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
 }
 
 button:disabled {

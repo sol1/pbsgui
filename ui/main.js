@@ -126,36 +126,150 @@ async function loadJobs() {
   try {
     jobs = await invoke("list_jobs");
   } catch (err) {
+    el("jobs-summary").innerHTML = "";
     el("jobs-list").innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
     return;
   }
   const list = el("jobs-list");
   list.innerHTML = "";
   if (!jobs.length) {
+    el("jobs-summary").innerHTML = "";
     list.innerHTML = '<div class="placeholder">No jobs yet. Click "New job".</div>';
     return;
   }
+  renderJobsSummary(jobs);
   for (const job of jobs) {
-    const row = document.createElement("div");
-    row.className = "job-row";
-    const last = job.last_run ? new Date(job.last_run * 1000).toLocaleString() : "never";
-    const status = job.last_status ? ` (${job.last_status})` : "";
-    const main = document.createElement("div");
-    main.className = "job-main";
-    main.innerHTML =
-      `<div class="job-name">${escapeHtml(job.name)}</div>` +
-      `<div class="job-meta">${escapeHtml(sourceSummary(job))} → ${escapeHtml(destSummary(job))} · ` +
-      `${escapeHtml(scheduleSummary(job.schedule))} · last: ${escapeHtml(last)}${escapeHtml(status)}</div>`;
-    const actions = document.createElement("div");
-    actions.className = "job-actions";
-    actions.append(
+    const cls = jobStatusClass(job);
+    const chip = cls === "ok" ? "ok" : cls === "fail" ? "failed" : "never run";
+    const card = document.createElement("div");
+    card.className = "job-card status-" + cls;
+    const failed = cls === "fail";
+    card.innerHTML =
+      '<div class="job-card-main">' +
+      '<div class="job-card-top">' +
+      '<span class="status-dot"></span>' +
+      `<span class="job-name">${escapeHtml(job.name)}</span>` +
+      `<span class="chip chip-${cls}">${chip}</span>` +
+      '<span class="spacer"></span>' +
+      jobBadges(job) +
+      "</div>" +
+      `<div class="job-meta">${escapeHtml(sourceSummary(job))} <span class="arrow">&rarr;</span> ` +
+      `${escapeHtml(destSummary(job))} <span class="dot-sep"></span> last backup ${escapeHtml(relativeTime(job.last_run))}</div>` +
+      (failed ? `<div class="job-error">${escapeHtml(job.last_status)}</div>` : "") +
+      "</div>" +
+      '<div class="job-spark"><div class="spark-wrap"><div class="spark-empty">&hellip;</div></div>' +
+      '<div class="spark-label"></div></div>' +
+      '<div class="job-actions"></div>';
+    card.querySelector(".job-actions").append(
       mkbtn("Run", "primary", () => runJob(job)),
       mkbtn("Edit", "", () => openEditor(job)),
       mkbtn("Delete", "", () => deleteJob(job)),
     );
-    row.append(main, actions);
-    list.append(row);
+    list.append(card);
+
+    // Lazily fill the size-over-time sparkline so the list paints immediately.
+    fetchJobHistory(job).then((points) => {
+      const wrap = card.querySelector(".spark-wrap");
+      const label = card.querySelector(".spark-label");
+      if (!points.length) {
+        wrap.innerHTML = '<div class="spark-empty">no snapshots</div>';
+        return;
+      }
+      wrap.innerHTML = sparkBars(points);
+      label.innerHTML = `${escapeHtml(formatBytes(points[points.length - 1].s))} <span class="muted">latest</span>`;
+    });
   }
+}
+
+// Healthy / failed / never-run, from the last recorded outcome ("ok" or an error).
+function jobStatusClass(job) {
+  if (!job.last_run) return "never";
+  return job.last_status === "ok" ? "ok" : "fail";
+}
+
+function renderJobsSummary(jobs) {
+  const ok = jobs.filter((j) => jobStatusClass(j) === "ok").length;
+  const fail = jobs.filter((j) => jobStatusClass(j) === "fail").length;
+  const never = jobs.filter((j) => jobStatusClass(j) === "never").length;
+  const enc = jobs.filter((j) => j.encrypted).length;
+  const tile = (n, label, kind) =>
+    `<div class="stat stat-${kind}"><div class="stat-num">${n}</div><div class="stat-label">${label}</div></div>`;
+  el("jobs-summary").innerHTML =
+    tile(jobs.length, "jobs", "all") +
+    tile(ok, "healthy", "ok") +
+    tile(fail, "failed", "fail") +
+    tile(never, "never run", "idle") +
+    tile(enc, "encrypted", "enc");
+}
+
+// Config badges: source type, encryption, and the protection plan or schedule.
+function jobBadges(job) {
+  const out = [];
+  const sql = job.source?.type === "sql";
+  out.push(`<span class="badge badge-src">${sql ? "SQL Server" : "Files"}</span>`);
+  if (sql && job.source.protection) {
+    const labels = {
+      point_in_time: "point-in-time",
+      daily_restore_points: "daily restore points",
+      secondary_copy: "secondary copy",
+    };
+    const plan = job.source.protection.plan;
+    out.push(`<span class="badge">${escapeHtml(labels[plan] || plan)}</span>`);
+  } else {
+    out.push(`<span class="badge">${escapeHtml(scheduleSummary(job.schedule))}</span>`);
+  }
+  if (job.encrypted) out.push('<span class="badge badge-enc">&#128274; encrypted</span>');
+  return out.join("");
+}
+
+// A short, human "2h ago" style stamp from a unix-seconds time.
+function relativeTime(unixSec) {
+  if (!unixSec) return "never";
+  const diff = Date.now() / 1000 - unixSec;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(unixSec * 1000).toLocaleDateString();
+}
+
+// Snapshot {time, size} points for a job's size-over-time graph. SQL jobs read the
+// first database's snapshots; folder destinations have none (returns empty).
+async function fetchJobHistory(job) {
+  try {
+    let snaps;
+    if (job.source?.type === "sql") {
+      const dbs = job.source.databases || [];
+      if (!dbs.length) return [];
+      snaps = await invoke("list_sql_snapshots", { jobId: job.id, database: dbs[0] });
+    } else {
+      snaps = await invoke("list_snapshots", { jobId: job.id });
+    }
+    return snaps
+      .map((s) => ({ t: s.backup_time, s: s.size || 0 }))
+      .sort((a, b) => a.t - b.t);
+  } catch (e) {
+    return [];
+  }
+}
+
+// A compact bar sparkline (inline SVG, no chart lib) of the last backups' sizes.
+function sparkBars(points) {
+  const w = 160;
+  const h = 40;
+  const gap = 2;
+  const pts = points.slice(-24);
+  const n = pts.length;
+  const max = Math.max(...pts.map((p) => p.s), 1);
+  const bw = (w - gap * (n - 1)) / n;
+  let bars = "";
+  pts.forEach((p, i) => {
+    const bh = Math.max(2, (p.s / max) * (h - 2));
+    const x = i * (bw + gap);
+    const last = i === n - 1 ? " spark-bar-last" : "";
+    bars += `<rect class="spark-bar${last}" x="${x.toFixed(1)}" y="${(h - bh).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="1"/>`;
+  });
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="backup size over time">${bars}</svg>`;
 }
 
 function renderSources(list) {
