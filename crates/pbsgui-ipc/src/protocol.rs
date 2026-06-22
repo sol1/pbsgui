@@ -254,6 +254,45 @@ pub enum NotifyChannel {
     Webhook,
 }
 
+/// How the Prometheus metrics exporter is served.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsMode {
+    /// Not exported.
+    #[default]
+    Off,
+    /// Served over HTTP on `bind:port` at `/metrics` for Prometheus to scrape.
+    Endpoint,
+    /// Written to `<textfile_dir>/pbsgui.prom` for a node/windows_exporter textfile
+    /// collector.
+    Textfile,
+}
+
+/// Prometheus metrics exporter settings. Off by default; metrics never include
+/// secrets (no repositories, tokens, keys, or server hostnames).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricsSettings {
+    #[serde(default)]
+    pub mode: MetricsMode,
+    /// TCP port for `endpoint` mode.
+    #[serde(default = "default_metrics_port")]
+    pub port: u16,
+    /// Bind address for `endpoint` mode (localhost by default).
+    #[serde(default = "default_metrics_bind")]
+    pub bind: String,
+    /// Directory the `.prom` file is written to in `textfile` mode.
+    #[serde(default)]
+    pub textfile_dir: String,
+}
+
+fn default_metrics_port() -> u16 {
+    9654
+}
+
+fn default_metrics_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
 /// Summary of a snapshot for the browse view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotInfo {
@@ -609,6 +648,11 @@ pub enum Request {
     /// Send a test notification through one channel, using the saved settings and
     /// secrets, and report the outcome.
     TestNotification { channel: NotifyChannel },
+
+    /// Get the Prometheus metrics exporter settings.
+    GetMetrics,
+    /// Save the metrics settings and (re)start or stop the exporter accordingly.
+    SaveMetrics { settings: MetricsSettings },
 }
 
 /// A message from the engine to the GUI.
@@ -649,6 +693,8 @@ pub enum Reply {
         has_smtp_password: bool,
         has_webhook_url: bool,
     },
+    /// Reply to [`Request::GetMetrics`] / [`Request::SaveMetrics`].
+    Metrics { settings: MetricsSettings },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.

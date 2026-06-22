@@ -378,6 +378,44 @@
             <button type="submit" class="primary">Save notifications</button>
           </div>
         </form>
+
+        <h2>Metrics (Prometheus)</h2>
+        <p class="help muted">Expose backup metrics for Prometheus. Off by default. The metrics
+          carry no secrets (no repositories, tokens, keys, or server hostnames), only job and
+          database names.</p>
+        <form id="metrics-form" autocomplete="off">
+          <label>Mode
+            <select id="m-mode">
+              <option value="off">Off</option>
+              <option value="endpoint">HTTP endpoint (Prometheus scrapes /metrics)</option>
+              <option value="textfile">Textfile (node / windows_exporter collector)</option>
+            </select>
+          </label>
+          <div id="m-endpoint-fields" class="hidden">
+            <div class="row-2">
+              <label>Bind address
+                <input id="m-bind" type="text" placeholder="127.0.0.1" />
+              </label>
+              <label>Port
+                <input id="m-port" type="number" min="1" max="65535" value="9654" />
+              </label>
+            </div>
+            <p class="help muted">Prometheus scrapes <code>http://bind:port/metrics</code>. Keep the
+              bind on <code>127.0.0.1</code> unless Prometheus is on another host, and open the
+              firewall only if you do.</p>
+          </div>
+          <div id="m-textfile-fields" class="hidden">
+            <label>Textfile directory
+              <input id="m-textfile-dir" type="text"
+                     placeholder="C:\Program Files\windows_exporter\textfile_inputs" />
+            </label>
+            <p class="help muted">Writes <code>pbsgui.prom</code> here for the exporter's textfile
+              collector to pick up.</p>
+          </div>
+          <div class="actions">
+            <button type="submit" class="primary">Save metrics</button>
+          </div>
+        </form>
       </section>
 
       <!-- Shared run / restore output -->

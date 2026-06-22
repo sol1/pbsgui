@@ -159,6 +159,21 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::GetMetrics => {
+            let _ = responder
+                .send(&Reply::Metrics {
+                    settings: pbsgui_ipc::MetricsSettings {
+                        mode: pbsgui_ipc::MetricsMode::Off,
+                        port: 9654,
+                        bind: "127.0.0.1".into(),
+                        textfile_dir: String::new(),
+                    },
+                })
+                .await;
+        }
+        Request::SaveMetrics { settings } => {
+            let _ = responder.send(&Reply::Metrics { settings }).await;
+        }
     }
 }
 

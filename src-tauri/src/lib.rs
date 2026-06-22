@@ -8,9 +8,9 @@
 //! GUI never stops backups.
 
 use pbsgui_ipc::{
-    EncryptionKeyInfo, FileInfo, Job, NotificationSettings, NotifyChannel, PbsServer, Reply,
-    Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection, SqlInstance, SqlProbe,
-    SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
+    EncryptionKeyInfo, FileInfo, Job, MetricsSettings, NotificationSettings, NotifyChannel,
+    PbsServer, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection, SqlInstance,
+    SqlProbe, SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -328,6 +328,38 @@ async fn test_notification(channel: NotifyChannel) -> Result<String, String> {
             _ => None,
         })
         .unwrap_or_else(|| Err("engine did not return a test result".to_string()))
+}
+
+/// Get the Prometheus metrics exporter settings.
+#[tauri::command]
+async fn get_metrics() -> Result<MetricsSettings, String> {
+    let replies = request_all(Request::GetMetrics).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Metrics { settings } => Some(settings),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return metrics settings".to_string())
+}
+
+/// Save the metrics settings; the engine (re)starts or stops the exporter.
+#[tauri::command]
+async fn save_metrics(settings: MetricsSettings) -> Result<MetricsSettings, String> {
+    let replies = request_all(Request::SaveMetrics { settings }).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Metrics { settings } => Some(settings),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return metrics settings".to_string())
 }
 
 /// Connect to one instance and report its version, topology, and databases.
@@ -705,6 +737,8 @@ pub fn run() {
         clear_encryption_key,
         get_notifications,
         save_notifications,
+        get_metrics,
+        save_metrics,
         test_notification,
         pick_save_file,
         pick_destination,

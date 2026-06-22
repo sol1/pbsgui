@@ -11,7 +11,7 @@ use pbsgui_ipc::{
 use tokio::sync::mpsc::Sender;
 
 use crate::config::unix_now;
-use crate::{archive, changedet, connstore, enckey, notify, scripts, secrets, sqlsched};
+use crate::{archive, changedet, connstore, enckey, metrics, notify, scripts, secrets, sqlsched};
 
 /// Archive name for a job's filesystem backup (a tar in a dynamic index).
 const ARCHIVE_NAME: &str = "files.didx";
@@ -52,6 +52,8 @@ pub async fn run_job_kind(
     sql_run: SqlRun,
     events: Sender<Reply>,
 ) -> anyhow::Result<String> {
+    let started = std::time::Instant::now();
+    metrics::set_running(&job.id, true);
     let outcome = run_inner(job, sql_run, &events).await;
 
     if let Some(post) = script_of(&job.post_script) {
@@ -95,6 +97,17 @@ pub async fn run_job_kind(
     }
 
     notify_outcome(job, sql_run, &outcome).await;
+
+    // Feed the metrics exporter: a backup with stats is a success, a stats-less Ok
+    // is a skip (no change, or not the preferred replica), an Err is a failure.
+    let result = match &outcome {
+        Ok((_, Some(_))) => metrics::RunResult::Success,
+        Ok((_, None)) => metrics::RunResult::Skipped,
+        Err(_) => metrics::RunResult::Failure,
+    };
+    let stats = outcome.as_ref().ok().and_then(|(_, s)| s.as_ref());
+    metrics::record_run(&job.id, result, started.elapsed().as_secs_f64(), stats);
+
     outcome.map(|(message, _)| message)
 }
 

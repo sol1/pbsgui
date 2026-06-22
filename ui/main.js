@@ -1417,6 +1417,45 @@ async function testNotificationChannel(channel) {
   }
 }
 
+function updateMetricsFields() {
+  const mode = el("m-mode").value;
+  el("m-endpoint-fields").classList.toggle("hidden", mode !== "endpoint");
+  el("m-textfile-fields").classList.toggle("hidden", mode !== "textfile");
+}
+
+async function loadMetrics() {
+  let s;
+  try {
+    s = await invoke("get_metrics");
+  } catch (err) {
+    return; // engine offline; leave defaults
+  }
+  el("m-mode").value = s.mode || "off";
+  el("m-bind").value = s.bind || "127.0.0.1";
+  el("m-port").value = s.port || 9654;
+  el("m-textfile-dir").value = s.textfile_dir || "";
+  updateMetricsFields();
+}
+
+async function saveMetrics(e) {
+  e.preventDefault();
+  const settings = {
+    mode: el("m-mode").value,
+    bind: el("m-bind").value.trim() || "127.0.0.1",
+    port: parseInt(el("m-port").value, 10) || 9654,
+    textfile_dir: el("m-textfile-dir").value.trim(),
+  };
+  if (settings.mode === "textfile" && !settings.textfile_dir) {
+    return alert("Set the textfile directory for textfile mode.");
+  }
+  try {
+    await invoke("save_metrics", { settings });
+  } catch (err) {
+    return alert("save failed: " + err);
+  }
+  loadMetrics();
+}
+
 function renderSqlInstanceCard(inst, card) {
   const badges = [`<span class="badge">${escapeHtml(sourceLabel[inst.source] || inst.source)}</span>`];
   if (inst.port) badges.push(`<span class="badge">tcp ${inst.port}</span>`);
@@ -1579,6 +1618,7 @@ window.addEventListener("DOMContentLoaded", () => {
   el("tab-notify").onclick = () => {
     showView("notify");
     loadNotifications();
+    loadMetrics();
   };
   el("discover-sql").onclick = discoverSql;
   el("pbs-form").addEventListener("submit", savePbsServer);
@@ -1586,6 +1626,8 @@ window.addEventListener("DOMContentLoaded", () => {
   el("notify-form").addEventListener("submit", saveNotifications);
   el("n-email-enabled").onchange = updateNotifyFields;
   el("n-webhook-enabled").onchange = updateNotifyFields;
+  el("metrics-form").addEventListener("submit", saveMetrics);
+  el("m-mode").onchange = updateMetricsFields;
   el("n-test-email").onclick = () => testNotificationChannel("email");
   el("n-test-webhook").onclick = () => testNotificationChannel("webhook");
   el("new-job").onclick = () => openEditor(null);

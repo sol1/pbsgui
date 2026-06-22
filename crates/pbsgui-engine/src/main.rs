@@ -22,6 +22,7 @@ mod connstore;
 mod enckey;
 mod handler;
 mod jobstore;
+mod metrics;
 mod notify;
 mod restore;
 mod scheduler;
@@ -98,6 +99,9 @@ async fn main() -> anyhow::Result<()> {
 pub(crate) async fn run_engine(store: Arc<JobStore>, socket: &str) -> anyhow::Result<()> {
     let scheduler_store = store.clone();
     tokio::spawn(async move { scheduler::run(scheduler_store).await });
+
+    // Start the metrics exporter if it is configured (off by default).
+    metrics::apply(store.clone());
 
     let name = pbsgui_ipc::socket_name(socket)?;
     pbsgui_ipc::serve(name, move |request, responder| {

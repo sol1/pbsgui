@@ -30,32 +30,40 @@ pub async fn run(store: Arc<JobStore>) {
                 run_due(&store, job, kind).await;
             }
         }
-        // Check for stalled point-in-time chains roughly every 15 minutes.
+        // Refresh SQL chain health (stall alerts + metrics) every 15 minutes.
         if now - last_stall_check >= 15 * 60 {
             last_stall_check = now;
-            check_stalls(&store, now, &mut alerted).await;
+            refresh_sql_health(&store, now, &mut alerted).await;
         }
     }
 }
 
-/// Warn about stalled point-in-time chains, re-warning at most every 6 hours
-/// while a chain stays stalled.
-async fn check_stalls(
+/// Read the shared PBS groups for every point-in-time job, update the metrics
+/// state, and warn about stalled chains (re-warning at most every 6 hours).
+async fn refresh_sql_health(
     store: &Arc<JobStore>,
     now: i64,
     alerted: &mut std::collections::HashMap<(String, String), i64>,
 ) {
     const REALERT_SECS: i64 = 6 * 3600;
-    for stall in crate::handler::check_stalls(store, now).await {
-        let key = (stall.job_id.clone(), stall.database.clone());
-        if alerted.get(&key).is_some_and(|t| now - t < REALERT_SECS) {
-            continue;
+    for status in crate::handler::collect_sql_status(store, now).await {
+        crate::metrics::set_sql_status(&status.job_id, status.databases.clone());
+        for db in &status.databases {
+            if !db.stalled {
+                continue;
+            }
+            let key = (status.job_id.clone(), db.database.clone());
+            if alerted.get(&key).is_some_and(|t| now - t < REALERT_SECS) {
+                continue;
+            }
+            alerted.insert(key, now);
+            let hours = db.chain_latest.map_or(0, |l| ((now - l) / 3600).max(1));
+            tracing::warn!(job = %status.job_name, database = %db.database, hours, "backup chain stalled");
+            crate::notify::backup_stalled(&status.job_name, &db.database, hours).await;
         }
-        alerted.insert(key, now);
-        let hours = (stall.age_secs / 3600).max(1);
-        tracing::warn!(job = %stall.job_name, database = %stall.database, hours, "backup chain stalled");
-        crate::notify::backup_stalled(&stall.job_name, &stall.database, hours).await;
     }
+    // Keep the textfile fresh (no-op unless textfile mode is on).
+    crate::metrics::write_textfile(store);
 }
 
 async fn run_due(store: &Arc<JobStore>, job: Job, kind: SqlRun) {
@@ -78,6 +86,8 @@ async fn run_due(store: &Arc<JobStore>, job: Job, kind: SqlRun) {
     // The SQL full/log chain timers are recorded inside run_job_kind on success,
     // so both manual and scheduled runs advance them.
     let _ = store.record_run(&job.id, unix_now(), status);
+    // Refresh the metrics textfile (no-op unless textfile mode is on).
+    crate::metrics::write_textfile(store);
 }
 
 /// Whether a job is due now and, for a SQL job, whether a full or log is due. A

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
-use crate::{backup, connstore, enckey, notify, restore, secrets};
+use crate::{backup, connstore, enckey, metrics, notify, restore, secrets};
 
 /// Archive name for a job's filesystem backup.
 const ARCHIVE_NAME: &str = "files.didx";
@@ -297,6 +297,26 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             };
             let _ = responder.send(&reply).await;
         }
+
+        Request::GetMetrics => {
+            let _ = responder
+                .send(&Reply::Metrics {
+                    settings: metrics::load(),
+                })
+                .await;
+        }
+        Request::SaveMetrics { settings } => {
+            let reply = match metrics::save(&settings) {
+                Ok(()) => {
+                    metrics::apply(store.clone());
+                    Reply::Metrics { settings }
+                }
+                Err(e) => Reply::Error {
+                    message: format!("{e:#}"),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
     }
 }
 
@@ -567,42 +587,44 @@ async fn list_sql_snapshots(
         .collect())
 }
 
-/// A point-in-time job whose backup chain has not advanced within its window.
-pub(crate) struct Stall {
+/// A point-in-time job's per-database chain status (for stall alerts and metrics).
+pub(crate) struct JobSqlStatus {
     pub job_id: String,
     pub job_name: String,
-    pub database: String,
-    pub age_secs: i64,
+    pub databases: Vec<metrics::SqlDbStatus>,
 }
 
-/// The newest snapshot time across a database's full and log groups, or `None`
-/// when neither group has any snapshot yet.
-async fn latest_group_time(api: &ApiClient, ctx: &SqlJobPbs, database: &str) -> Option<i64> {
-    let mut latest: Option<i64> = None;
-    for kind in [SqlBackupType::Full, SqlBackupType::Log] {
-        let (group, _archive) = backup::sql_group_and_archive(&ctx.backup_id, database, kind);
-        if let Ok(snaps) = api
-            .list_snapshots(
-                &ctx.repo.datastore,
-                ctx.repo.namespace.as_deref(),
-                SQL_BACKUP_TYPE,
-                &group,
-            )
-            .await
-        {
-            if let Some(m) = snaps.iter().map(|s| s.backup_time).max() {
-                latest = Some(latest.map_or(m, |l| l.max(m)));
-            }
-        }
+/// Count and the earliest/newest snapshot time of one group.
+async fn group_stats(
+    api: &ApiClient,
+    ctx: &SqlJobPbs,
+    database: &str,
+    kind: SqlBackupType,
+) -> (u32, Option<i64>, Option<i64>) {
+    let (group, _archive) = backup::sql_group_and_archive(&ctx.backup_id, database, kind);
+    match api
+        .list_snapshots(
+            &ctx.repo.datastore,
+            ctx.repo.namespace.as_deref(),
+            SQL_BACKUP_TYPE,
+            &group,
+        )
+        .await
+    {
+        Ok(snaps) => (
+            snaps.len() as u32,
+            snaps.iter().map(|s| s.backup_time).min(),
+            snaps.iter().map(|s| s.backup_time).max(),
+        ),
+        Err(_) => (0, None, None),
     }
-    latest
 }
 
-/// Find point-in-time jobs whose chain has stalled: the latest snapshot in the
-/// shared PBS group is older than a few log intervals. Reading the shared group
-/// is what makes this work across Always On replicas with no link between the
-/// pbsgui instances. A job that has never produced a snapshot is not flagged.
-pub(crate) async fn check_stalls(store: &JobStore, now: i64) -> Vec<Stall> {
+/// Gather the chain status of every point-in-time job's databases by reading the
+/// shared PBS groups. Reading the shared store is what makes stall detection work
+/// across Always On replicas with no link between the pbsgui instances. A database
+/// with no snapshots yet is reported but never marked stalled.
+pub(crate) async fn collect_sql_status(store: &JobStore, now: i64) -> Vec<JobSqlStatus> {
     let mut out = Vec::new();
     for job in store.list() {
         let (databases, log_interval) = match &job.source {
@@ -628,18 +650,32 @@ pub(crate) async fn check_stalls(store: &JobStore, now: i64) -> Vec<Stall> {
             Ok(api) => api,
             Err(_) => continue,
         };
+        let mut dbs = Vec::new();
         for db in &databases {
-            if let Some(latest) = latest_group_time(&api, &ctx, db).await {
-                if now - latest > grace {
-                    out.push(Stall {
-                        job_id: job.id.clone(),
-                        job_name: job.name.clone(),
-                        database: db.clone(),
-                        age_secs: now - latest,
-                    });
-                }
-            }
+            let (full_count, full_min, full_max) =
+                group_stats(&api, &ctx, db, SqlBackupType::Full).await;
+            let (log_count, _log_min, log_max) =
+                group_stats(&api, &ctx, db, SqlBackupType::Log).await;
+            let chain_latest = [full_max, log_max].into_iter().flatten().max();
+            let pit_window_secs = match (chain_latest, full_min) {
+                (Some(latest), Some(earliest)) if log_count > 0 => Some(latest - earliest),
+                _ => None,
+            };
+            let stalled = chain_latest.is_some_and(|l| now - l > grace);
+            dbs.push(metrics::SqlDbStatus {
+                database: db.clone(),
+                chain_latest,
+                stalled,
+                full_count,
+                log_count,
+                pit_window_secs,
+            });
         }
+        out.push(JobSqlStatus {
+            job_id: job.id.clone(),
+            job_name: job.name.clone(),
+            databases: dbs,
+        });
     }
     out
 }
@@ -1143,5 +1179,7 @@ async fn run_job(store: Arc<JobStore>, id: String, mut responder: Responder) {
         message.clone()
     };
     let _ = store.record_run(&id, unix_now(), status);
+    // Refresh the metrics textfile (no-op unless textfile mode is on).
+    metrics::write_textfile(&store);
     let _ = responder.send(&Reply::Finished { success, message }).await;
 }

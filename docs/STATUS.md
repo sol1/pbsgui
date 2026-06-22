@@ -87,6 +87,12 @@ CI on Windows and exercised manually.
   metrics. A point-in-time chain that stops advancing is also warned about (on by
   default), detected from the shared PBS group so it works across Always On
   replicas with no link between the pbsgui instances.
+- **Prometheus metrics (optional).** The engine can export per-job and per-database
+  metrics (last run time and result, duration, size, dedup counts, run counters,
+  and the point-in-time chain freshness and stall state) for Prometheus. Two
+  transports share one renderer: an HTTP `/metrics` endpoint on a configurable
+  bind/port, or a `pbsgui.prom` textfile for a node/windows_exporter collector. Off
+  by default, bound to localhost, and the metrics carry no secrets.
 
 ## In progress
 
