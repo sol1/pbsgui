@@ -11,6 +11,7 @@ let snapshotTime = null;
 let backupIdTouched = false; // has the user edited the Backup id directly?
 let wizStep = 0; // current job-wizard step
 let sqlConnCache = []; // saved SQL connections, for the wizard's source step
+let sqlDbModels = {}; // database name -> recovery model, from the last probe (for guidance)
 let wizJobId = null; // stable id for the job being edited (used to key its encryption key)
 let wizKeySet = false; // does the job being edited have an encryption key stored?
 
@@ -64,11 +65,17 @@ function scheduleSummary(s) {
   return "manual";
 }
 
+const SQL_PLAN_LABEL = {
+  point_in_time: "point-in-time",
+  daily_restore_points: "restore points",
+  secondary_copy: "copy",
+};
+
 function sourceSummary(job) {
   const s = job.source || {};
   if (s.type === "sql") {
-    const kind = s.backup_type === "log" ? "log" : "full";
-    return `SQL ${kind}: ${(s.databases || []).length} db(s)`;
+    const plan = SQL_PLAN_LABEL[s.protection?.plan] || "backup";
+    return `SQL ${plan}: ${(s.databases || []).length} db(s)`;
   }
   return `Files: ${(s.sources || []).length} source(s)`;
 }
@@ -197,19 +204,62 @@ function updateSourceType() {
   const sql = el("f-source-type").value === "sql";
   el("src-sql").classList.toggle("hidden", !sql);
   el("src-files").classList.toggle("hidden", sql);
+  // SQL jobs schedule from the protection plan, so the generic schedule controls
+  // are hidden on the Schedule step (scripts still apply).
+  el("schedule-controls").classList.toggle("hidden", sql);
+  el("sql-schedule-note").classList.toggle("hidden", !sql);
 }
 
-// Reflect the SQL backup type: log backups truncate the log so they are always
-// non-copy-only (the checkbox is forced off and disabled). Updates the hint.
-function updateSqlBackupType() {
-  const log = el("f-sql-backup-type").value === "log";
-  const copyRow = el("f-sql-copy-only");
-  copyRow.disabled = log;
-  if (log) copyRow.checked = false;
-  el("f-sql-copy-only-row").classList.toggle("muted", log);
-  el("f-sql-type-help").textContent = log
-    ? "Backs up and truncates the transaction log so it does not grow without bound. Requires a prior full backup and the FULL or BULK_LOGGED recovery model. Stored in a separate -log snapshot group."
-    : "Full database backup. Copy-only by default so it does not disturb another backup tool's chain; turn copy-only off to make pbsgui own the chain (needed before log backups can run).";
+const SQL_PLAN_HELP = {
+  point_in_time:
+    "Restore to any moment: pbsgui takes scheduled full backups plus frequent log backups (which also truncate the log). The database must be in FULL or BULK_LOGGED recovery.",
+  daily_restore_points:
+    "Restore to each scheduled backup. pbsgui takes full backups only. Fine for SIMPLE-recovery databases; a FULL-recovery database's log would keep growing under this plan.",
+  secondary_copy:
+    "A safety copy alongside another backup tool: copy-only full backups that never disturb the other tool's log chain. No point-in-time recovery through pbsgui.",
+};
+
+// Reflect the chosen protection plan: show the log interval only for
+// point-in-time, the full time only for a daily schedule, and refresh guidance.
+function updateSqlPlan() {
+  const plan = el("f-sql-plan").value;
+  el("f-sql-plan-help").textContent = SQL_PLAN_HELP[plan] || "";
+  el("f-sql-log-row").classList.toggle("hidden", plan !== "point_in_time");
+  el("f-sql-full-time-row").classList.toggle("hidden", el("f-sql-full-kind").value !== "daily");
+  renderSqlGuidance();
+}
+
+// Per selected database, whether the chosen plan can deliver its restore outcome,
+// with the copyable fix when it cannot. Uses each database's recovery model from
+// the last probe; nothing shows until databases are loaded.
+function renderSqlGuidance() {
+  const host = el("f-sql-guidance");
+  host.innerHTML = "";
+  const plan = el("f-sql-plan").value;
+  const checked = Array.from(el("sql-db-pick").querySelectorAll("input:checked")).map((c) => c.value);
+  for (const name of checked) {
+    const model = (sqlDbModels[name] || "").toUpperCase();
+    if (!model) continue; // unknown until probed
+    const simple = model === "SIMPLE";
+    let level = "ok";
+    let text = "";
+    if (plan === "point_in_time" && simple) {
+      level = "fail";
+      text = `${name}: point-in-time needs FULL recovery, but it is SIMPLE. Run: ALTER DATABASE [${name}] SET RECOVERY FULL; then take a full backup.`;
+    } else if (plan === "daily_restore_points" && !simple) {
+      level = "warn";
+      text = `${name}: in ${model} recovery, but this plan does not back up the log, so the log will grow. Choose "any moment in time", or run: ALTER DATABASE [${name}] SET RECOVERY SIMPLE;`;
+    } else if (plan === "secondary_copy") {
+      level = "ok";
+      text = `${name}: copy-only safety copy. Make sure another tool backs up the log.`;
+    } else {
+      text = `${name}: ${model} recovery, ready for this plan.`;
+    }
+    const row = document.createElement("div");
+    row.className = "check-row check-" + level;
+    row.textContent = text;
+    host.append(row);
+  }
 }
 
 function updateDestType() {
@@ -305,11 +355,14 @@ function renderDbCheckboxes(databases, checked) {
     cb.type = "checkbox";
     cb.value = name;
     cb.checked = checkedSet.has(name);
+    cb.onchange = renderSqlGuidance;
     const span = document.createElement("span");
-    span.textContent = name;
+    const model = sqlDbModels[name];
+    span.textContent = model ? `${name}  (${model})` : name;
     row.append(cb, span);
     c.append(row);
   }
+  renderSqlGuidance();
 }
 
 async function loadDatabasesForConn() {
@@ -324,6 +377,8 @@ async function loadDatabasesForConn() {
       auth: conn.auth,
       password: null,
     });
+    sqlDbModels = {};
+    for (const d of probe.databases) sqlDbModels[d.name] = d.recovery_model;
     renderDbCheckboxes(
       probe.databases.map((d) => d.name),
       checked,
@@ -381,14 +436,25 @@ async function openEditor(job) {
   renderSources(source.type === "files" ? source.sources || [] : []);
   el("f-excludes").value = (source.type === "files" ? source.excludes || [] : []).join("\n");
   el("f-change-detection").checked = source.type === "files" ? !!source.change_detection : false;
+  sqlDbModels = {};
   if (source.type === "sql") {
     renderDbCheckboxes(source.databases || [], source.databases || []);
   } else {
     el("sql-db-pick").innerHTML = '<div class="muted">Pick a connection and load its databases.</div>';
   }
-  el("f-sql-backup-type").value = source.type === "sql" ? source.backup_type || "full" : "full";
-  el("f-sql-copy-only").checked = source.type === "sql" ? source.copy_only !== false : true;
-  updateSqlBackupType();
+  // Protection plan + cadences.
+  const protection = source.type === "sql" ? source.protection || {} : {};
+  const plan = protection.plan || "point_in_time";
+  el("f-sql-plan").value = plan;
+  const sched = plan === "point_in_time" ? protection.full : protection.schedule;
+  el("f-sql-full-kind").value = sched && sched.kind === "manual" ? "manual" : "daily";
+  el("f-sql-full-time").value =
+    sched && sched.kind === "daily"
+      ? `${String(sched.hour).padStart(2, "0")}:${String(sched.minute).padStart(2, "0")}`
+      : "02:00";
+  el("f-sql-log-interval").value =
+    plan === "point_in_time" && protection.log_interval_minutes ? protection.log_interval_minutes : 15;
+  updateSqlPlan();
   updateSourceType();
 
   const dest = job?.destination || { type: "pbs" };
@@ -427,18 +493,33 @@ function gatherSchedule() {
   return { kind: "manual" };
 }
 
+function gatherSqlSchedule() {
+  if (el("f-sql-full-kind").value === "manual") return { kind: "manual" };
+  const [h, m] = el("f-sql-full-time").value.split(":").map((x) => parseInt(x, 10) || 0);
+  return { kind: "daily", hour: h, minute: m };
+}
+
+function gatherSqlProtection() {
+  const plan = el("f-sql-plan").value;
+  const schedule = gatherSqlSchedule();
+  if (plan === "point_in_time") {
+    return {
+      plan: "point_in_time",
+      full: schedule,
+      log_interval_minutes: parseInt(el("f-sql-log-interval").value, 10) || 15,
+    };
+  }
+  return { plan, schedule };
+}
+
 function gatherSource() {
   if (el("f-source-type").value === "sql") {
     const databases = Array.from(el("sql-db-pick").querySelectorAll("input:checked")).map((c) => c.value);
-    const backupType = el("f-sql-backup-type").value;
-    // Log backups must be non-copy-only to truncate the log.
-    const copyOnly = backupType === "log" ? false : el("f-sql-copy-only").checked;
     return {
       type: "sql",
       connection_id: el("f-sql-conn").value,
       databases,
-      backup_type: backupType,
-      copy_only: copyOnly,
+      protection: gatherSqlProtection(),
     };
   }
   return {
@@ -462,12 +543,15 @@ function gatherDestination() {
 function gatherJob() {
   // Encryption applies to PBS destinations only (folders get a plain .bak).
   const encrypted = el("f-dest-type").value === "pbs" && el("f-encrypt").checked;
+  // SQL jobs schedule themselves from their protection plan; the top-level
+  // schedule is used only by file jobs.
+  const isSql = el("f-source-type").value === "sql";
   return {
     id: wizJobId,
     name: el("f-name").value.trim(),
     source: gatherSource(),
     destination: gatherDestination(),
-    schedule: gatherSchedule(),
+    schedule: isSql ? { kind: "manual" } : gatherSchedule(),
     pre_script: el("f-pre-script").value.trim() || null,
     post_script: el("f-post-script").value.trim() || null,
     last_run: editing?.last_run ?? null,
@@ -618,20 +702,16 @@ function onBrowseJobChange() {
 async function loadSnapshots() {
   const job = selectedBrowseJob();
   if (!job) return alert("Create a job first, then browse its snapshots.");
-  const isSql = job.source?.type === "sql";
-  const database = isSql ? el("browse-db").value : null;
-  if (isSql && !database) return alert("Pick a database.");
+  if (job.source?.type === "sql") return loadSqlRestore(job);
+
   el("files-panel").classList.add("hidden");
   const list = el("snapshots-list");
-  // Only show the spinner if the load is slow, so fast loads don't flash.
   const spinner = setTimeout(() => {
     list.innerHTML = loadingHtml("loading snapshots...");
   }, 200);
   let snaps;
   try {
-    snaps = isSql
-      ? await invoke("list_sql_snapshots", { jobId: job.id, database })
-      : await invoke("list_snapshots", { jobId: job.id });
+    snaps = await invoke("list_snapshots", { jobId: job.id });
   } catch (err) {
     clearTimeout(spinner);
     list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
@@ -647,21 +727,94 @@ async function loadSnapshots() {
   for (const snap of snaps) {
     const row = document.createElement("div");
     row.className = "snap-row";
-    const action = isSql ? "Restore" : "";
     row.innerHTML =
       `<span class="snap-time">${escapeHtml(new Date(snap.backup_time * 1000).toLocaleString())}</span>` +
-      `<span class="snap-size muted">${escapeHtml(formatBytes(snap.size))}</span>` +
-      (isSql ? `<span class="spacer"></span><span class="snap-action">${action}</span>` : "");
-    row.onclick = () =>
-      isSql
-        ? restoreSqlSnapshot(job.id, database, snap.backup_time)
-        : loadFiles(job.id, snap.backup_time, snap.backup_time);
+      `<span class="snap-size muted">${escapeHtml(formatBytes(snap.size))}</span>`;
+    row.onclick = () => loadFiles(job.id, snap.backup_time, snap.backup_time);
     list.append(row);
   }
 }
 
-// Restore a SQL snapshot via VDI, prompting for the target database name.
-function restoreSqlSnapshot(jobId, database, backupTime) {
+// Render a SQL database's restore options: a point-in-time picker (when logs are
+// present) plus the list of full restore points. Each option says what it gives.
+async function loadSqlRestore(job) {
+  const database = el("browse-db").value;
+  if (!database) return alert("Pick a database.");
+  el("files-panel").classList.add("hidden");
+  const list = el("snapshots-list");
+  const spinner = setTimeout(() => {
+    list.innerHTML = loadingHtml("loading restore points...");
+  }, 200);
+  let win;
+  try {
+    win = await invoke("get_sql_restore_window", { jobId: job.id, database });
+  } catch (err) {
+    clearTimeout(spinner);
+    list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+    return;
+  }
+  clearTimeout(spinner);
+  list.innerHTML = "";
+
+  if (win.pit_earliest != null && win.pit_latest != null) {
+    const earliest = new Date(win.pit_earliest * 1000);
+    const latest = new Date(win.pit_latest * 1000);
+    const box = document.createElement("div");
+    box.className = "pit-box";
+    box.innerHTML =
+      `<div class="pit-title">Restore to any moment</div>` +
+      `<div class="help muted">Recovers the database to the exact second you choose, between ` +
+      `${escapeHtml(earliest.toLocaleString())} and ${escapeHtml(latest.toLocaleString())}.</div>`;
+    const input = document.createElement("input");
+    input.type = "datetime-local";
+    input.min = toLocalInput(earliest);
+    input.max = toLocalInput(latest);
+    input.value = toLocalInput(latest);
+    const btn = mkbtn("Restore to this moment", "primary", () => {
+      const t = Math.floor(new Date(input.value).getTime() / 1000);
+      restoreSqlPit(job.id, database, t);
+    });
+    const row = document.createElement("div");
+    row.className = "actions";
+    row.append(input, btn);
+    box.append(row);
+    list.append(box);
+  }
+
+  const head = document.createElement("div");
+  head.className = "muted pit-subhead";
+  head.textContent = "Or restore the database as it was at a full backup:";
+  list.append(head);
+  if (!win.full_points.length) {
+    list.append(placeholderDiv("No full backups yet."));
+    return;
+  }
+  for (const t of win.full_points) {
+    const row = document.createElement("div");
+    row.className = "snap-row";
+    row.innerHTML =
+      `<span class="snap-time">${escapeHtml(new Date(t * 1000).toLocaleString())}</span>` +
+      `<span class="spacer"></span><span class="snap-action">Restore</span>`;
+    row.onclick = () => restoreSqlFull(job.id, database, t);
+    list.append(row);
+  }
+}
+
+function placeholderDiv(text) {
+  const d = document.createElement("div");
+  d.className = "placeholder";
+  d.textContent = text;
+  return d;
+}
+
+// Format a Date as a local "YYYY-MM-DDTHH:MM" for a datetime-local input.
+function toLocalInput(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Restore a specific full backup via VDI, prompting for the target name.
+function restoreSqlFull(jobId, database, backupTime) {
   const target = prompt(
     `Restore "${database}" as which database?\n` +
       `This OVERWRITES the target if it exists (WITH REPLACE).`,
@@ -671,8 +824,25 @@ function restoreSqlSnapshot(jobId, database, backupTime) {
   streamRun(`Restoring ${database} as ${target}`, "restore_sql", {
     jobId,
     database,
-    backupTime,
     targetDatabase: target.trim(),
+    point: { kind: "full", backup_time: backupTime },
+  });
+}
+
+// Restore to a point in time (full + log chain, trimmed with STOPAT).
+function restoreSqlPit(jobId, database, unixTime) {
+  const when = new Date(unixTime * 1000).toLocaleString();
+  const target = prompt(
+    `Restore "${database}" to ${when} as which database?\n` +
+      `This OVERWRITES the target if it exists (WITH REPLACE).`,
+    `${database}_pit`,
+  );
+  if (!target) return;
+  streamRun(`Restoring ${database} to ${when}`, "restore_sql", {
+    jobId,
+    database,
+    targetDatabase: target.trim(),
+    point: { kind: "point_in_time", unix_time: unixTime },
   });
 }
 
@@ -1236,7 +1406,8 @@ window.addEventListener("DOMContentLoaded", () => {
   el("wiz-back").onclick = () => showWizStep(wizStep - 1);
   el("wiz-save").onclick = saveJob;
   el("f-source-type").onchange = updateSourceType;
-  el("f-sql-backup-type").onchange = updateSqlBackupType;
+  el("f-sql-plan").onchange = updateSqlPlan;
+  el("f-sql-full-kind").onchange = updateSqlPlan;
   el("f-dest-type").onchange = updateDestType;
   el("f-encrypt").onchange = updateEncryptArea;
   el("enc-generate").onclick = generateKey;

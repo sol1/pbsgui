@@ -513,6 +513,51 @@ button:disabled {
   font-weight: 500;
 }
 
+/* Per-database protection guidance (wizard SQL step). */
+#f-sql-guidance {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.check-row {
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  font-size: 13px;
+  background: var(--panel-2);
+}
+
+.check-row.check-ok {
+  border-left-color: #5fbf6a;
+}
+.check-row.check-warn {
+  border-left-color: #e0915f;
+}
+.check-row.check-fail {
+  border-left-color: #e06a5f;
+}
+
+/* Point-in-time restore picker. */
+.pit-box {
+  padding: 12px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(229, 112, 0, 0.08);
+  margin-bottom: 12px;
+}
+
+.pit-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.pit-subhead {
+  margin: 10px 0 6px;
+}
+
 .check-hint {
   margin-top: 3px;
   padding: 6px 8px;

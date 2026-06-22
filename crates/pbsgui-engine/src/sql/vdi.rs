@@ -172,9 +172,25 @@ pub async fn restore_database_from_image(
     anyhow::bail!("VDI restore is only available on Windows")
 }
 
+/// Restore a chain of backups (full first, then logs) to a point in time.
+#[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
+pub async fn restore_chain(
+    _server: &str,
+    _port: Option<u16>,
+    _auth: &SqlAuth,
+    _password: Option<&str>,
+    _source_database: &str,
+    _target_database: &str,
+    _steps: Vec<(bool, Vec<u8>)>,
+    _target_unix: i64,
+) -> anyhow::Result<()> {
+    anyhow::bail!("VDI restore is only available on Windows")
+}
+
 #[cfg(windows)]
 pub use windows_impl::{
-    backup_database_to_file, backup_database_to_pbs, restore_database_from_image,
+    backup_database_to_file, backup_database_to_pbs, restore_chain, restore_database_from_image,
 };
 
 #[cfg(windows)]
@@ -321,6 +337,50 @@ mod windows_impl {
         Ok(())
     }
 
+    /// Read the just-written backup's chain metadata from `msdb.dbo.backupset`
+    /// (the newest row for the database) as JSON, for the snapshot's meta blob.
+    async fn query_backup_meta(client: &mut SqlClient, database: &str) -> anyhow::Result<Vec<u8>> {
+        let db = database.replace('\'', "''");
+        let sql = format!(
+            "SELECT TOP 1 CONVERT(varchar(40), first_lsn) AS first_lsn, \
+             CONVERT(varchar(40), last_lsn) AS last_lsn, \
+             CONVERT(varchar(40), database_backup_lsn) AS db_backup_lsn, \
+             [type] AS btype, \
+             DATEDIFF_BIG(SECOND, '1970-01-01', backup_finish_date) \
+               - (DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) * 60) AS finish_unix \
+             FROM msdb.dbo.backupset WHERE database_name = N'{db}' ORDER BY backup_set_id DESC"
+        );
+        let row = client
+            .simple_query(sql)
+            .await?
+            .into_row()
+            .await?
+            .context("no msdb.dbo.backupset row for the database")?;
+        let btype = row.get::<&str, _>("btype").unwrap_or("D");
+        let meta = crate::sql::backupmeta::SqlBackupMeta {
+            kind: if btype.eq_ignore_ascii_case("L") {
+                "log"
+            } else {
+                "full"
+            }
+            .to_string(),
+            backup_time: row.get::<i64, _>("finish_unix").unwrap_or(0),
+            first_lsn: row
+                .get::<&str, _>("first_lsn")
+                .unwrap_or_default()
+                .to_string(),
+            last_lsn: row
+                .get::<&str, _>("last_lsn")
+                .unwrap_or_default()
+                .to_string(),
+            database_backup_lsn: row
+                .get::<&str, _>("db_backup_lsn")
+                .unwrap_or_default()
+                .to_string(),
+        };
+        Ok(serde_json::to_vec(&meta)?)
+    }
+
     pub async fn backup_database_to_file(
         server: &str,
         port: Option<u16>,
@@ -390,18 +450,35 @@ mod windows_impl {
 
         // BACKUP (pushes bytes into the device) and the PBS upload (drains them)
         // run concurrently; the device loop bridges the two on its own thread.
-        let backup_fut = issue_backup(&mut client, database, &set_name, backup_type, copy_only);
+        // After BACKUP yields its LSNs, send the chain metadata to the uploader so
+        // it lands in the snapshot before finalisation (point-in-time restore reads
+        // it to order the chain). A dropped sender (BACKUP failed) means no blob.
+        let (meta_tx, meta_rx) = tokio::sync::oneshot::channel::<(String, Vec<u8>)>();
+        let backup_and_meta = async {
+            let result =
+                issue_backup(&mut client, database, &set_name, backup_type, copy_only).await;
+            if result.is_ok() {
+                match query_backup_meta(&mut client, database).await {
+                    Ok(meta) => {
+                        let _ = meta_tx
+                            .send((crate::sql::backupmeta::META_BLOB_NAME.to_string(), meta));
+                    }
+                    Err(e) => tracing::warn!("could not read backup metadata: {e:#}"),
+                }
+            }
+            result
+        };
         let upload_fut = pbs_client::backup_dynamic_reader(
             params,
             archive_name,
             true,
             ChannelReader::new(rx),
             0,
-            None,
+            Some(meta_rx),
             crypt,
             |_done, _total| {},
         );
-        let (backup, upload) = tokio::join!(backup_fut, upload_fut);
+        let (backup, upload) = tokio::join!(backup_and_meta, upload_fut);
 
         let device_result = device_loop
             .await
@@ -520,6 +597,81 @@ mod windows_impl {
             )
         })
         .await?;
+        Ok(())
+    }
+
+    /// Restore a chain of backup images (full first, then logs) to a point in
+    /// time. The full restores `WITH NORECOVERY` (relocating files for a new
+    /// name), each log `WITH STOPAT, NORECOVERY`, then the database is brought
+    /// online `WITH RECOVERY` at the recovered point. Each image is fed to its own
+    /// VDI device, in order.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn restore_chain(
+        server: &str,
+        port: Option<u16>,
+        auth: &SqlAuth,
+        password: Option<&str>,
+        source_database: &str,
+        target_database: &str,
+        steps: Vec<(bool, Vec<u8>)>,
+        target_unix: i64,
+    ) -> anyhow::Result<()> {
+        if steps.is_empty() {
+            anyhow::bail!("empty restore chain");
+        }
+        let mut client = probe::connect(server, port, auth, password).await?;
+        let target = target_database.replace(']', "]]");
+        let new_name = !source_database.eq_ignore_ascii_case(target_database);
+
+        // STOPAT must be a datetime in the server's local time; convert the UTC
+        // target using the server's current UTC offset.
+        let offset_min: i32 = client
+            .simple_query("SELECT DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())")
+            .await?
+            .into_row()
+            .await?
+            .and_then(|r| r.get::<i32, _>(0))
+            .unwrap_or(0);
+        let local_unix = target_unix + (offset_min as i64) * 60;
+        let stopat = chrono::DateTime::from_timestamp(local_unix, 0)
+            .map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string())
+            .unwrap_or_default();
+
+        // MOVE clauses (new name only), read from the full = the first image.
+        let moves = if new_name {
+            let files = backup_filelist(&mut client, steps[0].1.clone()).await?;
+            let (data_dir, log_dir) = default_dirs(&mut client).await?;
+            move_clause(&files, &data_dir, &log_dir, target_database)
+        } else {
+            String::new()
+        };
+
+        for (i, (_is_log, image)) in steps.into_iter().enumerate() {
+            let target = target.clone();
+            let moves = moves.clone();
+            let stopat = stopat.clone();
+            run_vdi_read_stmt(&mut client, image, move |set| {
+                if i == 0 {
+                    format!(
+                        "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                         WITH REPLACE, NORECOVERY{moves}"
+                    )
+                } else {
+                    format!(
+                        "RESTORE LOG [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                         WITH STOPAT = N'{stopat}', NORECOVERY"
+                    )
+                }
+            })
+            .await?;
+        }
+
+        // Bring the database online at the recovered point.
+        client
+            .simple_query(format!("RESTORE DATABASE [{target}] WITH RECOVERY"))
+            .await?
+            .into_results()
+            .await?;
         Ok(())
     }
 

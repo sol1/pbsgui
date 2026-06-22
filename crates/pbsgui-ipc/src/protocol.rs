@@ -44,14 +44,61 @@ pub enum JobSource {
         #[serde(default)]
         change_detection: bool,
     },
-    /// One or more SQL Server databases via a saved connection.
+    /// One or more SQL Server databases via a saved connection, protected to a
+    /// chosen restore outcome (see [`SqlProtection`]).
     Sql {
         connection_id: String,
         databases: Vec<String>,
-        backup_type: SqlBackupType,
-        #[serde(default)]
-        copy_only: bool,
+        protection: SqlProtection,
     },
+}
+
+/// What a SQL job lets you restore, stated as an outcome. The engine derives the
+/// backup mechanics (full vs log, copy-only or not) from this; the user never
+/// picks a raw backup type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "plan", rename_all = "snake_case")]
+pub enum SqlProtection {
+    /// Restore to any moment in the retained window. Takes periodic full backups
+    /// plus frequent log backups (which also truncate the log). pbsgui owns the
+    /// backup chain; the database must be in FULL or BULK_LOGGED recovery.
+    PointInTime {
+        /// Cadence for the full (chain-anchoring) backups.
+        full: Schedule,
+        /// Minutes between log backups.
+        log_interval_minutes: u32,
+    },
+    /// Restore to each full backup. Takes full backups only (non-copy-only, so
+    /// pbsgui owns the chain). Suitable for SIMPLE-recovery databases.
+    DailyRestorePoints { schedule: Schedule },
+    /// A safety copy alongside another backup tool: copy-only full backups only,
+    /// which never disturb the other tool's differential/log chain. No
+    /// point-in-time recovery via pbsgui.
+    SecondaryCopy { schedule: Schedule },
+}
+
+/// Which point a SQL restore targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SqlRestorePoint {
+    /// Restore a specific full snapshot (no log replay).
+    Full { backup_time: i64 },
+    /// Restore to a moment in time: the covering full plus the log chain up to
+    /// `unix_time`.
+    PointInTime { unix_time: i64 },
+}
+
+/// The restore options available for one database of a SQL job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlRestoreWindow {
+    /// Full restore points (snapshot times, unix seconds), newest first.
+    pub full_points: Vec<i64>,
+    /// Earliest restorable instant for point-in-time (the oldest full), if any.
+    #[serde(default)]
+    pub pit_earliest: Option<i64>,
+    /// Latest restorable instant for point-in-time (newest log, or newest full).
+    #[serde(default)]
+    pub pit_latest: Option<i64>,
 }
 
 /// Where a job sends its backup.
@@ -465,13 +512,17 @@ pub enum Request {
 
     /// List the PBS snapshots for one database of a SQL backup job, by date/time.
     ListSqlSnapshots { job_id: String, database: String },
-    /// Restore a SQL database snapshot via VDI. `target_database` is where it is
-    /// restored (the original name, or a new one). Streams progress.
+    /// Report the restore options for one database: the full restore points and,
+    /// for a point-in-time job, the earliest/latest restorable instant.
+    GetSqlRestoreWindow { job_id: String, database: String },
+    /// Restore a SQL database via VDI to `target_database` (the original name or a
+    /// new one), at the given restore `point` (a full snapshot, or a moment in
+    /// time replayed from a full plus its log chain). Streams progress.
     RestoreSql {
         job_id: String,
         database: String,
-        backup_time: i64,
         target_database: String,
+        point: SqlRestorePoint,
     },
 
     /// List saved SQL Server connections (without secrets).
@@ -551,6 +602,8 @@ pub enum Reply {
     SqlProbe { probe: SqlProbe },
     /// Reply to [`Request::CheckSql`].
     SqlChecks { checks: Vec<SqlCheck> },
+    /// Reply to [`Request::GetSqlRestoreWindow`].
+    SqlRestoreWindow { window: SqlRestoreWindow },
     /// Reply to [`Request::ListSqlConnections`].
     SqlConnections { connections: Vec<SqlConnection> },
     /// Reply to [`Request::ListPbsServers`].
@@ -591,6 +644,7 @@ impl Reply {
                 | Reply::SqlInstances { .. }
                 | Reply::SqlProbe { .. }
                 | Reply::SqlChecks { .. }
+                | Reply::SqlRestoreWindow { .. }
                 | Reply::SqlConnections { .. }
                 | Reply::PbsServers { .. }
                 | Reply::EncryptionKey { .. }

@@ -13,6 +13,7 @@ pub use protocol::{
     CheckStatus, EmailSecurity, EmailSettings, EncryptionKeyInfo, FileInfo, Job, JobDestination,
     JobSource, NotificationSettings, NotifyChannel, PbsServer, Reply, Request, Schedule,
     SnapshotInfo, SqlAuth, SqlAuthMode, SqlBackupType, SqlCheck, SqlConnection, SqlDatabase,
-    SqlDiscoverySource, SqlInstance, SqlProbe, SqlTopology, WebhookSettings,
+    SqlDiscoverySource, SqlInstance, SqlProbe, SqlProtection, SqlRestorePoint, SqlRestoreWindow,
+    SqlTopology, WebhookSettings,
 };
 pub use transport::{send_request, serve, socket_name, Responder, DEFAULT_SOCKET};

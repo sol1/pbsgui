@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod backupmeta;
 pub mod check;
 pub mod discover;
 pub mod probe;

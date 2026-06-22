@@ -48,15 +48,21 @@ CI on Windows and exercised manually.
   deduplicated dynamic-index snapshot, one snapshot per database per run, with no
   on-disk staging. Validated end to end against a live SQL Server and PBS,
   including deduplicated re-runs. The connecting login must be `sysadmin`.
-- **SQL Server transaction-log backups.** A Log backup type takes
-  `BACKUP LOG ... TO VIRTUAL_DEVICE` (never copy-only) so the inactive
-  transaction log is truncated and FULL / BULK_LOGGED databases do not grow
-  without bound. Log snapshots land in a separate snapshot group. Full backups
-  are copy-only by default (so they do not disturb another tool's chain); turning
-  copy-only off lets pbsgui own the chain so log backups can run.
-- **SQL Server browse and restore.** List a database's snapshots by date and
-  time and restore over VDI, either over the original database or to a new name
-  (the latter relocates the data and log files via `WITH MOVE`).
+- **SQL Server protection plans (outcome-driven).** A SQL job picks what it
+  should be able to restore, not a raw backup type: *point-in-time recovery*
+  (scheduled fulls plus frequent log backups, which also truncate the log),
+  *daily restore points* (fulls only), or a *secondary copy* (copy-only fulls
+  that coexist with another backup tool). The wizard reads each database's
+  recovery model and, detect-and-explain only, blocks point-in-time on a SIMPLE
+  database (with the exact `ALTER DATABASE ... SET RECOVERY FULL` to run) and
+  warns when a FULL-recovery database is on a full-only plan (the log-growth
+  trap). The engine schedules the full and log cadences independently.
+- **SQL Server point-in-time restore.** Restore a database to any moment within
+  the retained window: pbsgui picks the covering full plus the log chain, restores
+  the full `WITH NORECOVERY`, replays the logs `WITH STOPAT`, and recovers at the
+  chosen second. It can also restore a specific full backup. Restore is over the
+  original name or a new one (files relocated via `WITH MOVE`). Each backup's LSN
+  range is stored in the snapshot so the chain can be rebuilt.
 - **Three-step job wizard.** Jobs pair a source (files or SQL Server databases)
   with a destination (a PBS server or a folder) across a Source / Destination /
   Schedule wizard.
@@ -72,9 +78,9 @@ CI on Windows and exercised manually.
 
 ## In progress
 
-- **Differential SQL backups** and **point-in-time / log-chain restore** (the log
-  backups are taken and truncate the log today; replaying a full plus a log chain
-  to a point in time is not wired up yet).
+- **Differential SQL backups**, **log-chain re-base detection** (an external tool
+  breaking the chain), and managing the PBS **retention** that bounds the
+  point-in-time window.
 
 ## Planned
 

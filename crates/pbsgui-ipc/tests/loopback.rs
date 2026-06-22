@@ -78,6 +78,17 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 .send(&Reply::Snapshots { snapshots: vec![] })
                 .await;
         }
+        Request::GetSqlRestoreWindow { .. } => {
+            let _ = responder
+                .send(&Reply::SqlRestoreWindow {
+                    window: pbsgui_ipc::SqlRestoreWindow {
+                        full_points: vec![],
+                        pit_earliest: None,
+                        pit_latest: None,
+                    },
+                })
+                .await;
+        }
         Request::RestoreSql { .. } => {
             let _ = responder
                 .send(&Reply::Finished {

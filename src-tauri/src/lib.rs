@@ -9,7 +9,8 @@
 
 use pbsgui_ipc::{
     EncryptionKeyInfo, FileInfo, Job, NotificationSettings, NotifyChannel, PbsServer, Reply,
-    Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection, SqlInstance, SqlProbe, DEFAULT_SOCKET,
+    Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection, SqlInstance, SqlProbe,
+    SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -372,13 +373,33 @@ async fn list_sql_snapshots(job_id: String, database: String) -> Result<Vec<Snap
         .ok_or_else(|| "engine did not return snapshots".to_string())
 }
 
-/// Restore a SQL database snapshot via VDI, streaming progress.
+/// The restore options for one database of a SQL job (full points + PIT window).
+#[tauri::command]
+async fn get_sql_restore_window(
+    job_id: String,
+    database: String,
+) -> Result<SqlRestoreWindow, String> {
+    let replies = request_all(Request::GetSqlRestoreWindow { job_id, database }).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::SqlRestoreWindow { window } => Some(window),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return a restore window".to_string())
+}
+
+/// Restore a SQL database via VDI to a point (a full snapshot or a moment in
+/// time), streaming progress.
 #[tauri::command]
 async fn restore_sql(
     job_id: String,
     database: String,
-    backup_time: i64,
     target_database: String,
+    point: SqlRestorePoint,
     on_event: Channel<Reply>,
 ) -> Result<(), String> {
     ensure_engine().await?;
@@ -386,8 +407,8 @@ async fn restore_sql(
     let request = Request::RestoreSql {
         job_id,
         database,
-        backup_time,
         target_database,
+        point,
     };
     pbsgui_ipc::send_request(name, &request, move |reply| {
         let _ = on_event.send(reply);
@@ -668,6 +689,7 @@ pub fn run() {
         probe_sql,
         check_sql,
         list_sql_snapshots,
+        get_sql_restore_window,
         restore_sql,
         backup_sql_to_file,
         backup_sql_to_pbs,

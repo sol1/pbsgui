@@ -6,7 +6,10 @@ use std::sync::Arc;
 use pbs_client::api::ApiClient;
 use pbs_client::session::{ReaderClient, SessionParams};
 use pbs_client::{CryptConfig, Repository};
-use pbsgui_ipc::{FileInfo, Reply, Request, Responder, SnapshotInfo, SqlAuth, SqlBackupType};
+use pbsgui_ipc::{
+    FileInfo, Reply, Request, Responder, SnapshotInfo, SqlAuth, SqlBackupType, SqlRestorePoint,
+    SqlRestoreWindow,
+};
 use tokio::sync::mpsc;
 
 use crate::config::unix_now;
@@ -167,21 +170,22 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             let _ = responder.send(&reply).await;
         }
 
+        Request::GetSqlRestoreWindow { job_id, database } => {
+            let reply = match get_sql_restore_window(&store, &job_id, &database).await {
+                Ok(window) => Reply::SqlRestoreWindow { window },
+                Err(e) => Reply::Error {
+                    message: format!("{e:#}"),
+                },
+            };
+            let _ = responder.send(&reply).await;
+        }
         Request::RestoreSql {
             job_id,
             database,
-            backup_time,
             target_database,
+            point,
         } => {
-            restore_sql(
-                store,
-                job_id,
-                database,
-                backup_time,
-                target_database,
-                responder,
-            )
-            .await;
+            restore_sql(store, job_id, database, target_database, point, responder).await;
         }
 
         Request::ListSqlConnections => {
@@ -563,12 +567,60 @@ async fn list_sql_snapshots(
         .collect())
 }
 
+/// Report the restore options for one database: the full restore points and, if
+/// log backups exist, the earliest/latest point-in-time bounds.
+async fn get_sql_restore_window(
+    store: &JobStore,
+    job_id: &str,
+    database: &str,
+) -> anyhow::Result<SqlRestoreWindow> {
+    let ctx = sql_job_pbs(store, job_id)?;
+    let (full_group, _) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
+    let (log_group, _) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Log);
+    let api = ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)?;
+    let ns = ctx.repo.namespace.as_deref();
+
+    let mut full_times: Vec<i64> = api
+        .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, &full_group)
+        .await?
+        .into_iter()
+        .map(|s| s.backup_time)
+        .collect();
+    full_times.sort_unstable();
+    let log_times: Vec<i64> = api
+        .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, &log_group)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.backup_time)
+        .collect();
+
+    // Point-in-time is available only when there are logs to replay over a full.
+    let (pit_earliest, pit_latest) = if !log_times.is_empty() && !full_times.is_empty() {
+        let earliest = full_times.first().copied();
+        let latest = log_times.iter().chain(full_times.iter()).copied().max();
+        (earliest, latest)
+    } else {
+        (None, None)
+    };
+
+    let mut full_points = full_times;
+    full_points.reverse(); // newest first
+    Ok(SqlRestoreWindow {
+        full_points,
+        pit_earliest,
+        pit_latest,
+    })
+}
+
 async fn restore_sql(
     store: Arc<JobStore>,
     job_id: String,
     database: String,
-    backup_time: i64,
     target_database: String,
+    point: SqlRestorePoint,
     mut responder: Responder,
 ) {
     let _ = responder
@@ -580,8 +632,8 @@ async fn restore_sql(
         &store,
         &job_id,
         &database,
-        backup_time,
         &target_database,
+        point,
         &mut responder,
     )
     .await;
@@ -602,48 +654,42 @@ async fn run_restore_sql(
     store: &JobStore,
     job_id: &str,
     database: &str,
-    backup_time: i64,
     target_database: &str,
+    point: SqlRestorePoint,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
     let ctx = sql_job_pbs(store, job_id)?;
+    match point {
+        SqlRestorePoint::Full { backup_time } => {
+            run_restore_full(&ctx, database, target_database, backup_time, responder).await
+        }
+        SqlRestorePoint::PointInTime { unix_time } => {
+            run_restore_pit(&ctx, database, target_database, unix_time, responder).await
+        }
+    }
+}
+
+/// Restore one full snapshot (no log replay).
+async fn run_restore_full(
+    ctx: &SqlJobPbs,
+    database: &str,
+    target_database: &str,
+    backup_time: i64,
+    responder: &mut Responder,
+) -> anyhow::Result<String> {
     let (group, archive) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
-    let params = SessionParams::from_repository(
-        &ctx.repo,
-        ctx.secret,
-        &ctx.fingerprint,
-        SQL_BACKUP_TYPE,
-        &group,
-        backup_time,
-    )?;
-
-    let _ = responder
-        .send(&Reply::Log {
-            line: "connecting to PBS".to_string(),
-        })
-        .await;
-    let mut reader = ReaderClient::connect(&params).await?;
     let _ = responder
         .send(&Reply::Log {
             line: "downloading the database backup".to_string(),
         })
         .await;
-    let image = reader
-        .restore_dynamic_archive(&archive, ctx.crypt.as_ref())
-        .await?;
-    let _ = responder
-        .send(&Reply::Progress {
-            fraction: 0.5,
-            message: format!("downloaded {} bytes; restoring", image.len()),
-        })
-        .await;
+    let image = download_sql_image(ctx, &group, &archive, backup_time).await?;
     let _ = responder
         .send(&Reply::Log {
             line: format!("restoring as [{target_database}] (overwrites it if it exists)"),
         })
         .await;
-
     crate::sql::vdi::restore_database_from_image(
         &ctx.conn.server,
         ctx.conn.port,
@@ -654,14 +700,132 @@ async fn run_restore_sql(
         image,
     )
     .await?;
+    Ok(format!("restored {database} as {target_database}"))
+}
+
+/// Restore to a point in time: the covering full plus its log chain, trimmed to
+/// `target_unix` with STOPAT.
+async fn run_restore_pit(
+    ctx: &SqlJobPbs,
+    database: &str,
+    target_database: &str,
+    target_unix: i64,
+    responder: &mut Responder,
+) -> anyhow::Result<String> {
+    use crate::sql::backupmeta::{self, ChainItem};
+
+    let (full_group, archive) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
+    let (log_group, _) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Log);
+    let api = ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)?;
+    let ns = ctx.repo.namespace.as_deref();
 
     let _ = responder
-        .send(&Reply::Progress {
-            fraction: 1.0,
-            message: "done".to_string(),
+        .send(&Reply::Log {
+            line: "reading the backup chain".to_string(),
         })
         .await;
-    Ok(format!("restored {database} as {target_database}"))
+    let mut items: Vec<ChainItem> = Vec::new();
+    for (group, _is_log) in [(&full_group, false), (&log_group, true)] {
+        let snaps = api
+            .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, group)
+            .await
+            .unwrap_or_default();
+        for s in snaps {
+            if let Some(meta) = download_sql_meta(ctx, group, s.backup_time).await {
+                items.push(ChainItem {
+                    snapshot_time: s.backup_time,
+                    meta,
+                });
+            }
+        }
+    }
+
+    let chain = backupmeta::select_chain(&items, target_unix);
+    if chain.is_empty() {
+        anyhow::bail!("no full backup covers that time; pick a later restore point");
+    }
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!(
+                "restoring 1 full + {} log backup(s) to the chosen point",
+                chain.len() - 1
+            ),
+        })
+        .await;
+
+    // Download each image in apply order (full first); memory holds one chain.
+    let mut steps: Vec<(bool, Vec<u8>)> = Vec::new();
+    for item in &chain {
+        let group = if item.meta.is_log() {
+            &log_group
+        } else {
+            &full_group
+        };
+        let image = download_sql_image(ctx, group, &archive, item.snapshot_time).await?;
+        steps.push((item.meta.is_log(), image));
+    }
+
+    crate::sql::vdi::restore_chain(
+        &ctx.conn.server,
+        ctx.conn.port,
+        &ctx.conn.auth,
+        ctx.password.as_deref(),
+        database,
+        target_database,
+        steps,
+        target_unix,
+    )
+    .await?;
+    Ok(format!(
+        "restored {database} as {target_database} to the chosen point in time"
+    ))
+}
+
+/// Download one SQL snapshot's archive image from PBS.
+async fn download_sql_image(
+    ctx: &SqlJobPbs,
+    group: &str,
+    archive: &str,
+    backup_time: i64,
+) -> anyhow::Result<Vec<u8>> {
+    let params = SessionParams::from_repository(
+        &ctx.repo,
+        ctx.secret.clone(),
+        &ctx.fingerprint,
+        SQL_BACKUP_TYPE,
+        group,
+        backup_time,
+    )?;
+    let mut reader = ReaderClient::connect(&params).await?;
+    Ok(reader
+        .restore_dynamic_archive(archive, ctx.crypt.as_ref())
+        .await?)
+}
+
+/// Download and parse one SQL snapshot's chain-metadata blob (`None` on any
+/// failure, e.g. an older snapshot without it).
+async fn download_sql_meta(
+    ctx: &SqlJobPbs,
+    group: &str,
+    backup_time: i64,
+) -> Option<crate::sql::backupmeta::SqlBackupMeta> {
+    let params = SessionParams::from_repository(
+        &ctx.repo,
+        ctx.secret.clone(),
+        &ctx.fingerprint,
+        SQL_BACKUP_TYPE,
+        group,
+        backup_time,
+    )
+    .ok()?;
+    let mut reader = ReaderClient::connect(&params).await.ok()?;
+    let bytes = reader
+        .download_blob(crate::sql::backupmeta::META_BLOB_NAME, ctx.crypt.as_ref())
+        .await
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// The PBS connection details for browsing/restoring a job's snapshots.

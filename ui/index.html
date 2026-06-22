@@ -75,17 +75,32 @@
             </label>
             <button id="load-dbs" type="button">Load databases</button>
             <div id="sql-db-pick"><div class="muted">Pick a connection and load its databases.</div></div>
-            <label>Backup type
-              <select id="f-sql-backup-type">
-                <option value="full">Full database</option>
-                <option value="log">Transaction log</option>
+
+            <label>What do you want to be able to restore?
+              <select id="f-sql-plan">
+                <option value="point_in_time">Any moment in time (recommended)</option>
+                <option value="daily_restore_points">Each scheduled backup</option>
+                <option value="secondary_copy">A safety copy alongside another tool</option>
               </select>
             </label>
-            <label id="f-sql-copy-only-row" class="enc-toggle">
-              <input id="f-sql-copy-only" type="checkbox" checked />
-              <span>Copy-only (does not disturb another tool's backup chain)</span>
+            <p id="f-sql-plan-help" class="help muted"></p>
+
+            <div class="row-2">
+              <label>Backup schedule
+                <select id="f-sql-full-kind">
+                  <option value="daily">Daily at a time</option>
+                  <option value="manual">Manual (run on demand)</option>
+                </select>
+              </label>
+              <label id="f-sql-full-time-row">At (local time)
+                <input id="f-sql-full-time" type="time" value="02:00" />
+              </label>
+            </div>
+            <label id="f-sql-log-row">Back up the transaction log every (minutes)
+              <input id="f-sql-log-interval" type="number" min="1" value="15" />
             </label>
-            <p id="f-sql-type-help" class="help muted"></p>
+
+            <div id="f-sql-guidance"></div>
           </div>
         </div>
 
@@ -138,23 +153,27 @@
 
         <!-- Step 3: Schedule -->
         <div id="wiz-step-schedule" class="wiz-step hidden">
-          <label>Schedule
-            <select id="f-schedule-kind">
-              <option value="manual">Manual (on demand)</option>
-              <option value="interval">Every N minutes</option>
-              <option value="daily">Daily at a time</option>
-            </select>
-          </label>
-          <div id="interval-fields" class="hidden">
-            <label>Every (minutes)
-              <input id="f-interval" type="number" min="1" value="60" />
+          <div id="schedule-controls">
+            <label>Schedule
+              <select id="f-schedule-kind">
+                <option value="manual">Manual (on demand)</option>
+                <option value="interval">Every N minutes</option>
+                <option value="daily">Daily at a time</option>
+              </select>
             </label>
+            <div id="interval-fields" class="hidden">
+              <label>Every (minutes)
+                <input id="f-interval" type="number" min="1" value="60" />
+              </label>
+            </div>
+            <div id="daily-fields" class="hidden">
+              <label>At (local time)
+                <input id="f-daily-time" type="time" value="02:00" />
+              </label>
+            </div>
           </div>
-          <div id="daily-fields" class="hidden">
-            <label>At (local time)
-              <input id="f-daily-time" type="time" value="02:00" />
-            </label>
-          </div>
+          <p id="sql-schedule-note" class="help muted hidden">Scheduling is set by the protection
+            plan on the Source step (full backup time and log interval).</p>
           <label>Pre-job script (runs before the backup; a non-zero exit aborts the job)
             <input id="f-pre-script" type="text" placeholder="e.g. C:\scripts\quiesce.bat" />
           </label>

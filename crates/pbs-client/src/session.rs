@@ -707,13 +707,20 @@ pub async fn backup_dynamic_file_with_progress(
     let total_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let file = std::fs::File::open(path)
         .map_err(|e| PbsError::Protocol(format!("opening {}: {e}", path.display())))?;
+    // The file catalog is known up front; hand it to the reader through the same
+    // deferred channel a streamed source (SQL) uses, sending it immediately.
+    let catalog_rx = catalog.map(|c| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(c);
+        rx
+    });
     backup_dynamic_reader(
         params,
         archive_name,
         dedup_with_previous,
         file,
         total_bytes,
-        catalog,
+        catalog_rx,
         crypt,
         on_progress,
     )
@@ -722,10 +729,15 @@ pub async fn backup_dynamic_file_with_progress(
 
 /// Back up an arbitrary byte stream as a deduplicated dynamic-index archive,
 /// then finish the snapshot. `total_bytes` is used only for progress reporting
-/// (pass 0 if unknown). With `crypt`, chunks (and the catalog) are AES-256-GCM
+/// (pass 0 if unknown). With `crypt`, chunks (and the extra blob) are AES-256-GCM
 /// encrypted and the chunk digests are keyed, matching the PBS scheme. The
 /// reader is consumed on a blocking thread while chunking and upload proceed
 /// concurrently, so a streamed source (e.g. a SQL VDI backup) is never staged.
+///
+/// `catalog` is an optional extra named blob (a file listing, or SQL chain
+/// metadata) delivered through a channel so it can be computed *after* the stream
+/// drains, when the source's metadata is known. It is uploaded just before the
+/// snapshot is finalised; if the sender drops without sending, no blob is added.
 #[allow(clippy::too_many_arguments)]
 pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     params: &SessionParams,
@@ -733,7 +745,7 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     dedup_with_previous: bool,
     reader: R,
     total_bytes: u64,
-    catalog: Option<(String, Vec<u8>)>,
+    catalog: Option<tokio::sync::oneshot::Receiver<(String, Vec<u8>)>>,
     crypt: Option<CryptConfig>,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Result<BackupStats> {
@@ -824,12 +836,16 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     // downloading the whole archive. Stored alongside the archive; not in the
     // manifest (the reader serves it by name regardless). Encrypted with the
     // chunks, since it contains file paths.
-    if let Some((name, content)) = &catalog {
-        let catalog_blob = match &crypt {
-            Some(c) => c.encrypt_blob(content)?,
-            None => blob::encode_uncompressed(content),
-        };
-        writer.upload_blob(name, &catalog_blob).await?;
+    if let Some(rx) = catalog {
+        // The blob may be produced after the stream (e.g. SQL metadata known only
+        // once BACKUP yields); a dropped sender just means no extra blob.
+        if let Ok((name, content)) = rx.await {
+            let catalog_blob = match &crypt {
+                Some(c) => c.encrypt_blob(&content)?,
+                None => blob::encode_uncompressed(&content),
+            };
+            writer.upload_blob(&name, &catalog_blob).await?;
+        }
     }
 
     let entry = FileEntry::with_crypt(archive_name, size, &csum, crypt.is_some());

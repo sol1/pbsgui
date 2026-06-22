@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Local, Timelike};
-use pbsgui_ipc::{Job, Reply, Schedule};
+use pbsgui_ipc::{Job, JobSource, Reply, Schedule, SqlProtection};
 use tokio::sync::mpsc;
 
-use crate::backup;
+use crate::backup::{self, SqlRun};
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
+use crate::sqlsched;
 
 /// Check every minute and run any due jobs.
 pub async fn run(store: Arc<JobStore>) {
@@ -21,19 +22,18 @@ pub async fn run(store: Arc<JobStore>) {
         tick.tick().await;
         let now = unix_now();
         for job in store.list() {
-            if !is_due(&job, now) {
-                continue;
+            if let Some(kind) = due_kind(&job, now) {
+                run_due(&store, job, kind).await;
             }
-            run_due(&store, job).await;
         }
     }
 }
 
-async fn run_due(store: &Arc<JobStore>, job: Job) {
+async fn run_due(store: &Arc<JobStore>, job: Job, kind: SqlRun) {
     tracing::info!(job = %job.name, "running scheduled job");
     let (tx, mut rx) = mpsc::channel::<Reply>(64);
     let job_for_run = job.clone();
-    let handle = tokio::spawn(async move { backup::run_job(&job_for_run, tx).await });
+    let handle = tokio::spawn(async move { backup::run_job_kind(&job_for_run, kind, tx).await });
 
     while let Some(reply) = rx.recv().await {
         if let Reply::Log { line } = reply {
@@ -41,20 +41,65 @@ async fn run_due(store: &Arc<JobStore>, job: Job) {
         }
     }
 
+    let run_at = unix_now();
     let status = match handle.await {
         Ok(Ok(_)) => "ok".to_string(),
         Ok(Err(e)) => e.to_string(),
         Err(e) => format!("task failed: {e}"),
     };
-    let _ = store.record_run(&job.id, unix_now(), status);
+    // Record the SQL full/log timer only on success, so a failed log keeps trying.
+    if status == "ok" && matches!(job.source, JobSource::Sql { .. }) {
+        match kind {
+            SqlRun::Full => sqlsched::record_full(&job.id, run_at),
+            SqlRun::Log => sqlsched::record_log(&job.id, run_at),
+        }
+    }
+    let _ = store.record_run(&job.id, run_at, status);
 }
 
-fn is_due(job: &Job, now: i64) -> bool {
-    match &job.schedule {
+/// Whether a job is due now and, for a SQL job, whether a full or log is due. A
+/// file job returns `Some(SqlRun::Full)` (the kind is ignored for non-SQL).
+fn due_kind(job: &Job, now: i64) -> Option<SqlRun> {
+    match &job.source {
+        JobSource::Sql { protection, .. } => sql_due_kind(&job.id, protection, now),
+        _ => schedule_due(&job.schedule, job.last_run, now).then_some(SqlRun::Full),
+    }
+}
+
+/// For a SQL job, decide whether a full (chain-anchoring) or a log backup is due.
+/// Full takes precedence; logs only run once a full has anchored the chain.
+fn sql_due_kind(job_id: &str, protection: &SqlProtection, now: i64) -> Option<SqlRun> {
+    match protection {
+        SqlProtection::PointInTime {
+            full,
+            log_interval_minutes,
+        } => {
+            let last_full = sqlsched::last_full(job_id);
+            if schedule_due(full, last_full, now) {
+                return Some(SqlRun::Full);
+            }
+            last_full?; // logs require an anchoring full first
+            let interval = (*log_interval_minutes as i64).max(1) * 60;
+            let baseline = sqlsched::last_log(job_id).or(last_full);
+            match baseline {
+                Some(b) if now - b >= interval => Some(SqlRun::Log),
+                _ => None,
+            }
+        }
+        SqlProtection::DailyRestorePoints { schedule }
+        | SqlProtection::SecondaryCopy { schedule } => {
+            schedule_due(schedule, sqlsched::last_full(job_id), now).then_some(SqlRun::Full)
+        }
+    }
+}
+
+/// Whether a schedule is due, given the last run time.
+fn schedule_due(schedule: &Schedule, last_run: Option<i64>, now: i64) -> bool {
+    match schedule {
         Schedule::Manual => false,
         Schedule::Interval { minutes } => {
             let interval = (*minutes as i64).max(1) * 60;
-            match job.last_run {
+            match last_run {
                 None => true,
                 Some(last) => now - last >= interval,
             }
@@ -62,7 +107,7 @@ fn is_due(job: &Job, now: i64) -> bool {
         Schedule::Daily { hour, minute } => {
             let scheduled = today_scheduled_unix(*hour, *minute);
             now >= scheduled
-                && match job.last_run {
+                && match last_run {
                     None => true,
                     Some(last) => last < scheduled,
                 }
@@ -83,41 +128,32 @@ fn today_scheduled_unix(hour: u8, minute: u8) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pbsgui_ipc::{JobDestination, JobSource};
-
-    fn job_with(schedule: Schedule, last_run: Option<i64>) -> Job {
-        Job {
-            id: "j".into(),
-            name: "j".into(),
-            source: JobSource::Files {
-                sources: vec!["/data".into()],
-                excludes: vec![],
-                change_detection: false,
-            },
-            destination: JobDestination::Pbs {
-                server_id: "s".into(),
-                backup_id: "host".into(),
-            },
-            schedule,
-            pre_script: None,
-            post_script: None,
-            last_run,
-            last_status: None,
-            encrypted: false,
-        }
-    }
 
     #[test]
     fn manual_is_never_due() {
-        assert!(!is_due(&job_with(Schedule::Manual, None), 1_000_000));
+        assert!(!schedule_due(&Schedule::Manual, None, 1_000_000));
     }
 
     #[test]
     fn interval_due_when_elapsed() {
         let now = 1_000_000;
         let sched = Schedule::Interval { minutes: 30 };
-        assert!(is_due(&job_with(sched.clone(), None), now)); // never run
-        assert!(is_due(&job_with(sched.clone(), Some(now - 31 * 60)), now));
-        assert!(!is_due(&job_with(sched, Some(now - 10 * 60)), now));
+        assert!(schedule_due(&sched, None, now)); // never run
+        assert!(schedule_due(&sched, Some(now - 31 * 60), now));
+        assert!(!schedule_due(&sched, Some(now - 10 * 60), now));
+    }
+
+    #[test]
+    fn sql_point_in_time_runs_full_then_logs() {
+        // No full yet -> a full is due (interval schedule), not a log.
+        let p = SqlProtection::PointInTime {
+            full: Schedule::Interval { minutes: 1440 },
+            log_interval_minutes: 15,
+        };
+        // With no stored state, the full interval has "never run" -> full due.
+        assert!(matches!(
+            sql_due_kind("nope-no-state", &p, 1_000_000),
+            Some(SqlRun::Full)
+        ));
     }
 }

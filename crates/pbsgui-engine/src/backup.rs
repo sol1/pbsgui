@@ -5,7 +5,9 @@
 
 use pbs_client::session::{backup_dynamic_file_with_progress, BackupStats, SessionParams};
 use pbs_client::{CryptConfig, Repository};
-use pbsgui_ipc::{FileInfo, Job, JobDestination, JobSource, Reply, SqlAuth, SqlBackupType};
+use pbsgui_ipc::{
+    FileInfo, Job, JobDestination, JobSource, Reply, SqlAuth, SqlBackupType, SqlProtection,
+};
 use tokio::sync::mpsc::Sender;
 
 use crate::config::unix_now;
@@ -14,10 +16,43 @@ use crate::{archive, changedet, connstore, enckey, notify, scripts, secrets};
 /// Archive name for a job's filesystem backup (a tar in a dynamic index).
 const ARCHIVE_NAME: &str = "files.didx";
 
-/// Run a job, streaming `Reply::Log`/`Reply::Progress` to `events`. The post-job
-/// script (if any) always runs with the final status in its environment.
+/// Which backup a SQL job runs on a given trigger. A point-in-time job alternates
+/// full (chain-anchoring) and log backups; other plans only ever run a full. A
+/// manual "Run" always takes a full.
+#[derive(Clone, Copy, Debug)]
+pub enum SqlRun {
+    Full,
+    Log,
+}
+
+/// Map a protection plan and the run trigger to the concrete SQL backup type and
+/// copy-only flag. Only point-in-time alternates full/log; the others are always
+/// full (non-copy-only for primary plans, copy-only for the secondary copy).
+fn sql_backup_spec(protection: &SqlProtection, run: SqlRun) -> (SqlBackupType, bool) {
+    match protection {
+        SqlProtection::PointInTime { .. } => match run {
+            SqlRun::Log => (SqlBackupType::Log, false),
+            SqlRun::Full => (SqlBackupType::Full, false),
+        },
+        SqlProtection::DailyRestorePoints { .. } => (SqlBackupType::Full, false),
+        SqlProtection::SecondaryCopy { .. } => (SqlBackupType::Full, true),
+    }
+}
+
+/// Run a job (manual trigger: SQL jobs take a full). See [`run_job_kind`].
 pub async fn run_job(job: &Job, events: Sender<Reply>) -> anyhow::Result<String> {
-    let outcome = run_inner(job, &events).await;
+    run_job_kind(job, SqlRun::Full, events).await
+}
+
+/// Run a job, streaming `Reply::Log`/`Reply::Progress` to `events`. `sql_run`
+/// selects full vs log for a SQL point-in-time job (ignored otherwise). The
+/// post-job script (if any) always runs with the final status in its environment.
+pub async fn run_job_kind(
+    job: &Job,
+    sql_run: SqlRun,
+    events: Sender<Reply>,
+) -> anyhow::Result<String> {
+    let outcome = run_inner(job, sql_run, &events).await;
 
     if let Some(post) = script_of(&job.post_script) {
         let mut env = base_env(job);
@@ -75,6 +110,7 @@ async fn notify_outcome(job: &Job, outcome: &anyhow::Result<(String, Option<Back
 
 async fn run_inner(
     job: &Job,
+    sql_run: SqlRun,
     events: &Sender<Reply>,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
     // Pre-job script: a non-zero exit aborts the job.
@@ -107,7 +143,7 @@ async fn run_inner(
         }
     }
 
-    let (summary, stats) = do_backup(job, events).await?;
+    let (summary, stats) = do_backup(job, sql_run, events).await?;
 
     // Record the fingerprint only after a successful backup.
     if let Some(fp) = &fingerprint {
@@ -124,6 +160,7 @@ async fn run_inner(
 
 async fn do_backup(
     job: &Job,
+    sql_run: SqlRun,
     events: &Sender<Reply>,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
     match (&job.source, &job.destination) {
@@ -150,8 +187,7 @@ async fn do_backup(
             JobSource::Sql {
                 connection_id,
                 databases,
-                backup_type,
-                copy_only,
+                protection,
             },
             JobDestination::Pbs {
                 server_id,
@@ -159,11 +195,12 @@ async fn do_backup(
             },
         ) => {
             let crypt = enckey::for_job(job)?;
+            let (backup_type, copy_only) = sql_backup_spec(protection, sql_run);
             backup_sql_to_pbs(
                 connection_id,
                 databases,
-                *backup_type,
-                *copy_only,
+                backup_type,
+                copy_only,
                 server_id,
                 backup_id,
                 crypt,
@@ -175,11 +212,10 @@ async fn do_backup(
             JobSource::Sql {
                 connection_id,
                 databases,
-                backup_type,
                 ..
             },
             JobDestination::Folder { path },
-        ) => backup_sql_to_folder(connection_id, databases, *backup_type, path, events).await,
+        ) => backup_sql_to_folder(connection_id, databases, path, events).await,
         (JobSource::Files { .. }, JobDestination::Folder { .. }) => {
             anyhow::bail!("backing up files to a folder is not supported yet")
         }
@@ -315,11 +351,10 @@ async fn backup_sql_to_pbs(
 async fn backup_sql_to_folder(
     connection_id: &str,
     databases: &[String],
-    backup_type: SqlBackupType,
     path: &str,
     events: &Sender<Reply>,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
-    require_full(backup_type)?;
+    // Folder backups are always full native `.bak` files.
     if databases.is_empty() {
         anyhow::bail!("no databases selected");
     }
@@ -352,13 +387,6 @@ async fn backup_sql_to_folder(
         databases.len()
     );
     Ok((summary, None))
-}
-
-fn require_full(backup_type: SqlBackupType) -> anyhow::Result<()> {
-    if backup_type != SqlBackupType::Full {
-        anyhow::bail!("only full SQL Server backups are supported yet");
-    }
-    Ok(())
 }
 
 /// PBS SQL backups support full and log (for transaction-log management);

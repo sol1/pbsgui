@@ -30,6 +30,7 @@ mod secrets;
 #[cfg(windows)]
 mod service;
 mod sql;
+mod sqlsched;
 
 use std::sync::Arc;
 
