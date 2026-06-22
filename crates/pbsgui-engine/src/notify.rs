@@ -28,6 +28,7 @@ fn default_settings() -> NotificationSettings {
     NotificationSettings {
         on_success: false,
         on_failure: true,
+        on_stall: true,
         email: EmailSettings {
             enabled: false,
             host: String::new(),
@@ -150,6 +151,43 @@ pub async fn send_test(channel: NotifyChannel) -> anyhow::Result<()> {
     match channel {
         NotifyChannel::Email => send_email(&settings.email, &subject, &body).await,
         NotifyChannel::Webhook => send_webhook(&subject, &outcome).await,
+    }
+}
+
+/// Warn that a point-in-time backup chain has stalled (no snapshot has reached
+/// its PBS group within the expected window). Honors `on_stall` and the enabled
+/// channels. Self-contained: no external service is contacted.
+pub async fn backup_stalled(job_name: &str, database: &str, hours: i64) {
+    let settings = load();
+    if !settings.on_stall {
+        return;
+    }
+    let subject = format!("[pbsgui] {job_name}: backup chain stalled");
+    let body = format!(
+        "No backup has reached the chain for database {database} in about {hours}h. \
+Point-in-time recovery is falling behind and the transaction log may be growing. \
+Check that pbsgui is running on the active (Always On preferred) replica and that \
+SQL Server is reachable."
+    );
+    if settings.email.enabled {
+        if let Err(e) = send_email(&settings.email, &subject, &body).await {
+            tracing::warn!("stall email notification failed: {e:#}");
+        }
+    }
+    if settings.webhook.enabled {
+        let dbs = [database.to_string()];
+        let outcome = JobOutcome {
+            job_name,
+            kind: "point-in-time backup",
+            databases: &dbs,
+            success: false,
+            status: "stalled",
+            message: &body,
+            stats: None,
+        };
+        if let Err(e) = send_webhook(&subject, &outcome).await {
+            tracing::warn!("stall webhook notification failed: {e:#}");
+        }
     }
 }
 

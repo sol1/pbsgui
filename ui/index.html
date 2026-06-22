@@ -120,6 +120,9 @@
             </label>
             <label>Backup id (snapshot group)
               <input id="f-backup-id" type="text" placeholder="auto from name" />
+              <span class="help muted">Snapshots are grouped under this id. For Always On, give
+                every replica's job the same id (pbsgui defaults it to the Availability Group name)
+                so all nodes share one continuous backup chain.</span>
             </label>
             <div class="enc-panel">
               <label class="enc-toggle">
@@ -308,6 +311,11 @@
           <label class="enc-toggle">
             <input id="n-on-success" type="checkbox" />
             <span>Notify when a job succeeds</span>
+          </label>
+          <label class="enc-toggle">
+            <input id="n-on-stall" type="checkbox" />
+            <span>Warn when a point-in-time backup chain stalls (no recent backup; the
+              transaction log may be growing). Works across Always On replicas.</span>
           </label>
 
           <h2>Email (SMTP)</h2>

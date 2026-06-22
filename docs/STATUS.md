@@ -62,8 +62,10 @@ CI on Windows and exercised manually.
   an Always On database is backed up only on the preferred backup replica
   (`sys.fn_hadr_backup_is_preferred_replica`), forcing a copy-only full on a
   secondary; a Failover Cluster Instance is skipped on whichever node is not the
-  active one. System databases (master/model/msdb) are offered for backup
-  (tempdb is hidden); the wizard explains the restore caveats.
+  active one. For an Always On database the snapshot group defaults to the
+  Availability Group name, so every replica's job lands on one continuous chain.
+  System databases (master/model/msdb) are offered for backup (tempdb is hidden);
+  the wizard explains the restore caveats.
 - **SQL Server point-in-time restore.** Restore a database to any moment within
   the retained window: pbsgui picks the covering full plus the log chain, restores
   the full `WITH NORECOVERY`, replays the logs `WITH STOPAT`, and recovers at the
@@ -81,7 +83,10 @@ CI on Windows and exercised manually.
 - **Notifications.** Global settings notify when a job succeeds and/or fails,
   through email (SMTP, with STARTTLS/TLS) and a Slack-compatible webhook. Each
   channel has a Test button; the SMTP password and webhook URL are stored in the
-  credential store. The message carries the job name, status, and backup metrics.
+  credential store. The message carries the job name, backup type, databases, and
+  metrics. A point-in-time chain that stops advancing is also warned about (on by
+  default), detected from the shared PBS group so it works across Always On
+  replicas with no link between the pbsgui instances.
 
 ## In progress
 

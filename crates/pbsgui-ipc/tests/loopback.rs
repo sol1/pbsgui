@@ -167,6 +167,7 @@ fn sample_notifications() -> pbsgui_ipc::NotificationSettings {
     NotificationSettings {
         on_success: false,
         on_failure: true,
+        on_stall: true,
         email: EmailSettings {
             enabled: false,
             host: String::new(),

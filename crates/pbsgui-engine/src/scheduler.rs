@@ -18,6 +18,10 @@ use crate::sqlsched;
 /// Check every minute and run any due jobs.
 pub async fn run(store: Arc<JobStore>) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
+    let mut last_stall_check = 0i64;
+    // Per (job, database) last alert time, to avoid repeating a stall warning.
+    let mut alerted: std::collections::HashMap<(String, String), i64> =
+        std::collections::HashMap::new();
     loop {
         tick.tick().await;
         let now = unix_now();
@@ -26,6 +30,31 @@ pub async fn run(store: Arc<JobStore>) {
                 run_due(&store, job, kind).await;
             }
         }
+        // Check for stalled point-in-time chains roughly every 15 minutes.
+        if now - last_stall_check >= 15 * 60 {
+            last_stall_check = now;
+            check_stalls(&store, now, &mut alerted).await;
+        }
+    }
+}
+
+/// Warn about stalled point-in-time chains, re-warning at most every 6 hours
+/// while a chain stays stalled.
+async fn check_stalls(
+    store: &Arc<JobStore>,
+    now: i64,
+    alerted: &mut std::collections::HashMap<(String, String), i64>,
+) {
+    const REALERT_SECS: i64 = 6 * 3600;
+    for stall in crate::handler::check_stalls(store, now).await {
+        let key = (stall.job_id.clone(), stall.database.clone());
+        if alerted.get(&key).is_some_and(|t| now - t < REALERT_SECS) {
+            continue;
+        }
+        alerted.insert(key, now);
+        let hours = (stall.age_secs / 3600).max(1);
+        tracing::warn!(job = %stall.job_name, database = %stall.database, hours, "backup chain stalled");
+        crate::notify::backup_stalled(&stall.job_name, &stall.database, hours).await;
     }
 }
 

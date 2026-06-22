@@ -232,6 +232,12 @@ pub struct NotificationSettings {
     /// Notify when a job fails.
     #[serde(default = "default_true")]
     pub on_failure: bool,
+    /// Warn when a point-in-time backup chain stalls (no snapshot has reached its
+    /// PBS group within the expected window, so the log may be growing). On by
+    /// default. Detected from the shared PBS group, so it works across AG replicas
+    /// without any connection between the pbsgui instances.
+    #[serde(default = "default_true")]
+    pub on_stall: bool,
     pub email: EmailSettings,
     pub webhook: WebhookSettings,
 }

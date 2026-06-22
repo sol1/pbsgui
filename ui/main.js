@@ -14,6 +14,7 @@ let sqlConnCache = []; // saved SQL connections, for the wizard's source step
 let sqlDbModels = {}; // database name -> recovery model, from the last probe (for guidance)
 let sqlDbAg = {}; // database name -> in an Always On availability group (from the last probe)
 let sqlDbSystem = {}; // database name -> system database (master/model/msdb), from the last probe
+let sqlAgName = null; // Availability Group name from the last probe, or null if standalone
 let wizJobId = null; // stable id for the job being edited (used to key its encryption key)
 let wizKeySet = false; // does the job being edited have an encryption key stored?
 
@@ -377,9 +378,15 @@ function renderSqlGuidance() {
     host.append(row);
 
     if (sqlDbAg[name]) {
+      // Default the snapshot group to the AG name so every replica's job lands on
+      // the same group (one continuous chain) with no coordination between nodes.
+      if (sqlAgName && !backupIdTouched) el("f-backup-id").value = slug(sqlAgName);
+      const grp = sqlAgName
+        ? ` We set the snapshot group to the Availability Group name "${sqlAgName}" so every replica's job writes one continuous chain; keep this backup id identical on each node.`
+        : "";
       const ag = document.createElement("div");
       ag.className = "check-row check-warn";
-      ag.textContent = `${name} is in an Always On group. Install pbsgui on each replica and point each at the same backup group; it backs up automatically on whichever replica SQL Server prefers (a copy-only full on a secondary). No connection between the pbsgui instances is needed.`;
+      ag.textContent = `${name} is in an Always On group. Install pbsgui on each replica; it backs up automatically on whichever replica SQL Server prefers (a copy-only full on a secondary), with no connection between the pbsgui instances.${grp}`;
       host.append(ag);
     }
 
@@ -509,6 +516,8 @@ async function loadDatabasesForConn() {
     });
     sqlDbModels = {};
     sqlDbAg = {};
+    sqlAgName =
+      probe.topology?.topology === "availability_group" ? probe.topology.group_name : null;
     for (const d of probe.databases) {
       sqlDbModels[d.name] = d.recovery_model;
       sqlDbAg[d.name] = !!d.in_availability_group;
@@ -573,6 +582,7 @@ async function openEditor(job) {
   el("f-change-detection").checked = source.type === "files" ? !!source.change_detection : false;
   sqlDbModels = {};
   sqlDbAg = {};
+  sqlAgName = null;
   if (source.type === "sql") {
     renderDbCheckboxes(source.databases || [], source.databases || []);
   } else {
@@ -1341,6 +1351,7 @@ async function loadNotifications() {
   const s = view.settings;
   el("n-on-failure").checked = !!s.on_failure;
   el("n-on-success").checked = !!s.on_success;
+  el("n-on-stall").checked = s.on_stall !== false; // default on
   el("n-email-enabled").checked = !!s.email.enabled;
   el("n-email-host").value = s.email.host || "";
   el("n-email-port").value = s.email.port || 587;
@@ -1364,6 +1375,7 @@ function gatherNotifications() {
   return {
     on_failure: el("n-on-failure").checked,
     on_success: el("n-on-success").checked,
+    on_stall: el("n-on-stall").checked,
     email: {
       enabled: el("n-email-enabled").checked,
       host: el("n-email-host").value.trim(),

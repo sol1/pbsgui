@@ -7,8 +7,8 @@ use pbs_client::api::ApiClient;
 use pbs_client::session::{ReaderClient, SessionParams};
 use pbs_client::{CryptConfig, Repository};
 use pbsgui_ipc::{
-    FileInfo, Reply, Request, Responder, SnapshotInfo, SqlAuth, SqlBackupType, SqlRestorePoint,
-    SqlRestoreWindow,
+    FileInfo, JobSource, Reply, Request, Responder, SnapshotInfo, SqlAuth, SqlBackupType,
+    SqlProtection, SqlRestorePoint, SqlRestoreWindow,
 };
 use tokio::sync::mpsc;
 
@@ -565,6 +565,83 @@ async fn list_sql_snapshots(
             size: s.size,
         })
         .collect())
+}
+
+/// A point-in-time job whose backup chain has not advanced within its window.
+pub(crate) struct Stall {
+    pub job_id: String,
+    pub job_name: String,
+    pub database: String,
+    pub age_secs: i64,
+}
+
+/// The newest snapshot time across a database's full and log groups, or `None`
+/// when neither group has any snapshot yet.
+async fn latest_group_time(api: &ApiClient, ctx: &SqlJobPbs, database: &str) -> Option<i64> {
+    let mut latest: Option<i64> = None;
+    for kind in [SqlBackupType::Full, SqlBackupType::Log] {
+        let (group, _archive) = backup::sql_group_and_archive(&ctx.backup_id, database, kind);
+        if let Ok(snaps) = api
+            .list_snapshots(
+                &ctx.repo.datastore,
+                ctx.repo.namespace.as_deref(),
+                SQL_BACKUP_TYPE,
+                &group,
+            )
+            .await
+        {
+            if let Some(m) = snaps.iter().map(|s| s.backup_time).max() {
+                latest = Some(latest.map_or(m, |l| l.max(m)));
+            }
+        }
+    }
+    latest
+}
+
+/// Find point-in-time jobs whose chain has stalled: the latest snapshot in the
+/// shared PBS group is older than a few log intervals. Reading the shared group
+/// is what makes this work across Always On replicas with no link between the
+/// pbsgui instances. A job that has never produced a snapshot is not flagged.
+pub(crate) async fn check_stalls(store: &JobStore, now: i64) -> Vec<Stall> {
+    let mut out = Vec::new();
+    for job in store.list() {
+        let (databases, log_interval) = match &job.source {
+            JobSource::Sql {
+                databases,
+                protection:
+                    SqlProtection::PointInTime {
+                        log_interval_minutes,
+                        ..
+                    },
+                ..
+            } => (databases.clone(), *log_interval_minutes as i64),
+            _ => continue,
+        };
+        // Allow several missed log intervals before warning (floor 30 minutes).
+        let grace = (log_interval * 60 * 4).max(1800);
+        let ctx = match sql_job_pbs(store, &job.id) {
+            Ok(ctx) => ctx,
+            Err(_) => continue, // folder destination, missing server, etc.
+        };
+        let api = match ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)
+        {
+            Ok(api) => api,
+            Err(_) => continue,
+        };
+        for db in &databases {
+            if let Some(latest) = latest_group_time(&api, &ctx, db).await {
+                if now - latest > grace {
+                    out.push(Stall {
+                        job_id: job.id.clone(),
+                        job_name: job.name.clone(),
+                        database: db.clone(),
+                        age_secs: now - latest,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Report the restore options for one database: the full restore points and, if
