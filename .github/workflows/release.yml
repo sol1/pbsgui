@@ -2,6 +2,13 @@ name: Release
 
 # Build the Windows installer and publish a GitHub Release when a version tag is
 # pushed (for example `v0.0.1`). The tag drives the version stamped into the app.
+#
+# Code signing is OPTIONAL and self-enabling: when the DigiCert KeyLocker secrets
+# are configured the inner engine exe, the app exe, and the installer are signed;
+# otherwise the build proceeds unsigned, so releases keep working before the
+# certificate is provisioned. To enable signing, set:
+#   secrets: SM_API_KEY, SM_CLIENT_CERT_FILE_B64, SM_CLIENT_CERT_PASSWORD
+#   vars:    SM_HOST, SM_CODE_SIGNING_CERT_SHA1_HASH
 on:
   push:
     tags: ["v*"]
@@ -16,6 +23,12 @@ jobs:
   release-windows:
     name: Build and publish installer (Windows)
     runs-on: windows-latest
+    env:
+      # DigiCert KeyLocker (empty until the secrets/vars are set -> unsigned build).
+      SM_HOST: ${{ vars.SM_HOST }}
+      SM_API_KEY: ${{ secrets.SM_API_KEY }}
+      SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+      SM_CODE_SIGNING_CERT_SHA1_HASH: ${{ vars.SM_CODE_SIGNING_CERT_SHA1_HASH }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -24,6 +37,34 @@ jobs:
         uses: ilammy/setup-nasm@v1
       - name: Install Tauri CLI
         run: npm install -g @tauri-apps/cli@^2
+
+      - name: Detect code-signing availability
+        id: signing
+        shell: bash
+        run: |
+          if [ -n "$SM_API_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Code signing: ENABLED (DigiCert secrets present)."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Code signing: disabled (DigiCert secrets not set); building unsigned."
+          fi
+
+      - name: Set up DigiCert KeyLocker
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          # Decode the client-auth cert (mTLS to Software Trust Manager).
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.p12", [Convert]::FromBase64String("${{ secrets.SM_CLIENT_CERT_FILE_B64 }}"))
+          "SM_CLIENT_CERT_FILE=$env:RUNNER_TEMP\cert.p12" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          # Install the KeyLocker client tools (smctl + KSP) and sync the cert into
+          # the Windows store so signtool can sign through the cloud key.
+          curl.exe -X GET "https://one.digicert.com/signingmanager/api-ui/v1/releases/Keylockertools-windows-x64.msi/download" -H "x-api-key:$env:SM_API_KEY" -o "$env:RUNNER_TEMP\keylockertools.msi"
+          Start-Process msiexec.exe -ArgumentList "/i `"$env:RUNNER_TEMP\keylockertools.msi`" /quiet /qn" -Wait
+          $ssm = "C:\Program Files\DigiCert\DigiCert KeyLocker Tools"
+          "$ssm" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+          & "$ssm\smctl.exe" windows certsync
+
       - name: Compute version from the tag
         shell: pwsh
         run: |
@@ -32,20 +73,37 @@ jobs:
           "PBSGUI_VERSION=$ver"        | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PBSGUI_BUILD=$ver ($short)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           '{"version":"' + $ver + '"}' | Out-File -FilePath build-version.json -Encoding ascii
+
       - name: Build engine
         run: cargo build -p pbsgui-engine --release
+
+      - name: Sign engine
+        # Tauri signs the app exe and installer via signCommand, but the sidecar
+        # engine exe is signed explicitly here before it is staged.
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        working-directory: src-tauri
+        run: ./sign-windows.ps1 ../target/release/pbsgui-engine.exe
+
       - name: Stage engine as a Tauri sidecar
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item target/release/pbsgui-engine.exe `
             src-tauri/binaries/pbsgui-engine-x86_64-pc-windows-msvc.exe
+
       - name: Build app and NSIS installer
         # The windows config adds the engine as a bundled sidecar; the base config
-        # stays free of it so `tauri dev` does not require the staged binary.
-        run: tauri build --config src-tauri/engine-sidecar.conf.json --config build-version.json
-      # Signing is deferred (Azure Trusted Signing is unavailable to AU entities);
-      # the installer is unsigned, so SmartScreen warns until that changes.
+        # stays free of it so `tauri dev` does not require the staged binary. The
+        # signing config (signCommand) is appended only when signing is enabled.
+        shell: pwsh
+        run: |
+          $configs = @('--config', 'src-tauri/engine-sidecar.conf.json', '--config', 'build-version.json')
+          if ('${{ steps.signing.outputs.enabled }}' -eq 'true') {
+            $configs += @('--config', 'src-tauri/signing.conf.json')
+          }
+          tauri build @configs
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
