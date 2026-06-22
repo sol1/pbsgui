@@ -347,7 +347,8 @@ async fn backup_sql_to_pbs(
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     let mut backed_up = 0u32;
     for db in databases {
-        if !crate::sql::probe::should_back_up(&mut gate, db).await? {
+        let decision = crate::sql::probe::backup_decision(&mut gate, db).await?;
+        if !decision.back_up {
             let _ = events
                 .send(Reply::Log {
                     line: format!(
@@ -356,6 +357,16 @@ async fn backup_sql_to_pbs(
                 })
                 .await;
             continue;
+        }
+        // A full on an AG secondary must be copy-only (SQL Server rule); logs are
+        // unaffected. A copy-only full plus the log chain still restores fine.
+        let db_copy_only = copy_only || (decision.secondary && backup_type == SqlBackupType::Full);
+        if decision.secondary {
+            let _ = events
+                .send(Reply::Log {
+                    line: format!("[{db}] is an Always On secondary; using a copy-only full"),
+                })
+                .await;
         }
         let (group, archive) = sql_group_and_archive(backup_id, db, backup_type);
         // PBS only allows the backup types vm/ct/host; SQL backups use "host"
@@ -377,7 +388,7 @@ async fn backup_sql_to_pbs(
             &archive,
             crypt.clone(),
             backup_type,
-            copy_only,
+            db_copy_only,
         )
         .await?;
         chunks += stats.chunks;

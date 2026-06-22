@@ -12,6 +12,7 @@ let backupIdTouched = false; // has the user edited the Backup id directly?
 let wizStep = 0; // current job-wizard step
 let sqlConnCache = []; // saved SQL connections, for the wizard's source step
 let sqlDbModels = {}; // database name -> recovery model, from the last probe (for guidance)
+let sqlDbAg = {}; // database name -> in an Always On availability group (from the last probe)
 let wizJobId = null; // stable id for the job being edited (used to key its encryption key)
 let wizKeySet = false; // does the job being edited have an encryption key stored?
 
@@ -259,6 +260,13 @@ function renderSqlGuidance() {
     row.className = "check-row check-" + level;
     row.textContent = text;
     host.append(row);
+
+    if (sqlDbAg[name]) {
+      const ag = document.createElement("div");
+      ag.className = "check-row check-warn";
+      ag.textContent = `${name} is in an Always On group. Install pbsgui on each replica and point each at the same backup group; it backs up automatically on whichever replica SQL Server prefers (a copy-only full on a secondary). No connection between the pbsgui instances is needed.`;
+      host.append(ag);
+    }
   }
 }
 
@@ -378,7 +386,11 @@ async function loadDatabasesForConn() {
       password: null,
     });
     sqlDbModels = {};
-    for (const d of probe.databases) sqlDbModels[d.name] = d.recovery_model;
+    sqlDbAg = {};
+    for (const d of probe.databases) {
+      sqlDbModels[d.name] = d.recovery_model;
+      sqlDbAg[d.name] = !!d.in_availability_group;
+    }
     renderDbCheckboxes(
       probe.databases.map((d) => d.name),
       checked,
@@ -437,6 +449,7 @@ async function openEditor(job) {
   el("f-excludes").value = (source.type === "files" ? source.excludes || [] : []).join("\n");
   el("f-change-detection").checked = source.type === "files" ? !!source.change_detection : false;
   sqlDbModels = {};
+  sqlDbAg = {};
   if (source.type === "sql") {
     renderDbCheckboxes(source.databases || [], source.databases || []);
   } else {

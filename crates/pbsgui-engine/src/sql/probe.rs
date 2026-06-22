@@ -174,32 +174,51 @@ pub(crate) async fn connect(
         .context("SQL Server login failed")
 }
 
-/// Whether this replica should run scheduled backups for `database`: always for a
-/// standalone database, and for an Always On Availability Group database only when
-/// this replica is the preferred backup replica.
+/// Whether (and how) this replica should back up a database in an Always On group.
+pub(crate) struct BackupDecision {
+    /// This replica should run the backup (the preferred replica, or standalone).
+    pub back_up: bool,
+    /// This is a readable AG secondary, where SQL Server only permits copy-only
+    /// full backups, so a full here must be forced copy-only.
+    pub secondary: bool,
+}
+
+/// Decide whether this replica should run scheduled backups for `database`:
+/// always for a standalone database, and for an Always On database only when this
+/// replica is the preferred backup replica.
 ///
 /// This is how pbsgui coordinates AG backups across nodes WITHOUT any
 /// pbsgui-to-pbsgui connection: install the engine on every replica, and SQL
 /// Server itself answers "should I back up?" consistently cluster-wide via
 /// `sys.fn_hadr_backup_is_preferred_replica`. Exactly one node proceeds, and on
-/// failover the new preferred node takes over automatically. No extra ports.
-pub(crate) async fn should_back_up(client: &mut SqlClient, database: &str) -> anyhow::Result<bool> {
+/// failover the new preferred node takes over automatically. No extra ports. When
+/// the preferred replica is a secondary (the default "prefer secondary"), a full
+/// must be copy-only.
+pub(crate) async fn backup_decision(
+    client: &mut SqlClient,
+    database: &str,
+) -> anyhow::Result<BackupDecision> {
     let db = database.replace('\'', "''");
     let query = format!(
-        "SELECT CAST(CASE \
-           WHEN d.replica_id IS NULL THEN 1 \
-           WHEN sys.fn_hadr_backup_is_preferred_replica(d.name) = 1 THEN 1 \
-           ELSE 0 END AS int) \
+        "SELECT \
+           CAST(CASE \
+             WHEN d.replica_id IS NULL THEN 1 \
+             WHEN sys.fn_hadr_backup_is_preferred_replica(d.name) = 1 THEN 1 \
+             ELSE 0 END AS int) AS go, \
+           CAST(CASE \
+             WHEN d.replica_id IS NOT NULL \
+               AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_ONLY' THEN 1 \
+             ELSE 0 END AS int) AS secondary \
          FROM sys.databases d WHERE d.name = N'{db}'"
     );
-    let go = client
-        .simple_query(query)
-        .await?
-        .into_row()
-        .await?
-        .and_then(|r| r.get::<i32, _>(0));
-    // Proceed unless SQL explicitly says this is not the preferred replica.
-    Ok(go != Some(0))
+    let row = client.simple_query(query).await?.into_row().await?;
+    let go = row.as_ref().and_then(|r| r.get::<i32, _>(0));
+    let secondary = row.as_ref().and_then(|r| r.get::<i32, _>(1)) == Some(1);
+    Ok(BackupDecision {
+        // Proceed unless SQL explicitly says this is not the preferred replica.
+        back_up: go != Some(0),
+        secondary,
+    })
 }
 
 fn auth_method(auth: &SqlAuth, password: Option<&str>) -> anyhow::Result<AuthMethod> {
