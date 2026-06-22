@@ -356,7 +356,16 @@ async fn backup_sql_to_pbs(
         "backed up {} database(s) to PBS: {bytes} bytes, {chunks} chunks, {uploaded} uploaded, {reused} reused",
         databases.len()
     );
-    Ok((summary, None))
+    // Return the aggregated stats so the run reports "ok" (not "no-change", which
+    // only the change-detection skip should give) and notifications carry metrics.
+    let stats = BackupStats {
+        chunks,
+        reused,
+        uploaded,
+        bytes,
+        csum: [0u8; 32],
+    };
+    Ok((summary, Some(stats)))
 }
 
 async fn backup_sql_to_folder(
@@ -397,7 +406,14 @@ async fn backup_sql_to_folder(
         "backed up {} database(s) to {path}: {total} bytes",
         databases.len()
     );
-    Ok((summary, None))
+    let stats = BackupStats {
+        chunks: 0,
+        reused: 0,
+        uploaded: 0,
+        bytes: total,
+        csum: [0u8; 32],
+    };
+    Ok((summary, Some(stats)))
 }
 
 /// PBS SQL backups support full and log (for transaction-log management);
