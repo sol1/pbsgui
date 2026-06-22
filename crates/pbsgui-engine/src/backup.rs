@@ -94,12 +94,16 @@ pub async fn run_job_kind(
         }
     }
 
-    notify_outcome(job, &outcome).await;
+    notify_outcome(job, sql_run, &outcome).await;
     outcome.map(|(message, _)| message)
 }
 
 /// Fire notifications for a finished job (best-effort; never affects the result).
-async fn notify_outcome(job: &Job, outcome: &anyhow::Result<(String, Option<BackupStats>)>) {
+async fn notify_outcome(
+    job: &Job,
+    sql_run: SqlRun,
+    outcome: &anyhow::Result<(String, Option<BackupStats>)>,
+) {
     let (success, status, message, stats) = match outcome {
         Ok((message, stats)) => (
             true,
@@ -109,8 +113,21 @@ async fn notify_outcome(job: &Job, outcome: &anyhow::Result<(String, Option<Back
         ),
         Err(e) => (false, "error", format!("{e:#}"), None),
     };
+    // Describe what ran so notifications name the backup type and databases.
+    let (kind, databases): (&str, &[String]) = match &job.source {
+        JobSource::Sql { databases, .. } => (
+            match sql_run {
+                SqlRun::Full => "full backup",
+                SqlRun::Log => "log backup",
+            },
+            databases,
+        ),
+        JobSource::Files { .. } => ("file backup", &[]),
+    };
     notify::job_finished(notify::JobOutcome {
         job_name: &job.name,
+        kind,
+        databases,
         success,
         status,
         message: &message,

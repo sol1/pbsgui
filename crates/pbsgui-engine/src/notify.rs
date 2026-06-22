@@ -82,11 +82,26 @@ pub fn set_webhook_url(url: Option<&str>) -> anyhow::Result<()> {
 /// One job's outcome, the input to a notification.
 pub struct JobOutcome<'a> {
     pub job_name: &'a str,
+    /// What ran, e.g. "full backup", "log backup", "file backup".
+    pub kind: &'a str,
+    /// Databases backed up (empty for a file job).
+    pub databases: &'a [String],
     pub success: bool,
     /// "ok", "no-change", or "error".
     pub status: &'a str,
     pub message: &'a str,
     pub stats: Option<&'a BackupStats>,
+}
+
+/// A one-line headline, e.g. "nightly: log backup of Sales, HR succeeded".
+fn headline(o: &JobOutcome<'_>) -> String {
+    let verb = if o.success { "succeeded" } else { "FAILED" };
+    let of = if o.databases.is_empty() {
+        String::new()
+    } else {
+        format!(" of {}", o.databases.join(", "))
+    };
+    format!("{}: {}{} {}", o.job_name, o.kind, of, verb)
 }
 
 /// Notify about a finished job through every enabled channel, honoring the
@@ -102,15 +117,7 @@ pub async fn job_finished(outcome: JobOutcome<'_>) {
         return;
     }
 
-    let subject = format!(
-        "[pbsgui] {} {}",
-        outcome.job_name,
-        if outcome.success {
-            "succeeded"
-        } else {
-            "FAILED"
-        }
-    );
+    let subject = format!("[pbsgui] {}", headline(&outcome));
     let body = render_body(&outcome);
 
     if settings.email.enabled {
@@ -133,6 +140,8 @@ pub async fn send_test(channel: NotifyChannel) -> anyhow::Result<()> {
         .to_string();
     let outcome = JobOutcome {
         job_name: "test",
+        kind: "test notification",
+        databases: &[],
         success: true,
         status: "ok",
         message: &body,
@@ -145,11 +154,12 @@ pub async fn send_test(channel: NotifyChannel) -> anyhow::Result<()> {
 }
 
 fn render_body(o: &JobOutcome<'_>) -> String {
-    let mut lines = vec![
-        format!("Job: {}", o.job_name),
-        format!("Status: {}", o.status),
-        format!("Message: {}", o.message),
-    ];
+    let mut lines = vec![format!("Job: {}", o.job_name), format!("Type: {}", o.kind)];
+    if !o.databases.is_empty() {
+        lines.push(format!("Databases: {}", o.databases.join(", ")));
+    }
+    lines.push(format!("Status: {}", o.status));
+    lines.push(format!("Message: {}", o.message));
     if let Some(s) = o.stats {
         lines.push(format!(
             "Backed up {} bytes: {} chunks, {} uploaded, {} reused.",
@@ -209,6 +219,8 @@ async fn send_webhook(subject: &str, o: &JobOutcome<'_>) -> anyhow::Result<()> {
     let mut payload = serde_json::json!({
         "text": format!("{subject}\n{}", render_body(o)),
         "job": o.job_name,
+        "kind": o.kind,
+        "databases": o.databases,
         "status": o.status,
         "success": o.success,
         "message": o.message,
