@@ -59,15 +59,26 @@ jobs:
           New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
           Copy-Item target/release/pbsgui-engine.exe `
             src-tauri/binaries/pbsgui-engine-x86_64-pc-windows-msvc.exe
-      - name: Build app and NSIS installer
+      - name: Build app and NSIS installers (offline + online)
         # The windows config adds the engine as a bundled sidecar; the base config
-        # stays free of it so `tauri dev` does not require the staged binary.
-        run: tauri build --config src-tauri/engine-sidecar.conf.json --config build-version.json
-      # Signing is deferred (Azure Trusted Signing is unavailable to AU entities);
-      # the installer is unsigned for now.
-      - name: Upload installer
+        # stays free of it so `tauri dev` does not require the staged binary. We
+        # build the full offline installer (bundles WebView2) and a smaller online
+        # one (webview-online.conf.json -> downloads WebView2 at install).
+        shell: pwsh
+        run: |
+          $nsis = 'target/release/bundle/nsis'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          tauri build --config src-tauri/engine-sidecar.conf.json --config build-version.json
+          $full = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
+          Copy-Item $full.FullName "dist/$($full.Name)"
+          tauri build --config src-tauri/engine-sidecar.conf.json --config build-version.json --config src-tauri/webview-online.conf.json
+          $small = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
+          Copy-Item $small.FullName ("dist/{0}-online{1}" -f $small.BaseName, $small.Extension)
+      # Signing is wired but gated on the DigiCert secrets (see release.yml); CI
+      # builds are unsigned.
+      - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: pbsgui-installer-${{ env.PBSGUI_VERSION }}-${{ env.PBSGUI_SHORT }}
-          path: target/release/bundle/nsis/*.exe
+          path: dist/*.exe
           if-no-files-found: error

@@ -92,22 +92,36 @@ jobs:
           Copy-Item target/release/pbsgui-engine.exe `
             src-tauri/binaries/pbsgui-engine-x86_64-pc-windows-msvc.exe
 
-      - name: Build app and NSIS installer
-        # The windows config adds the engine as a bundled sidecar; the base config
-        # stays free of it so `tauri dev` does not require the staged binary. The
-        # signing config (signCommand) is appended only when signing is enabled.
+      - name: Build app and NSIS installers (offline + online)
+        # engine-sidecar.conf.json bundles the engine sidecar; build-version.json
+        # stamps the version; signing.conf.json (signCommand) is appended only when
+        # signing is enabled. We build twice: the default bundles WebView2 (offline,
+        # air-gapped), then webview-online.conf.json makes a smaller installer that
+        # downloads WebView2 at install. The second build only re-bundles (the Rust
+        # binaries are unchanged), so it is quick.
         shell: pwsh
         run: |
           $configs = @('--config', 'src-tauri/engine-sidecar.conf.json', '--config', 'build-version.json')
           if ('${{ steps.signing.outputs.enabled }}' -eq 'true') {
             $configs += @('--config', 'src-tauri/signing.conf.json')
           }
+          $nsis = 'target/release/bundle/nsis'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # 1) Full offline installer (bundles WebView2).
           tauri build @configs
+          $full = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
+          Copy-Item $full.FullName "dist/$($full.Name)"
+          # 2) Small online installer (downloads WebView2 at install); same name in
+          #    the bundle dir, so copy it out with an -online suffix.
+          tauri build @configs --config src-tauri/webview-online.conf.json
+          $small = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
+          Copy-Item $small.FullName ("dist/{0}-online{1}" -f $small.BaseName, $small.Extension)
+          Get-ChildItem dist | Select-Object Name, Length
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: pbsgui ${{ github.ref_name }}
           body_path: .github/RELEASE_NOTES.md
-          files: target/release/bundle/nsis/*.exe
+          files: dist/*.exe
           fail_on_unmatched_files: true

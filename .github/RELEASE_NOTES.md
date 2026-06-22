@@ -7,7 +7,15 @@ issues.
 
 ## Install
 
-1. Download and run the `.exe` installer below.
+Two installers are attached; pick one:
+
+- **`pbsgui_<ver>_x64-setup.exe`** (full, ~200 MB) - bundles the WebView2 runtime
+  and installs with no internet access. Use this for air-gapped servers.
+- **`pbsgui_<ver>_x64-setup-online.exe`** (small) - downloads the WebView2 runtime
+  at install time if it is missing (most Windows 11 and updated Windows 10 already
+  have it). Use this when the machine has internet; it is a much smaller download.
+
+1. Download and run one of the installers.
 2. The installer is unsigned, so Windows SmartScreen may warn: choose
    **More info -> Run anyway**.
 3. The installer registers and starts the `pbsgui-engine` background service, then
