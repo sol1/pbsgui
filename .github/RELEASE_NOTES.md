@@ -5,23 +5,35 @@ clean-room reimplementation of the PBS backup protocol.
 This is an early release. Please test against non-production data first and report
 issues.
 
-## New in 0.0.3
+## New in 0.0.4
 
-- **PBS namespaces.** A repository can now target a namespace within a datastore,
-  written as `host:8007:datastore/namespace` (nested paths work too). Previously
-  the namespace was folded into the datastore name and PBS rejected the backup
-  with a 400 error. Backup, browse, and restore all honor the namespace.
-- **Encryption key is shown only once.** The key now appears just when you create
-  or import it; the "Show key" button that re-revealed the stored key in plaintext
-  has been removed, and the engine returns only the fingerprint afterward. The key
-  stays in the Windows Credential Manager so restores still decrypt transparently;
-  reuse it on another machine by importing it from your password manager.
-- **SQL transaction-log backups** (from 0.0.2): a Log backup type takes and
-  truncates the transaction log so FULL/BULK_LOGGED databases do not grow forever.
-- **Notifications** (from 0.0.2): email (SMTP) and a Slack-compatible webhook on
-  job success/failure, with Test buttons.
-- **Smaller installer** (from 0.0.2): a ~5 MB online installer that downloads
-  WebView2, alongside the full offline one.
+- **Point-in-time recovery for SQL Server.** A SQL job now picks what you want to
+  be able to restore, not a raw backup type: *point-in-time* (scheduled fulls plus
+  frequent log backups, which also truncate the log), *daily restore points* (fulls
+  only), or a *secondary copy* (copy-only fulls that coexist with another tool).
+  Restore to any moment in the retained window: pbsgui rebuilds the chain from the
+  covering full and its log backups, replays it with `STOPAT`, and recovers at the
+  chosen second, over the original database or a new name. The wizard reads each
+  database's recovery model and explains, in plain language, what each choice can
+  restore, blocking point-in-time on a SIMPLE database with the exact
+  `ALTER DATABASE` to run.
+- **Always On and Failover Cluster aware.** Install the engine on each node and it
+  coordinates through SQL Server with no connection between the pbsgui instances and
+  no extra ports: an Always On database is backed up only on the preferred backup
+  replica (a copy-only full on a secondary), every replica's job shares one
+  continuous chain (the snapshot group defaults to the Availability Group name), and
+  a Failover Cluster Instance is skipped on whichever node is not active.
+- **System databases.** master, model, and msdb can be backed up (tempdb is hidden);
+  the wizard explains the restore caveats.
+- **Network SQL discovery.** Find SQL Server instances on the LAN (SQL Browser
+  broadcast) or by scanning specific hosts and subnets, alongside local discovery.
+- **Jobs dashboard.** The jobs view is now a dashboard: a health summary, per-job
+  status chips, configuration badges, and a size-over-time graph, with a refreshed
+  look throughout the app.
+- **Better notifications.** Messages name the backup type and the databases, and a
+  new warning (on by default) tells you when a point-in-time chain stops advancing,
+  so the transaction log does not grow unnoticed. It is detected from the shared PBS
+  storage, so it works across Always On replicas.
 
 ## Install
 
@@ -44,13 +56,16 @@ Two installers are attached; pick one:
 
 - File and folder backup to PBS with content-defined chunking and incremental
   deduplication; browse and restore (full or selected files).
-- SQL Server: local discovery, connection probe and readiness checks, full and
-  transaction-log backups over the Virtual Device Interface streamed to PBS, and
-  restore (over the original database or to a new name).
-- Optional client-side AES-256-GCM encryption, byte-compatible with the PBS
-  scheme; keys are stored in the Windows Credential Manager.
-- Notifications on job success/failure via email (SMTP) and a Slack-compatible
-  webhook, each with a Test button.
+- SQL Server: local and network discovery, connection probe and readiness checks,
+  outcome-driven protection plans with point-in-time recovery (fulls plus log
+  backups streamed over the Virtual Device Interface), and restore to a moment in
+  time or a chosen full, over the original database or a new name. Always On and
+  Failover Cluster aware; system databases supported.
+- Optional client-side AES-256-GCM encryption, byte-compatible with the PBS scheme;
+  keys are stored in the Windows Credential Manager.
+- Notifications on job success, failure, and a stalled point-in-time chain, via
+  email (SMTP) and a Slack-compatible webhook, each with a Test button.
+- A jobs dashboard with status and size-over-time graphs.
 - Runs as a Windows service with a tray icon; scheduled jobs run without the GUI
   open.
 
@@ -59,10 +74,12 @@ Two installers are attached; pick one:
 - **Encryption keys cannot be recovered.** If you lose an encryption key, backups
   made with it cannot be restored by anyone. The key is shown only once, when you
   create or import it, so copy it into a password manager then.
-- SQL Server backup requires TCP/IP enabled on the instance and the engine's
-  service identity (`NT AUTHORITY\SYSTEM`) in the `sysadmin` role. See the docs.
-- Point-in-time restore from a log chain is not implemented yet; log backups
-  truncate the log and are stored offsite, and restore is from a full snapshot.
+- SQL Server backup requires TCP/IP enabled on the instance and the engine's service
+  identity (`NT AUTHORITY\SYSTEM`) in the `sysadmin` role. See the docs.
+- **Always On:** install pbsgui on every replica and give each replica's job the
+  same backup id (it defaults to the Availability Group name) so they share one
+  continuous chain. Exactly one node backs up at a time, and it follows failover
+  automatically.
 
 See the [documentation](https://github.com/sol1/pbsgui/tree/main/docs) for setup
 and details.
