@@ -5,6 +5,24 @@ clean-room reimplementation of the PBS backup protocol.
 This is an early release. Please test against non-production data first and report
 issues.
 
+## New in 0.0.3
+
+- **PBS namespaces.** A repository can now target a namespace within a datastore,
+  written as `host:8007:datastore/namespace` (nested paths work too). Previously
+  the namespace was folded into the datastore name and PBS rejected the backup
+  with a 400 error. Backup, browse, and restore all honor the namespace.
+- **Encryption key is shown only once.** The key now appears just when you create
+  or import it; the "Show key" button that re-revealed the stored key in plaintext
+  has been removed, and the engine returns only the fingerprint afterward. The key
+  stays in the Windows Credential Manager so restores still decrypt transparently;
+  reuse it on another machine by importing it from your password manager.
+- **SQL transaction-log backups** (from 0.0.2): a Log backup type takes and
+  truncates the transaction log so FULL/BULK_LOGGED databases do not grow forever.
+- **Notifications** (from 0.0.2): email (SMTP) and a Slack-compatible webhook on
+  job success/failure, with Test buttons.
+- **Smaller installer** (from 0.0.2): a ~5 MB online installer that downloads
+  WebView2, alongside the full offline one.
+
 ## Install
 
 Two installers are attached; pick one:
@@ -39,8 +57,8 @@ Two installers are attached; pick one:
 ## Important
 
 - **Encryption keys cannot be recovered.** If you lose an encryption key, backups
-  made with it cannot be restored by anyone. Copy the key into a password manager
-  when it is shown.
+  made with it cannot be restored by anyone. The key is shown only once, when you
+  create or import it, so copy it into a password manager then.
 - SQL Server backup requires TCP/IP enabled on the instance and the engine's
   service identity (`NT AUTHORITY\SYSTEM`) in the `sysadmin` role. See the docs.
 - Point-in-time restore from a log chain is not implemented yet; log backups

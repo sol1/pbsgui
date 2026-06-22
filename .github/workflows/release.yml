@@ -123,5 +123,7 @@ jobs:
         with:
           name: pbsgui ${{ github.ref_name }}
           body_path: .github/RELEASE_NOTES.md
+          # Append the auto-generated commit/PR list since the previous tag.
+          generate_release_notes: true
           files: dist/*.exe
           fail_on_unmatched_files: true
