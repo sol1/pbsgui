@@ -89,4 +89,3 @@ jobs:
           name: pbsgui-installer-offline-${{ env.PBSGUI_VERSION }}-${{ env.PBSGUI_SHORT }}
           path: dist/*_x64-setup.exe
           if-no-files-found: error
-          if-no-files-found: error
