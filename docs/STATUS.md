@@ -84,8 +84,9 @@ CI on Windows and exercised manually.
 
 ## Planned
 
-- **Network SQL discovery**: SQL Browser (UDP 1434), host/subnet scanning, and
-  Active Directory lookups, including Availability Group listeners.
+- **Active Directory SQL discovery** (SPN lookup) and Availability Group listener
+  enumeration. SQL Browser (UDP 1434) broadcast and host/subnet scanning already
+  work.
 - **Additional authentication**: explicit Windows accounts and Azure AD / Entra.
 - **More notifications**: Microsoft Teams cards, a heartbeat / dead-man's-switch,
   per-job routing, a durable retry queue, and daily digests (email and a

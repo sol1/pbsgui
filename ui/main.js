@@ -1366,10 +1366,17 @@ function renderSqlInstances(instances) {
 async function discoverSql() {
   const list = el("sql-list");
   const btn = el("discover-sql");
+  const includeNetwork = el("sql-search-network").checked;
+  const targets = el("sql-targets")
+    .value.split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
   btn.disabled = true;
-  list.innerHTML = loadingHtml("discovering SQL Server instances...");
+  list.innerHTML = loadingHtml(
+    includeNetwork ? "discovering local and network instances..." : "discovering SQL Server instances...",
+  );
   try {
-    const instances = await invoke("discover_sql", { includeNetwork: false, targets: [] });
+    const instances = await invoke("discover_sql", { includeNetwork, targets });
     renderSqlInstances(instances);
   } catch (err) {
     list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;

@@ -7,23 +7,39 @@
 //! per-instance probe that fills [`pbsgui_ipc::SqlProbe`] (version, topology,
 //! databases) are layered on in later steps.
 
+use std::time::Duration;
+
 use pbsgui_ipc::SqlInstance;
 
+use crate::sql::ssrp;
+
+/// How long to listen for SQL Browser answers.
+const SSRP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Discover SQL Server instances. Local enumeration always runs; network
-/// discovery is gated on `include_network`.
+/// discovery (SQL Browser broadcast plus unicast to `targets`, which may be
+/// hosts or IPv4 subnets) is gated on `include_network`.
 pub async fn discover(include_network: bool, targets: Vec<String>) -> Vec<SqlInstance> {
     let mut instances = local_instances();
 
     if include_network {
-        // TODO(network): SQL Browser (UDP 1434), scan `targets`, AD SPN lookup,
-        // and the AG-listener walk. Tracked as a follow-up step.
-        tracing::info!(
-            target_count = targets.len(),
-            "network SQL discovery requested but not yet implemented"
-        );
+        // Broadcast finds instances on the local subnet; targets reach specific
+        // hosts or other subnets. AD SPN discovery is a separate follow-up.
+        instances.extend(ssrp::broadcast(SSRP_TIMEOUT).await);
+        let hosts: Vec<String> = targets
+            .iter()
+            .flat_map(|t| ssrp::expand_target(t))
+            .collect();
+        instances.extend(ssrp::scan(&hosts, SSRP_TIMEOUT).await);
     }
 
-    instances.sort_by(|a, b| a.server.cmp(&b.server));
+    // Stable sort keeps the local (richer) entry ahead of a network duplicate, so
+    // dedup_by below keeps it.
+    instances.sort_by(|a, b| {
+        a.server
+            .to_ascii_lowercase()
+            .cmp(&b.server.to_ascii_lowercase())
+    });
     instances.dedup_by(|a, b| a.server.eq_ignore_ascii_case(&b.server));
     instances
 }

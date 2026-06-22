@@ -13,6 +13,7 @@ pub mod backupmeta;
 pub mod check;
 pub mod discover;
 pub mod probe;
+pub mod ssrp;
 pub mod vdi;
 
 /// The detected deployment archetype of a SQL Server instance.
