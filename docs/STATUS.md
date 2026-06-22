@@ -118,8 +118,11 @@ CI on Windows and exercised manually.
 - Encryption keys cannot be recovered. If a key is lost, backups made with it
   cannot be restored, by anyone. Copy the key into a password manager when it is
   shown.
-- Transaction-log backups truncate the log and are stored offsite, but restoring a
-  point in time from a full plus a log chain is not implemented yet; restore today
-  is from a full snapshot.
+- The point-in-time window is bounded by PBS retention and pruning, which pbsgui
+  does not manage yet; the restore view describes the window from the snapshots
+  actually present rather than promising a fixed span.
+- A chain is a full plus log backups; differential backups are not supported yet,
+  and a chain broken by another tool taking log backups is not yet detected (the
+  failing `RESTORE LOG` surfaces the error).
 - The in-process scheduler runs only while the engine process is running, which is
   fine when the engine runs as the always-on service.
