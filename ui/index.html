@@ -112,13 +112,14 @@
               </label>
               <div id="enc-key-area" class="hidden">
                 <p class="help muted">Backups are encrypted on this machine before upload, so the
-                  server never sees the key. If you lose the key the backups cannot be restored, so
-                  copy it into a password manager. You can reuse one key across jobs by importing it.</p>
+                  server never sees the key. The key is shown once when you create or import it;
+                  copy it into a password manager then, because it is not shown again here. If you
+                  lose it, backups made with it cannot be restored. Reuse one key across jobs or
+                  machines by importing it.</p>
                 <div id="enc-key-status" class="muted">No key yet.</div>
                 <div class="actions">
                   <button id="enc-generate" type="button">Generate key</button>
                   <button id="enc-import" type="button">Import key...</button>
-                  <button id="enc-reveal" type="button" class="hidden">Show key</button>
                 </div>
               </div>
             </div>
@@ -358,9 +359,9 @@
     <div id="key-modal" class="modal-overlay hidden">
       <div class="modal">
         <h2>Backup encryption key</h2>
-        <p class="warn">Copy this key into a password manager now. Without it, backups made with
-          it cannot be restored, even by us or by Proxmox. Anyone with this key can read the
-          backups, so keep it secret.</p>
+        <p class="warn">This key is shown once. Copy it into a password manager now; pbsgui will
+          not display it again. Without it, backups made with it cannot be restored, even by us or
+          by Proxmox. Anyone with this key can read the backups, so keep it secret.</p>
         <label>Key (base64)
           <textarea id="key-modal-key" rows="2" readonly></textarea>
         </label>

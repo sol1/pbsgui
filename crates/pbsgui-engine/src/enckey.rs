@@ -39,10 +39,16 @@ pub fn import(job_id: &str, key_base64: &str) -> anyhow::Result<EncryptionKeyInf
     Ok(info_from_key(&key))
 }
 
-/// The stored key for a job (base64 + fingerprint), or `None` if there is none.
+/// The stored key's fingerprint, or `None` if there is none. The raw key is
+/// deliberately blanked: it is handed to the GUI only once, when generated or
+/// imported, never on a later status read.
 pub fn get(job_id: &str) -> anyhow::Result<Option<EncryptionKeyInfo>> {
     match secrets::get(&enc_secret_key(job_id))? {
-        Some(b64) => Ok(Some(info_from_key(&decode_key(&b64)?))),
+        Some(b64) => {
+            let mut info = info_from_key(&decode_key(&b64)?);
+            info.key = String::new();
+            Ok(Some(info))
+        }
         None => Ok(None),
     }
 }

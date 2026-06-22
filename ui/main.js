@@ -224,13 +224,15 @@ function updateEncryptArea() {
   el("enc-key-area").classList.toggle("hidden", !el("f-encrypt").checked);
 }
 
-// Reflect whether a key is stored: show its fingerprint and the Show-key button.
+// Reflect whether a key is stored, by fingerprint. The raw key is shown only at
+// create/import time (in the modal), never re-revealed from here.
 function setKeyStatus(info) {
   wizKeySet = !!info;
   const status = el("enc-key-status");
   status.classList.toggle("muted", !info);
-  status.textContent = info ? `Key set. Fingerprint ${info.fingerprint}` : "No key yet.";
-  el("enc-reveal").classList.toggle("hidden", !info);
+  status.textContent = info
+    ? `Key set (stored for restore). Fingerprint ${info.fingerprint}`
+    : "No key yet.";
 }
 
 async function refreshKeyStatus() {
@@ -275,16 +277,6 @@ async function importKey() {
     showKeyModal(info);
   } catch (err) {
     alert("could not import the key: " + err);
-  }
-}
-
-async function revealKey() {
-  try {
-    const info = await invoke("get_encryption_key", { jobId: wizJobId });
-    if (!info) return alert("No key is stored for this job.");
-    showKeyModal(info);
-  } catch (err) {
-    alert("could not read the key: " + err);
   }
 }
 
@@ -1253,7 +1245,6 @@ window.addEventListener("DOMContentLoaded", () => {
     el("import-modal").classList.remove("hidden");
     el("import-modal-key").focus();
   };
-  el("enc-reveal").onclick = revealKey;
   el("key-modal-copy").onclick = copyKeyToClipboard;
   el("key-modal-close").onclick = () => el("key-modal").classList.add("hidden");
   el("import-modal-ok").onclick = importKey;
