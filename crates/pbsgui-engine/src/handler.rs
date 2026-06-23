@@ -335,7 +335,9 @@ async fn test_pbs_server(
     };
     let api = ApiClient::from_repository(&repo, secret, &server.fingerprint)?;
     match api.can_backup(&datastore, namespace.as_deref()).await {
-        Ok(true) => Ok(format!("Reached PBS; the token can back up to {acl}.")),
+        Ok(true) => Ok(format!(
+            "Reached PBS; the token can back up to datastore \"{acl}\"."
+        )),
         Ok(false) => anyhow::bail!(
             "Reached PBS and the token authenticates, but it lacks Datastore.Backup on \
              /datastore/{acl}. Assign the DatastoreBackup role to the token."
