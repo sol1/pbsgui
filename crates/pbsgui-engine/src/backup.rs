@@ -345,7 +345,6 @@ async fn backup_sql_to_pbs(
     crypt: Option<CryptConfig>,
     events: &Sender<Reply>,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
-    require_full_or_log(backup_type)?;
     if databases.is_empty() {
         anyhow::bail!("no databases selected");
     }
@@ -501,17 +500,6 @@ async fn backup_sql_to_folder(
         csum: [0u8; 32],
     };
     Ok((summary, Some(stats)))
-}
-
-/// PBS SQL backups support full and log (for transaction-log management);
-/// differential is not implemented yet.
-fn require_full_or_log(backup_type: SqlBackupType) -> anyhow::Result<()> {
-    match backup_type {
-        SqlBackupType::Full | SqlBackupType::Log => Ok(()),
-        SqlBackupType::Differential => {
-            anyhow::bail!("differential SQL Server backups are not supported yet")
-        }
-    }
 }
 
 /// Resolve a saved PBS server into session parameters for one snapshot group.

@@ -197,13 +197,9 @@ fn render_body(o: &JobOutcome<'_>) -> String {
         lines.push(format!("Databases: {}", o.databases.join(", ")));
     }
     lines.push(format!("Status: {}", o.status));
+    // The message already carries the byte/chunk figures for a backup; the webhook
+    // payload also includes the structured `stats` object for machine consumers.
     lines.push(format!("Message: {}", o.message));
-    if let Some(s) = o.stats {
-        lines.push(format!(
-            "Backed up {} bytes: {} chunks, {} uploaded, {} reused.",
-            s.bytes, s.chunks, s.uploaded, s.reused
-        ));
-    }
     lines.join("\n")
 }
 

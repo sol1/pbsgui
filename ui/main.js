@@ -68,10 +68,16 @@ function scheduleSummary(s) {
   return "manual";
 }
 
+// Short labels for the one-line job summary; fuller labels for the dashboard badge.
 const SQL_PLAN_LABEL = {
   point_in_time: "point-in-time",
   daily_restore_points: "restore points",
   secondary_copy: "copy",
+};
+const SQL_PLAN_BADGE = {
+  point_in_time: "point-in-time",
+  daily_restore_points: "daily restore points",
+  secondary_copy: "secondary copy",
 };
 
 function sourceSummary(job) {
@@ -209,13 +215,8 @@ function jobBadges(job) {
   const sql = job.source?.type === "sql";
   out.push(`<span class="badge badge-src">${sql ? "SQL Server" : "Files"}</span>`);
   if (sql && job.source.protection) {
-    const labels = {
-      point_in_time: "point-in-time",
-      daily_restore_points: "daily restore points",
-      secondary_copy: "secondary copy",
-    };
     const plan = job.source.protection.plan;
-    out.push(`<span class="badge">${escapeHtml(labels[plan] || plan)}</span>`);
+    out.push(`<span class="badge">${escapeHtml(SQL_PLAN_BADGE[plan] || plan)}</span>`);
   } else {
     out.push(`<span class="badge">${escapeHtml(scheduleSummary(job.schedule))}</span>`);
   }

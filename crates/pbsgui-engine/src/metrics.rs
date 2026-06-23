@@ -26,7 +26,7 @@ fn config_path() -> std::path::PathBuf {
 }
 
 /// Default exporter settings: not exported.
-pub fn default_settings() -> MetricsSettings {
+fn default_settings() -> MetricsSettings {
     MetricsSettings {
         mode: MetricsMode::Off,
         port: 9654,
@@ -462,8 +462,22 @@ pub fn apply(store: std::sync::Arc<JobStore>) {
     }
 }
 
-/// A minimal HTTP/1.1 listener serving `GET /metrics`.
+/// A minimal HTTP/1.1 listener serving `GET /metrics`. The endpoint is
+/// unauthenticated; binding it beyond loopback exposes the (secret-free) metrics
+/// to the network, so a non-loopback bind is warned about loudly.
 async fn serve(bind: String, port: u16, store: std::sync::Arc<JobStore>) {
+    match bind.parse::<std::net::IpAddr>() {
+        Ok(ip) if !ip.is_loopback() => tracing::warn!(
+            %bind,
+            "metrics endpoint is bound beyond localhost and is UNAUTHENTICATED; \
+             restrict it with a firewall"
+        ),
+        Ok(_) => {}
+        Err(_) => {
+            tracing::warn!(%bind, "metrics bind address is not a valid IP; not starting");
+            return;
+        }
+    }
     let listener = match TcpListener::bind((bind.as_str(), port)).await {
         Ok(l) => l,
         Err(e) => {
@@ -484,8 +498,16 @@ async fn serve(bind: String, port: u16, store: std::sync::Arc<JobStore>) {
                 _ => return,
             };
             let req = String::from_utf8_lossy(&buf[..n]);
-            let path = req.split_whitespace().nth(1).unwrap_or("");
-            let (status, ctype, body) = if path.starts_with("/metrics") {
+            let mut tokens = req.split_whitespace();
+            let method = tokens.next().unwrap_or("");
+            let path = tokens.next().unwrap_or("");
+            let (status, ctype, body) = if method != "GET" {
+                (
+                    "405 Method Not Allowed",
+                    "text/plain; charset=utf-8",
+                    "method not allowed\n".to_string(),
+                )
+            } else if path.starts_with("/metrics") {
                 (
                     "200 OK",
                     "text/plain; version=0.0.4; charset=utf-8",

@@ -10,10 +10,6 @@
 //!   - `service install|uninstall|run` manages/runs the Windows Service, so
 //!     scheduled backups run unattended whether or not the GUI is open.
 
-// Temporary while the engine is scaffolded: the SQL module defines topology
-// detection ahead of the code that will use it.
-#![allow(dead_code)]
-
 mod archive;
 mod backup;
 mod changedet;

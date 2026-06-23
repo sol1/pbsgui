@@ -10,6 +10,11 @@
 //! device handshake) or, streamed through [`ChannelReader`], the PBS uploader as
 //! a deduplicated dynamic-index snapshot.
 
+// The device loop and its helpers (ChannelReader, backup_statement, the result
+// combiners) are exercised by the Windows VDI path and the tests; on a non-Windows
+// build they are compiled but unused, so allow that here only.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::io::Read;
 use std::sync::mpsc::Receiver;
 
