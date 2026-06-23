@@ -5,35 +5,34 @@ clean-room reimplementation of the PBS backup protocol.
 This is an early release. Please test against non-production data first and report
 issues.
 
-## New in 0.0.4
+## New in 0.0.5
 
-- **Point-in-time recovery for SQL Server.** A SQL job now picks what you want to
-  be able to restore, not a raw backup type: *point-in-time* (scheduled fulls plus
-  frequent log backups, which also truncate the log), *daily restore points* (fulls
-  only), or a *secondary copy* (copy-only fulls that coexist with another tool).
-  Restore to any moment in the retained window: pbsgui rebuilds the chain from the
-  covering full and its log backups, replays it with `STOPAT`, and recovers at the
-  chosen second, over the original database or a new name. The wizard reads each
-  database's recovery model and explains, in plain language, what each choice can
-  restore, blocking point-in-time on a SIMPLE database with the exact
-  `ALTER DATABASE` to run.
-- **Always On and Failover Cluster aware.** Install the engine on each node and it
-  coordinates through SQL Server with no connection between the pbsgui instances and
-  no extra ports: an Always On database is backed up only on the preferred backup
-  replica (a copy-only full on a secondary), every replica's job shares one
-  continuous chain (the snapshot group defaults to the Availability Group name), and
-  a Failover Cluster Instance is skipped on whichever node is not active.
-- **System databases.** master, model, and msdb can be backed up (tempdb is hidden);
-  the wizard explains the restore caveats.
-- **Network SQL discovery.** Find SQL Server instances on the LAN (SQL Browser
-  broadcast) or by scanning specific hosts and subnets, alongside local discovery.
-- **Jobs dashboard.** The jobs view is now a dashboard: a health summary, per-job
-  status chips, configuration badges, and a size-over-time graph, with a refreshed
-  look throughout the app.
-- **Better notifications.** Messages name the backup type and the databases, and a
-  new warning (on by default) tells you when a point-in-time chain stops advancing,
-  so the transaction log does not grow unnoticed. It is detected from the shared PBS
-  storage, so it works across Always On replicas.
+- **PBS server validation.** A saved PBS server is now checked the moment you add
+  it: reachability, the pinned TLS fingerprint, that the token authenticates, and
+  that it actually holds `Datastore.Backup` on the datastore (and namespace). The
+  server's indicator turns green only once it passes, and a Test button reports the
+  precise reason on failure (unreachable, fingerprint mismatch, bad token, or
+  missing DatastoreBackup) so you catch permission problems at setup, not at 2am.
+- **Clean in-place upgrades.** Installing a new version over an old one now stops
+  and restarts the background service cleanly, and your configuration (jobs,
+  connections, servers, notification and metrics settings) and stored secrets are
+  preserved automatically. No need to uninstall first.
+- **Prometheus metrics (optional).** The engine can export per-job and per-database
+  metrics (last run, result, duration, size, dedup counts, and the point-in-time
+  chain freshness and stall state) either over an HTTP `/metrics` endpoint or as a
+  `pbsgui.prom` textfile for a node/windows_exporter collector. Off by default,
+  bound to localhost, and the metrics carry no secrets.
+- **Clearer PBS errors.** A permission or credential failure when starting a backup
+  now explains itself (for example, that the token lacks DatastoreBackup on the
+  datastore, or that another owner holds the backup group) instead of showing a raw
+  status code.
+- **Hardening (security review).** The engine's control socket is now restricted to
+  administrators, so only an administrator can drive backups (see *Important*
+  below). Several internal cleanups removed dead code paths.
+
+Removed: the one-off per-database "To PBS" / "To file" buttons on the SQL Servers
+tab. Back up SQL Server through a job (a saved connection plus a protection plan),
+which uses your saved credentials, can encrypt, and is browsable and restorable.
 
 ## Install
 
@@ -65,12 +64,22 @@ Two installers are attached; pick one:
   keys are stored in the Windows Credential Manager.
 - Notifications on job success, failure, and a stalled point-in-time chain, via
   email (SMTP) and a Slack-compatible webhook, each with a Test button.
-- A jobs dashboard with status and size-over-time graphs.
+- A jobs dashboard with status and size-over-time graphs; PBS servers are validated
+  (reachable, fingerprint, token, DatastoreBackup) with a health indicator.
+- Optional Prometheus metrics (an HTTP `/metrics` endpoint or a textfile), off by
+  default.
 - Runs as a Windows service with a tray icon; scheduled jobs run without the GUI
   open.
 
 ## Important
 
+- **Run the app as an administrator.** As of 0.0.5 the engine's control socket is
+  restricted to administrators (a security fix), so the GUI must be run by an
+  administrator to manage and run backups. The background service itself still runs
+  as `LocalSystem` and keeps running scheduled jobs regardless.
+- **Upgrading from an earlier version:** just run the new installer over the old
+  one. It stops and restarts the service for you, and your jobs, connections,
+  servers, settings, and secrets are kept.
 - **Encryption keys cannot be recovered.** If you lose an encryption key, backups
   made with it cannot be restored by anyone. The key is shown only once, when you
   create or import it, so copy it into a password manager then.
