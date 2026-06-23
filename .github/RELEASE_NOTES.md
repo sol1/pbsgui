@@ -5,6 +5,16 @@ clean-room reimplementation of the PBS backup protocol.
 This is an early release. Please test against non-production data first and report
 issues.
 
+## New in 0.0.6
+
+- **Fix: "backup service is not reachable" after upgrading to 0.0.5.** 0.0.5
+  restricted the engine's control socket to administrators (a security fix), but a
+  normally launched GUI runs with a UAC-filtered token and could not satisfy that,
+  so it could not connect. The GUI now ships with a manifest that requests
+  elevation, so Windows prompts for admin rights at launch and it connects again.
+  You no longer need to right-click "Run as administrator" - just accept the UAC
+  prompt. The background service keeps running scheduled jobs regardless.
+
 ## New in 0.0.5
 
 - **PBS server validation.** A saved PBS server is now checked the moment you add
@@ -73,10 +83,11 @@ Two installers are attached; pick one:
 
 ## Important
 
-- **Run the app as an administrator.** As of 0.0.5 the engine's control socket is
-  restricted to administrators (a security fix), so the GUI must be run by an
-  administrator to manage and run backups. The background service itself still runs
-  as `LocalSystem` and keeps running scheduled jobs regardless.
+- **The app prompts for elevation (UAC) at launch.** It manages backups through the
+  engine, which runs as `LocalSystem`, and the engine's control socket is restricted
+  to administrators (a security fix); the GUI requests admin rights so it can
+  connect, so accept the prompt. The background service runs scheduled jobs
+  regardless of whether the GUI is open.
 - **Upgrading from an earlier version:** just run the new installer over the old
   one. It stops and restarts the service for you, and your jobs, connections,
   servers, settings, and secrets are kept.

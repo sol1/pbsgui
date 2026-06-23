@@ -52,18 +52,21 @@ impl Responder {
 }
 
 /// On Windows, give the pipe a DACL allowing only SYSTEM and Builtin
-/// Administrators to connect, so an administrator's GUI can reach the engine
-/// (which runs as a LocalSystem service) but ordinary local users cannot drive
-/// privileged operations through it. Falls back to the default on error.
+/// Administrators to connect, so the engine (which runs as LocalSystem and does
+/// privileged work: RunJob, Restore, pre/post scripts) can only be driven by an
+/// administrator. Falls back to the default on error.
+///
+/// This requires the GUI to run *elevated*: under UAC a normally launched process
+/// has a filtered token with the Administrators group deny-only, which would fail
+/// this check. The release GUI therefore ships a `requireAdministrator` manifest
+/// (see `src-tauri/build.rs`) so it is always elevated and can connect.
 #[cfg(windows)]
 fn with_pipe_security(options: ListenerOptions<'_>) -> ListenerOptions<'_> {
     use interprocess::os::windows::local_socket::ListenerOptionsExt;
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     use widestring::U16CString;
 
-    // SYSTEM and Builtin Administrators: full access. Authenticated Users is
-    // deliberately excluded - the engine runs as SYSTEM and does privileged work
-    // (RunJob, Restore, pre/post scripts), so only administrators may drive it.
+    // SYSTEM and Builtin Administrators only (the GUI runs elevated to match).
     const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
     let wide = match U16CString::from_str(SDDL) {
         Ok(wide) => wide,

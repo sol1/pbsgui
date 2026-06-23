@@ -130,8 +130,9 @@ CI on Windows and exercised manually.
   to the SQL Server should be a trusted network segment. The PBS connection, by
   contrast, pins the server's certificate fingerprint.
 - The engine's control socket is restricted to SYSTEM and local Administrators, so
-  the GUI must run as an administrator; the optional metrics endpoint is
-  unauthenticated and defaults to localhost.
+  the GUI runs elevated (it requests admin rights via its manifest, prompting UAC at
+  launch) to connect; the optional metrics endpoint is unauthenticated and defaults
+  to localhost.
 - Encryption keys cannot be recovered. If a key is lost, backups made with it
   cannot be restored, by anyone. Copy the key into a password manager when it is
   shown.
