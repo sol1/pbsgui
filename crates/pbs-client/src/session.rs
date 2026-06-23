@@ -108,16 +108,22 @@ impl SessionParams {
             .host
             .clone()
             .ok_or_else(|| PbsError::Protocol("repository has no host".into()))?;
+        // Trim the auth id and secret: a token secret pasted from the PBS UI often
+        // carries a trailing newline or stray space, which would otherwise be sent
+        // verbatim in the Authorization header and rejected as a bad credential.
         let auth_id = repo
             .auth_id
-            .clone()
-            .ok_or_else(|| PbsError::Auth("repository has no auth id".into()))?;
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| PbsError::Auth("repository has no auth id".into()))?
+            .to_string();
         Ok(Self {
             host,
             port: repo.port(),
             datastore: repo.datastore.clone(),
             auth_id,
-            secret: secret.into(),
+            secret: secret.into().trim().to_string(),
             fingerprint: fingerprint.into(),
             backup_type: backup_type.into(),
             backup_id: backup_id.into(),
@@ -1092,5 +1098,21 @@ mod tests {
         );
         p.namespace = Some("team/proj".to_string());
         assert!(p.snapshot_query().contains("&ns=team%2Fproj"));
+    }
+
+    #[test]
+    fn trims_whitespace_from_auth_id_and_secret() {
+        // A repository whose auth id has stray spaces, and a secret pasted with a
+        // trailing newline: both must be normalized so the Authorization header is
+        // not sent with whitespace that PBS would reject.
+        let repo: Repository = "  tok@pbs!t @pbs.example.com:8007:store"
+            .trim()
+            .parse()
+            .unwrap();
+        let p =
+            SessionParams::from_repository(&repo, "  s3cret\n", "ab".repeat(32), "host", "h", 1)
+                .unwrap();
+        assert_eq!(p.auth_id, "tok@pbs!t");
+        assert_eq!(p.secret, "s3cret");
     }
 }

@@ -72,11 +72,17 @@ impl ApiClient {
                 .clone()
                 .ok_or_else(|| PbsError::Protocol("repository has no host".into()))?,
             port: repo.port(),
+            // Trim the auth id and secret: a token secret pasted from the PBS UI
+            // often carries a trailing newline or stray space, which would
+            // otherwise be sent verbatim and rejected as a bad credential.
             auth_id: repo
                 .auth_id
-                .clone()
-                .ok_or_else(|| PbsError::Auth("repository has no auth id".into()))?,
-            secret: secret.into(),
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| PbsError::Auth("repository has no auth id".into()))?
+                .to_string(),
+            secret: secret.into().trim().to_string(),
             fingerprint: fingerprint.into(),
         })
     }
