@@ -41,7 +41,11 @@ CI on Windows and exercised manually.
   identity, and `sysadmin`-role checks, each with a copyable fix hint.
 - **Saved connections.** SQL Server connections and PBS servers are first-class
   saved entities (managed in their own tabs); jobs reference them by id and carry
-  no secrets. SQL passwords and PBS token secrets live in the credential store.
+  no secrets. SQL passwords and PBS token secrets live in the credential store. A
+  PBS server is validated (reachability, the pinned TLS fingerprint, that the token
+  authenticates, and that it holds `Datastore.Backup`) from one
+  `/access/permissions` call; its indicator turns green only once it checks out,
+  and a Test button reports the precise reason on failure.
 - **SQL Server VDI backup to PBS.** Streaming backup over the Virtual Device
   Interface: a `BACKUP ... TO VIRTUAL_DEVICE` statement runs while a native COM
   loop on SQLVDI.dll forwards SQL's backup buffers to the PBS uploader as a

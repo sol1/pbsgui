@@ -141,6 +141,32 @@ h2 {
   border: 1px solid rgba(63, 185, 80, 0.32);
 }
 
+/* PBS server validation: grey until checked, green when reachable, red on failure. */
+.avatar-pbs-checking {
+  background: var(--panel-2);
+  color: var(--idle);
+  border: 1px solid var(--border);
+}
+
+.avatar-pbs-fail {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--fail);
+  border: 1px solid rgba(248, 81, 73, 0.32);
+}
+
+.pbs-status {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.pbs-ok {
+  color: var(--ok);
+}
+
+.pbs-bad {
+  color: var(--fail);
+}
+
 .job-main {
   flex: 1;
   min-width: 0;

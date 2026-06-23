@@ -187,6 +187,13 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
                 .send(&deleted_reply(connstore::pbs_servers().delete(&id)))
                 .await;
         }
+        Request::TestPbsServer { server, secret } => {
+            let (success, message) = match test_pbs_server(server, secret).await {
+                Ok(msg) => (true, msg),
+                Err(e) => (false, format!("{e:#}")),
+            };
+            let _ = responder.send(&Reply::Finished { success, message }).await;
+        }
 
         Request::GenerateEncryptionKey { job_id } => {
             let _ = responder
@@ -303,6 +310,46 @@ fn deleted_reply(result: anyhow::Result<()>) -> Reply {
         Err(e) => Reply::Error {
             message: e.to_string(),
         },
+    }
+}
+
+/// Validate a PBS server: reachability, the pinned TLS fingerprint, that the token
+/// authenticates, and that it holds `Datastore.Backup` on the datastore/namespace.
+/// One `/access/permissions` round-trip covers all four. Does not write a backup.
+async fn test_pbs_server(
+    server: pbsgui_ipc::PbsServer,
+    secret: Option<String>,
+) -> anyhow::Result<String> {
+    // Use the typed secret, or fall back to the one stored for this saved server.
+    let secret = match secret {
+        Some(s) if !s.is_empty() => s,
+        _ => secrets::get(&connstore::pbs_secret_key(&server.id))?
+            .ok_or_else(|| anyhow::anyhow!("no token secret was entered or stored"))?,
+    };
+    let repo: Repository = server.repository.parse()?;
+    let datastore = repo.datastore.clone();
+    let namespace = repo.namespace.clone();
+    let acl = match &namespace {
+        Some(ns) if !ns.is_empty() => format!("{datastore}/{ns}"),
+        _ => datastore.clone(),
+    };
+    let api = ApiClient::from_repository(&repo, secret, &server.fingerprint)?;
+    match api.can_backup(&datastore, namespace.as_deref()).await {
+        Ok(true) => Ok(format!("Reached PBS; the token can back up to {acl}.")),
+        Ok(false) => anyhow::bail!(
+            "Reached PBS and the token authenticates, but it lacks Datastore.Backup on \
+             /datastore/{acl}. Assign the DatastoreBackup role to the token."
+        ),
+        Err(e) => {
+            let detail = e.to_string();
+            if detail.contains("401") {
+                anyhow::bail!("The PBS token id or secret was not accepted (401).")
+            } else if detail.contains("certificate") || detail.contains("fingerprint") {
+                anyhow::bail!("Could not verify the PBS certificate (fingerprint mismatch?): {e}")
+            } else {
+                anyhow::bail!("Could not reach PBS: {e}")
+            }
+        }
     }
 }
 

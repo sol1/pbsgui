@@ -589,6 +589,15 @@ pub enum Request {
     },
     /// Delete a PBS server and its stored secret.
     DeletePbsServer { id: String },
+    /// Validate a PBS server: reachability, the pinned TLS fingerprint, that the
+    /// token authenticates, and that it holds `Datastore.Backup` on the datastore
+    /// (and namespace). `secret` is the typed token secret; `None` uses the stored
+    /// one. Replies `Finished` with a pass/fail message.
+    TestPbsServer {
+        server: PbsServer,
+        #[serde(default)]
+        secret: Option<String>,
+    },
 
     /// Generate a fresh random encryption key for a job and store it under
     /// `enc:<job_id>`. Replies with the key (for the user to copy to a password

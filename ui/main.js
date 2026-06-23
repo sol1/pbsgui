@@ -1224,6 +1224,30 @@ async function savePbsServer(event) {
   loadPbsServers();
 }
 
+// Validate the PBS server the form currently describes (typed secret, or stored).
+async function testPbsForm() {
+  const server = {
+    id: editingPbs || crypto.randomUUID(),
+    name: el("pbs-name").value.trim() || "PBS",
+    repository: el("pbs-repository").value.trim(),
+    fingerprint: el("pbs-fingerprint").value.trim(),
+  };
+  if (!server.repository || !server.fingerprint) {
+    return alert("Enter the repository and fingerprint to test.");
+  }
+  const secret = el("pbs-secret").value || null;
+  const note = el("pbs-test-note");
+  note.className = "pbs-status muted";
+  note.textContent = "testing...";
+  try {
+    note.textContent = await invoke("test_pbs_server", { server, secret });
+    note.className = "pbs-status pbs-ok";
+  } catch (err) {
+    note.textContent = String(err);
+    note.className = "pbs-status pbs-bad";
+  }
+}
+
 async function loadPbsServers() {
   let servers = [];
   try {
@@ -1241,16 +1265,20 @@ async function loadPbsServers() {
     const row = document.createElement("div");
     row.className = "job-row";
     const icon = document.createElement("div");
-    icon.className = "row-avatar avatar-pbs";
+    // Grey until validated; the icon goes green only when reachable + permitted.
+    icon.className = "row-avatar avatar-pbs-checking";
     icon.textContent = "PBS";
     const main = document.createElement("div");
     main.className = "job-main";
     main.innerHTML =
       `<div class="job-name">${escapeHtml(server.name)}</div>` +
-      `<div class="job-meta">${escapeHtml(server.repository)}</div>`;
+      `<div class="job-meta">${escapeHtml(server.repository)}</div>` +
+      `<div class="pbs-status muted">checking...</div>`;
+    const statusEl = main.querySelector(".pbs-status");
     const actions = document.createElement("div");
     actions.className = "job-actions";
     actions.append(
+      mkbtn("Test", "", () => validatePbsServer(server, null, icon, statusEl)),
       mkbtn("Edit", "", () => editPbsServer(server)),
       mkbtn("Delete", "", async () => {
         if (!confirm(`Delete PBS server "${server.name}"?`)) return;
@@ -1264,6 +1292,27 @@ async function loadPbsServers() {
     );
     row.append(icon, main, actions);
     list.append(row);
+    validatePbsServer(server, null, icon, statusEl);
+  }
+}
+
+// Validate a PBS server (reachable + token holds DatastoreBackup) and reflect the
+// result in its avatar/status. `secret` null uses the stored token secret.
+async function validatePbsServer(server, secret, icon, statusEl) {
+  icon.className = "row-avatar avatar-pbs-checking";
+  statusEl.className = "pbs-status muted";
+  statusEl.textContent = "checking...";
+  try {
+    const msg = await invoke("test_pbs_server", { server, secret });
+    icon.className = "row-avatar avatar-pbs";
+    icon.title = msg;
+    statusEl.className = "pbs-status pbs-ok";
+    statusEl.textContent = msg;
+  } catch (err) {
+    icon.className = "row-avatar avatar-pbs-fail";
+    icon.title = String(err);
+    statusEl.className = "pbs-status pbs-bad";
+    statusEl.textContent = String(err);
   }
 }
 
@@ -1548,6 +1597,7 @@ window.addEventListener("DOMContentLoaded", () => {
   };
   el("discover-sql").onclick = discoverSql;
   el("pbs-form").addEventListener("submit", savePbsServer);
+  el("pbs-test").onclick = testPbsForm;
   el("pbs-clear").onclick = resetPbsForm;
   el("notify-form").addEventListener("submit", saveNotifications);
   el("n-email-enabled").onchange = updateNotifyFields;

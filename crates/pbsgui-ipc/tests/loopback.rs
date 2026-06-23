@@ -113,6 +113,14 @@ async fn demo_handler(request: Request, mut responder: Responder) {
         Request::DeletePbsServer { .. } => {
             let _ = responder.send(&Reply::Deleted).await;
         }
+        Request::TestPbsServer { .. } => {
+            let _ = responder
+                .send(&Reply::Finished {
+                    success: true,
+                    message: "ok".into(),
+                })
+                .await;
+        }
         Request::GenerateEncryptionKey { .. }
         | Request::ImportEncryptionKey { .. }
         | Request::GetEncryptionKey { .. }

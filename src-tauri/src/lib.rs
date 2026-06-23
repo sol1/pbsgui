@@ -233,6 +233,25 @@ async fn delete_pbs_server(id: String) -> Result<(), String> {
     }
 }
 
+/// Validate a PBS server (reachability, fingerprint, token auth, and
+/// DatastoreBackup). Returns the engine's pass message, or an error message.
+#[tauri::command]
+async fn test_pbs_server(server: PbsServer, secret: Option<String>) -> Result<String, String> {
+    let replies = request_all(Request::TestPbsServer { server, secret }).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Finished { success, message } => {
+                Some(if success { Ok(message) } else { Err(message) })
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| Err("engine did not return a test result".to_string()))
+}
+
 /// Generate a fresh encryption key for a job; returns it (to copy) + fingerprint.
 #[tauri::command]
 async fn generate_encryption_key(job_id: String) -> Result<EncryptionKeyInfo, String> {
@@ -656,6 +675,7 @@ pub fn run() {
         list_pbs_servers,
         save_pbs_server,
         delete_pbs_server,
+        test_pbs_server,
         generate_encryption_key,
         import_encryption_key,
         get_encryption_key,

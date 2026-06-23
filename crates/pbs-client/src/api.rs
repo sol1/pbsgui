@@ -106,6 +106,21 @@ impl ApiClient {
             .map_err(|e| PbsError::Protocol(format!("parsing snapshots: {e}")))
     }
 
+    /// Whether the token holds `Datastore.Backup` on a datastore (and namespace),
+    /// read from its own effective permissions. This needs no `Datastore.Audit`
+    /// (a token may always read its own permissions), so it validates a
+    /// backup-only token without a false negative. A failure to reach PBS, a TLS
+    /// fingerprint mismatch, or a rejected token surfaces as the returned error.
+    pub async fn can_backup(&self, datastore: &str, namespace: Option<&str>) -> Result<bool> {
+        let acl_path = match namespace {
+            Some(ns) if !ns.is_empty() => format!("/datastore/{datastore}/{ns}"),
+            _ => format!("/datastore/{datastore}"),
+        };
+        let path = format!("/api2/json/access/permissions?path={}", enc(&acl_path));
+        let data = self.get_data(&path).await?;
+        Ok(privilege_granted(&data, &acl_path, "Datastore.Backup"))
+    }
+
     async fn get_data(&self, path: &str) -> Result<serde_json::Value> {
         let body = self.get(path).await?;
         let value: serde_json::Value = serde_json::from_slice(&body)
@@ -152,6 +167,21 @@ impl ApiClient {
         }
         parse_http_response(&raw)
     }
+}
+
+/// Look up one privilege in an `/access/permissions` response. PBS returns either
+/// a path-scoped map (`{ "Datastore.Backup": true, ... }`, when queried with a
+/// `path`) or the full tree (`{ "/datastore/x": { ... } }`); handle both, and
+/// accept the privilege as a bool or a non-zero number.
+fn privilege_granted(data: &serde_json::Value, acl_path: &str, name: &str) -> bool {
+    let truthy =
+        |v: &serde_json::Value| v.as_bool() == Some(true) || v.as_u64().is_some_and(|n| n != 0);
+    if let Some(v) = data.get(name) {
+        return truthy(v);
+    }
+    data.get(acl_path)
+        .and_then(|m| m.get(name))
+        .is_some_and(truthy)
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -240,5 +270,23 @@ mod tests {
     fn errors_on_non_2xx() {
         let raw = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\n\r\nno access";
         assert!(parse_http_response(raw).is_err());
+    }
+
+    #[test]
+    fn reads_privilege_from_either_shape() {
+        let path = "/datastore/store";
+        // Path-scoped map (queried with ?path=...).
+        let scoped = serde_json::json!({"Datastore.Backup": true, "Datastore.Read": false});
+        assert!(privilege_granted(&scoped, path, "Datastore.Backup"));
+        assert!(!privilege_granted(&scoped, path, "Datastore.Read"));
+        // Full tree, privilege as a number.
+        let tree = serde_json::json!({"/datastore/store": {"Datastore.Backup": 1}});
+        assert!(privilege_granted(&tree, path, "Datastore.Backup"));
+        // Absent.
+        assert!(!privilege_granted(
+            &serde_json::json!({}),
+            path,
+            "Datastore.Backup"
+        ));
     }
 }
