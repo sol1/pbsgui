@@ -53,6 +53,9 @@ const H2_MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 const H2_WINDOW_SIZE: u32 = (1 << 31) - 2;
 /// Append at most this many index entries per PUT.
 const APPEND_BATCH: usize = 64;
+/// Maximum chunk-data uploads in flight at once. HTTP/2 multiplexes them over the
+/// one connection, so this pipelines uploads instead of waiting for each in turn.
+const MAX_INFLIGHT_UPLOADS: usize = 16;
 
 /// Percent-encoding set for query parameter values.
 const QUERY: &AsciiSet = &NON_ALPHANUMERIC
@@ -314,39 +317,99 @@ impl H2Conn {
 
     /// Issue one request and read the full response body.
     async fn request(
-        &mut self,
+        &self,
         method: Method,
         path_and_query: &str,
         content_type: Option<&str>,
         body: Option<Bytes>,
     ) -> Result<(StatusCode, Vec<u8>)> {
-        let uri = format!("https://{}{}", self.authority, path_and_query);
-        let mut builder = Request::builder().method(method).uri(uri);
-        if let Some(ct) = content_type {
-            builder = builder.header(http::header::CONTENT_TYPE, ct);
-        }
-        let request = builder
-            .body(())
-            .map_err(|e| PbsError::Protocol(format!("building request: {e}")))?;
+        h2_request(
+            &self.send,
+            &self.authority,
+            method,
+            path_and_query,
+            content_type,
+            body,
+        )
+        .await
+    }
+}
 
-        let end_of_stream = body.is_none();
-        let mut send = self.send.clone().ready().await.map_err(h2err)?;
-        let (response_fut, mut stream) =
-            send.send_request(request, end_of_stream).map_err(h2err)?;
-        if let Some(bytes) = body {
-            stream.send_data(bytes, true).map_err(h2err)?;
-        }
+/// Issue one HTTP/2 request on a (cloned) send handle and read the full response.
+/// Cloning `send` per request is what lets many requests be in flight concurrently
+/// over the one connection (h2 multiplexes streams).
+async fn h2_request(
+    send: &SendRequest<Bytes>,
+    authority: &str,
+    method: Method,
+    path_and_query: &str,
+    content_type: Option<&str>,
+    body: Option<Bytes>,
+) -> Result<(StatusCode, Vec<u8>)> {
+    let uri = format!("https://{authority}{path_and_query}");
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(ct) = content_type {
+        builder = builder.header(http::header::CONTENT_TYPE, ct);
+    }
+    let request = builder
+        .body(())
+        .map_err(|e| PbsError::Protocol(format!("building request: {e}")))?;
 
-        let response = response_fut.await.map_err(h2err)?;
-        let status = response.status();
-        let mut body_stream = response.into_body();
-        let mut out = Vec::new();
-        while let Some(chunk) = body_stream.data().await {
-            let chunk = chunk.map_err(h2err)?;
-            out.extend_from_slice(&chunk);
-            let _ = body_stream.flow_control().release_capacity(chunk.len());
-        }
-        Ok((status, out))
+    let end_of_stream = body.is_none();
+    let mut send = send.clone().ready().await.map_err(h2err)?;
+    let (response_fut, mut stream) = send.send_request(request, end_of_stream).map_err(h2err)?;
+    if let Some(bytes) = body {
+        stream.send_data(bytes, true).map_err(h2err)?;
+    }
+
+    let response = response_fut.await.map_err(h2err)?;
+    let status = response.status();
+    let mut body_stream = response.into_body();
+    let mut out = Vec::new();
+    while let Some(chunk) = body_stream.data().await {
+        let chunk = chunk.map_err(h2err)?;
+        out.extend_from_slice(&chunk);
+        let _ = body_stream.flow_control().release_capacity(chunk.len());
+    }
+    Ok((status, out))
+}
+
+/// A cloneable handle for uploading chunk data concurrently on a backup
+/// connection. Each clone carries its own h2 `SendRequest`, so uploads spawned
+/// from it run as separate multiplexed HTTP/2 streams.
+#[derive(Clone)]
+pub struct ChunkUploader {
+    send: SendRequest<Bytes>,
+    authority: String,
+}
+
+impl ChunkUploader {
+    /// Upload one dynamic-index chunk (its encoded DataBlob bytes). Takes owned
+    /// data so it can run in a spawned task.
+    pub async fn upload_dynamic_chunk(
+        &self,
+        wid: u64,
+        digest: [u8; DIGEST_LEN],
+        plaintext_len: u64,
+        encoded: Vec<u8>,
+    ) -> Result<()> {
+        let q = format!(
+            "/dynamic_chunk?wid={}&digest={}&size={}&encoded-size={}",
+            wid,
+            hex::encode(digest),
+            plaintext_len,
+            encoded.len()
+        );
+        let (status, body) = h2_request(
+            &self.send,
+            &self.authority,
+            Method::POST,
+            &q,
+            Some("application/octet-stream"),
+            Some(Bytes::from(encoded)),
+        )
+        .await?;
+        ensure_ok(status, &body)
     }
 }
 
@@ -386,6 +449,14 @@ impl BackupWriter {
         let path = format!("/api2/json/backup?{}", params.snapshot_query());
         let conn = H2Conn::upgrade(params, &path, BACKUP_PROTOCOL_ID_V1).await?;
         Ok(Self { conn })
+    }
+
+    /// A cloneable handle for uploading chunks concurrently on this connection.
+    pub fn chunk_uploader(&self) -> ChunkUploader {
+        ChunkUploader {
+            send: self.conn.send.clone(),
+            authority: self.conn.authority.clone(),
+        }
     }
 
     /// Create a fixed-index writer; returns the writer id (wid).
@@ -503,32 +574,8 @@ impl BackupWriter {
             .ok_or_else(|| PbsError::Protocol("dynamic_index did not return a wid".into()))
     }
 
-    /// Upload one chunk (its DataBlob bytes) for a dynamic-index writer.
-    pub async fn upload_dynamic_chunk(
-        &mut self,
-        wid: u64,
-        digest: &[u8; DIGEST_LEN],
-        plaintext_len: u64,
-        encoded: &[u8],
-    ) -> Result<()> {
-        let q = format!(
-            "/dynamic_chunk?wid={}&digest={}&size={}&encoded-size={}",
-            wid,
-            hex::encode(digest),
-            plaintext_len,
-            encoded.len()
-        );
-        let (status, body) = self
-            .conn
-            .request(
-                Method::POST,
-                &q,
-                Some("application/octet-stream"),
-                Some(Bytes::copy_from_slice(encoded)),
-            )
-            .await?;
-        ensure_ok(status, &body)
-    }
+    // Dynamic-index chunk upload now goes through `ChunkUploader` (see
+    // `chunk_uploader`), so it can run concurrently.
 
     /// Append a batch of chunk references to a dynamic index. `offsets` are the
     /// chunk START offsets (the first chunk is 0); the server derives each end
@@ -792,16 +839,26 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     });
 
     let mut builder = DynamicIndexBuilder::new(params.backup_time, random_uuid());
-    let mut batch_digests: Vec<[u8; DIGEST_LEN]> = Vec::new();
-    let mut batch_offsets: Vec<u64> = Vec::new();
+    // The full ordered index (digest + start offset). The index is built in order
+    // as chunks arrive, but appended only after every chunk it references has been
+    // uploaded, since chunk DATA is uploaded concurrently below.
+    let mut all_digests: Vec<[u8; DIGEST_LEN]> = Vec::new();
+    let mut all_offsets: Vec<u64> = Vec::new();
     let mut end_offset = 0u64;
     let mut chunks = 0u64;
     let mut reused = 0u64;
     let mut uploaded = 0u64;
 
+    // Pipeline chunk-data uploads: keep up to MAX_INFLIGHT_UPLOADS in flight on the
+    // one HTTP/2 connection instead of awaiting each in turn.
+    let uploader = writer.chunk_uploader();
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_UPLOADS));
+    let mut inflight = tokio::task::JoinSet::new();
+
     while let Some((digest, data)) = rx.recv().await {
         let start_offset = end_offset;
-        end_offset += data.len() as u64;
+        let len = data.len() as u64;
+        end_offset += len;
         chunks += 1;
         if known.contains(&digest) {
             reused += 1;
@@ -810,27 +867,39 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
                 Some(c) => c.encrypt_blob(&data)?,
                 None => blob::encode_uncompressed(&data),
             };
-            writer
-                .upload_dynamic_chunk(wid, &digest, data.len() as u64, &encoded)
-                .await?;
+            // Acquiring a permit bounds in-flight uploads (back-pressuring the
+            // chunker once the window is full).
+            let permit = permits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| PbsError::Protocol("upload semaphore closed".into()))?;
+            let up = uploader.clone();
+            inflight.spawn(async move {
+                let _permit = permit; // released when this upload finishes
+                up.upload_dynamic_chunk(wid, digest, len, encoded).await
+            });
             uploaded += 1;
+            // Surface a failed upload promptly and reap finished tasks.
+            while let Some(joined) = inflight.try_join_next() {
+                joined.map_err(|e| PbsError::Protocol(format!("upload task failed: {e}")))??;
+            }
         }
         builder.push(end_offset, digest);
         on_progress(end_offset, total_bytes);
-        batch_digests.push(digest);
-        batch_offsets.push(start_offset);
-        if batch_digests.len() >= APPEND_BATCH {
-            writer
-                .append_dynamic_index(wid, &batch_digests, &batch_offsets)
-                .await?;
-            batch_digests.clear();
-            batch_offsets.clear();
-        }
+        all_digests.push(digest);
+        all_offsets.push(start_offset);
     }
-    if !batch_digests.is_empty() {
-        writer
-            .append_dynamic_index(wid, &batch_digests, &batch_offsets)
-            .await?;
+
+    // Every chunk's data must be uploaded before the index references it.
+    while let Some(joined) = inflight.join_next().await {
+        joined.map_err(|e| PbsError::Protocol(format!("upload task failed: {e}")))??;
+    }
+    for (digests, offsets) in all_digests
+        .chunks(APPEND_BATCH)
+        .zip(all_offsets.chunks(APPEND_BATCH))
+    {
+        writer.append_dynamic_index(wid, digests, offsets).await?;
     }
 
     chunker_task
