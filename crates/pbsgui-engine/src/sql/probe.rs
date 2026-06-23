@@ -224,6 +224,20 @@ pub(crate) async fn backup_decision(
     })
 }
 
+/// Estimate the backup size of `database` as its allocated data-file bytes
+/// (`sys.master_files`, data files only; the log is excluded). The VDI backup
+/// stream is roughly the *used* portion, so this is an approximate upper bound,
+/// used only to show a progress percentage. Returns `None` if it cannot be read.
+pub(crate) async fn data_size_bytes(client: &mut SqlClient, database: &str) -> Option<u64> {
+    let db = database.replace('\'', "''");
+    let query = format!(
+        "SELECT CAST(SUM(CAST(size AS bigint)) * 8192 AS bigint) \
+         FROM sys.master_files WHERE database_id = DB_ID(N'{db}') AND type = 0"
+    );
+    let row = client.simple_query(query).await.ok()?.into_row().await.ok()??;
+    row.get::<i64, _>(0).filter(|&v| v > 0).map(|v| v as u64)
+}
+
 fn auth_method(auth: &SqlAuth, password: Option<&str>) -> anyhow::Result<AuthMethod> {
     match auth {
         SqlAuth::SqlLogin { username } => {

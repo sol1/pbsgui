@@ -611,6 +611,9 @@ async function openEditor(job) {
   backupIdTouched = !!(dest.type === "pbs" && dest.backup_id);
   updateDestType();
   el("f-encrypt").checked = !!job?.encrypted;
+  // Compression defaults on (matching the engine) for new jobs and any job
+  // saved before the field existed.
+  el("f-compress").checked = job?.compress ?? true;
   updateEncryptArea();
   await refreshKeyStatus();
 
@@ -704,6 +707,7 @@ function gatherJob() {
     last_run: editing?.last_run ?? null,
     last_status: editing?.last_status ?? null,
     encrypted,
+    compress: el("f-compress").checked,
   };
 }
 

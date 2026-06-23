@@ -5,13 +5,14 @@
 //!
 //! ```text
 //! uncompressed:  magic[8] | crc32-le[4] | payload
+//! zstd:          magic[8] | crc32-le[4] | zstd_frame(payload)
 //! ```
 //!
 //! The CRC is CRC-32/IEEE (the zlib polynomial) computed over the payload bytes
-//! only, not the header. Multi-byte integers are little-endian. This client only
-//! writes uncompressed blobs, so it only needs to decode those (plus a clear
-//! error for the compressed and encrypted variants, which arrive once those
-//! features are implemented).
+//! only (the compressed bytes, for a zstd blob), not the header. Multi-byte
+//! integers are little-endian. This module encodes and decodes the unencrypted
+//! uncompressed and zstd variants; the AES-256-GCM encrypted variants (including
+//! encrypted+zstd) live in [`crate::crypt`], which holds the key.
 
 use crate::error::{PbsError, Result};
 
@@ -46,10 +47,60 @@ pub fn encode_uncompressed(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Compress a payload into a standalone zstd frame. PBS compresses at a fast,
+/// low-ratio setting (its level 1); `Fastest` is the closest match and the right
+/// trade-off here, where the source is slow and CPU is plentiful. Infallible:
+/// the encoder always produces a valid frame (raw blocks when incompressible).
+pub(crate) fn zstd_compress(payload: &[u8]) -> Vec<u8> {
+    use ruzstd::encoding::{compress_to_vec, CompressionLevel};
+    compress_to_vec(payload, CompressionLevel::Fastest)
+}
+
+/// Decompress a standalone zstd frame back to its plaintext.
+pub(crate) fn zstd_decompress(frame: &[u8]) -> Result<Vec<u8>> {
+    use ruzstd::io::Read;
+    let mut src = frame;
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(&mut src)
+        .map_err(|e| PbsError::Protocol(format!("zstd frame error: {e}")))?;
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| PbsError::Protocol(format!("zstd decompression failed: {e}")))?;
+    Ok(out)
+}
+
+/// Frame an already-compressed zstd payload as a zstd DataBlob
+/// (`magic | crc | frame`). The CRC is over the compressed bytes, matching PBS.
+fn frame_zstd(frame: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_SIZE + frame.len());
+    out.extend_from_slice(&MAGIC_ZSTD);
+    out.extend_from_slice(&crc32(frame).to_le_bytes());
+    out.extend_from_slice(frame);
+    out
+}
+
+/// Encode a payload as a zstd-compressed DataBlob (no size check).
+pub fn encode_compressed(payload: &[u8]) -> Vec<u8> {
+    frame_zstd(&zstd_compress(payload))
+}
+
+/// Encode a payload, compressing it only when that actually shrinks it (PBS's
+/// rule). Incompressible data - already-compressed media, an encrypted source, or
+/// a deliberately high-entropy database - falls back to an uncompressed blob, so
+/// compression never inflates a chunk.
+pub fn encode_auto(payload: &[u8]) -> Vec<u8> {
+    let compressed = zstd_compress(payload);
+    if compressed.len() < payload.len() {
+        frame_zstd(&compressed)
+    } else {
+        encode_uncompressed(payload)
+    }
+}
+
 /// Decode a DataBlob and return its plaintext payload.
 ///
-/// Only unencrypted, uncompressed blobs are supported for now (what this client
-/// writes); the CRC is verified.
+/// Handles the unencrypted uncompressed and zstd variants; the CRC is verified
+/// first. Encrypted variants need a key and are decoded via [`crate::crypt`].
 pub fn decode(blob: &[u8]) -> Result<Vec<u8>> {
     if blob.len() < HEADER_SIZE {
         return Err(PbsError::Protocol(format!(
@@ -69,11 +120,9 @@ pub fn decode(blob: &[u8]) -> Result<Vec<u8>> {
 
     match magic {
         MAGIC_UNCOMPRESSED => Ok(payload.to_vec()),
-        MAGIC_ZSTD => Err(PbsError::Protocol(
-            "zstd-compressed blob: decoding not implemented yet".into(),
-        )),
+        MAGIC_ZSTD => zstd_decompress(payload),
         MAGIC_ENCRYPTED | MAGIC_ENCRYPTED_ZSTD => Err(PbsError::Protocol(
-            "encrypted blob: decoding not implemented yet".into(),
+            "encrypted blob: a CryptConfig is required to decode it".into(),
         )),
         other => Err(PbsError::Protocol(format!("unknown blob magic {other:?}"))),
     }
@@ -118,5 +167,38 @@ mod tests {
     #[test]
     fn rejects_short_blob() {
         assert!(decode(&[0u8; 4]).is_err());
+    }
+
+    #[test]
+    fn compressed_blob_round_trips() {
+        // Highly compressible payload -> a zstd blob that decodes back exactly.
+        let payload = b"the quick brown fox ".repeat(4096);
+        let blob = encode_compressed(&payload);
+        assert_eq!(&blob[0..8], &MAGIC_ZSTD);
+        assert!(blob.len() < payload.len(), "expected the zstd blob to shrink");
+        assert_eq!(decode(&blob).unwrap(), payload);
+    }
+
+    #[test]
+    fn encode_auto_compresses_then_falls_back() {
+        // Compressible data takes the zstd path.
+        let text = b"AAAAAAAAAAAAAAAA".repeat(4096);
+        let blob = encode_auto(&text);
+        assert_eq!(&blob[0..8], &MAGIC_ZSTD);
+        assert_eq!(decode(&blob).unwrap(), text);
+
+        // Incompressible data (would not shrink) falls back to an uncompressed
+        // blob rather than inflating the chunk. A simple LCG gives high-entropy
+        // bytes without a rand dependency (as the chunker tests do).
+        let mut state = 0x1234_5678u32;
+        let incompressible: Vec<u8> = (0..64 * 1024)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect();
+        let blob = encode_auto(&incompressible);
+        assert_eq!(&blob[0..8], &MAGIC_UNCOMPRESSED);
+        assert_eq!(decode(&blob).unwrap(), incompressible);
     }
 }

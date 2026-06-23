@@ -124,6 +124,10 @@
                 every replica's job the same id (pbsgui defaults it to the Availability Group name)
                 so all nodes share one continuous backup chain.</span>
             </label>
+            <label class="enc-toggle">
+              <input id="f-compress" type="checkbox" checked />
+              <span>Compress backups (zstd; automatically skipped for data that does not shrink)</span>
+            </label>
             <div class="enc-panel">
               <label class="enc-toggle">
                 <input id="f-encrypt" type="checkbox" />

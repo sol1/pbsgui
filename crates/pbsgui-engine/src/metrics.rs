@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use std::sync::{Mutex, OnceLock};
 
 use pbs_client::session::BackupStats;
+use pbs_client::BackupProgress;
 use pbsgui_ipc::{Job, JobDestination, JobSource, MetricsMode, MetricsSettings, SqlProtection};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -79,11 +80,17 @@ struct JobRuntime {
     last_chunks: Option<u64>,
     last_uploaded: Option<u64>,
     last_reused: Option<u64>,
+    last_uploaded_bytes: Option<u64>,
+    last_stored_bytes: Option<u64>,
     runs_success: u64,
     runs_failure: u64,
     runs_skipped: u64,
     bytes_total: u64,
     running: bool,
+    // Live progress for the in-flight run; rendered only while `running`.
+    progress_bytes: u64,
+    progress_total: u64,
+    throughput_bps: f64,
     databases: Vec<SqlDbStatus>,
 }
 
@@ -111,6 +118,17 @@ fn server_handle() -> &'static Mutex<Option<AbortHandle>> {
 pub fn set_running(job_id: &str, running: bool) {
     let mut st = state().lock().unwrap();
     st.jobs.entry(job_id.to_string()).or_default().running = running;
+}
+
+/// Update the live progress gauges for an in-flight run. Called (throttled) from
+/// the backup progress reporter; `record_run` clears these when the run ends.
+pub fn record_progress(job_id: &str, p: &BackupProgress, throughput_bps: f64) {
+    let mut st = state().lock().unwrap();
+    let j = st.jobs.entry(job_id.to_string()).or_default();
+    j.running = true;
+    j.progress_bytes = p.bytes_done;
+    j.progress_total = p.total_bytes;
+    j.throughput_bps = throughput_bps;
 }
 
 /// Record a finished run's outcome and last-run gauges.
@@ -147,8 +165,14 @@ pub fn record_run(
         j.last_chunks = Some(s.chunks);
         j.last_uploaded = Some(s.uploaded);
         j.last_reused = Some(s.reused);
+        j.last_uploaded_bytes = Some(s.uploaded_bytes);
+        j.last_stored_bytes = Some(s.stored_bytes);
         j.bytes_total += s.bytes;
     }
+    // The run is over: drop the live progress gauges.
+    j.progress_bytes = 0;
+    j.progress_total = 0;
+    j.throughput_bps = 0.0;
 }
 
 /// Replace a job's per-database point-in-time status (from the health check).
@@ -293,6 +317,59 @@ pub fn render(store: &JobStore) -> String {
         "pbsgui_job_last_chunks_reused",
         "Chunks reused (deduplicated) in the last backup.",
         |r| r.last_reused.map(|v| v as f64),
+    );
+    job_gauge(
+        &mut out,
+        &st,
+        &jobs,
+        "pbsgui_job_last_uploaded_bytes",
+        "Plaintext bytes uploaded (not deduplicated) in the last backup.",
+        |r| r.last_uploaded_bytes.map(|v| v as f64),
+    );
+    job_gauge(
+        &mut out,
+        &st,
+        &jobs,
+        "pbsgui_job_last_stored_bytes",
+        "Encoded bytes stored after compression/encryption in the last backup.",
+        |r| r.last_stored_bytes.map(|v| v as f64),
+    );
+    job_gauge(
+        &mut out,
+        &st,
+        &jobs,
+        "pbsgui_job_last_compression_ratio",
+        "Compression ratio of uploaded data in the last backup (uploaded/stored).",
+        |r| match (r.last_uploaded_bytes, r.last_stored_bytes) {
+            (Some(u), Some(s)) if s > 0 => Some(u as f64 / s as f64),
+            _ => None,
+        },
+    );
+
+    // Live progress for an in-flight backup (absent while a job is not running).
+    job_gauge(
+        &mut out,
+        &st,
+        &jobs,
+        "pbsgui_job_progress_bytes",
+        "Bytes processed so far in the running backup.",
+        |r| r.running.then_some(r.progress_bytes as f64),
+    );
+    job_gauge(
+        &mut out,
+        &st,
+        &jobs,
+        "pbsgui_job_progress_total_bytes",
+        "Estimated total bytes for the running backup (0 if unknown).",
+        |r| (r.running && r.progress_total > 0).then_some(r.progress_total as f64),
+    );
+    job_gauge(
+        &mut out,
+        &st,
+        &jobs,
+        "pbsgui_job_throughput_bytes_per_second",
+        "Throughput of the running backup.",
+        |r| r.running.then_some(r.throughput_bps),
     );
 
     // Counters.

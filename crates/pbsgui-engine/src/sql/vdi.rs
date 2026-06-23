@@ -20,7 +20,7 @@ use std::sync::mpsc::Receiver;
 
 use pbs_client::BackupStats;
 #[cfg(not(windows))]
-use pbs_client::{CryptConfig, SessionParams};
+use pbs_client::{BackupProgress, CryptConfig, SessionParams};
 #[cfg(not(windows))]
 use pbsgui_ipc::SqlAuth;
 use pbsgui_ipc::SqlBackupType;
@@ -146,7 +146,7 @@ pub async fn backup_database_to_file(
 /// Back up `database` over VDI, streaming it to PBS as a dynamic-index snapshot.
 #[cfg(not(windows))]
 #[allow(clippy::too_many_arguments)]
-pub async fn backup_database_to_pbs(
+pub async fn backup_database_to_pbs<F: FnMut(&BackupProgress) + Send>(
     _server: &str,
     _port: Option<u16>,
     _auth: &SqlAuth,
@@ -155,6 +155,9 @@ pub async fn backup_database_to_pbs(
     _params: &SessionParams,
     _archive_name: &str,
     _crypt: Option<CryptConfig>,
+    _compress: bool,
+    _total_estimate: u64,
+    _on_progress: F,
     _backup_type: SqlBackupType,
     _copy_only: bool,
 ) -> anyhow::Result<BackupStats> {
@@ -210,7 +213,7 @@ mod windows_impl {
     use std::sync::mpsc::SyncSender;
 
     use anyhow::Context;
-    use pbs_client::{BackupStats, CryptConfig, SessionParams};
+    use pbs_client::{BackupProgress, BackupStats, CryptConfig, SessionParams};
     use pbsgui_ipc::{SqlAuth, SqlBackupType};
     use tiberius::Row;
     use uuid::Uuid;
@@ -424,7 +427,7 @@ mod windows_impl {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn backup_database_to_pbs(
+    pub async fn backup_database_to_pbs<F: FnMut(&BackupProgress) + Send>(
         server: &str,
         port: Option<u16>,
         auth: &SqlAuth,
@@ -433,6 +436,9 @@ mod windows_impl {
         params: &SessionParams,
         archive_name: &str,
         crypt: Option<CryptConfig>,
+        compress: bool,
+        total_estimate: u64,
+        on_progress: F,
         backup_type: SqlBackupType,
         copy_only: bool,
     ) -> anyhow::Result<BackupStats> {
@@ -477,11 +483,12 @@ mod windows_impl {
             params,
             archive_name,
             true,
+            compress,
             ChannelReader::new(rx),
-            0,
+            total_estimate,
             Some(meta_rx),
             crypt,
-            |_done, _total| {},
+            on_progress,
         );
         let (backup, upload) = tokio::join!(backup_and_meta, upload_fut);
 

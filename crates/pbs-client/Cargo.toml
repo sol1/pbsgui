@@ -18,6 +18,9 @@ tokio.workspace = true
 # Wire formats
 sha2 = "0.10"
 crc32fast = "1.4"
+# Pure-Rust zstd (no C / zstd-sys): mature decoder + a usable encoder. Chunk
+# DataBlobs are compressed at a fast, low-ratio level matching PBS's own.
+ruzstd = "0.8"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 fastcdc = "3"

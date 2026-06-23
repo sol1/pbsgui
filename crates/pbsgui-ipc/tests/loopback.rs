@@ -226,6 +226,7 @@ fn sample_job() -> Job {
         last_run: None,
         last_status: None,
         encrypted: false,
+        compress: true,
     }
 }
 

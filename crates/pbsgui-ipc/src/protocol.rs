@@ -169,6 +169,11 @@ pub struct Job {
     /// never travels in this struct; restores decrypt transparently using it.
     #[serde(default)]
     pub encrypted: bool,
+    /// Whether chunks are zstd-compressed before upload (only when that shrinks
+    /// them, so incompressible data is never inflated). On by default, matching
+    /// stock PBS; jobs predating this field deserialize as compressed.
+    #[serde(default = "default_true")]
+    pub compress: bool,
 }
 
 /// A backup encryption key, for display and import. `key` is the raw key the

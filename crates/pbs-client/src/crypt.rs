@@ -19,7 +19,9 @@ use aes_gcm::aes::Aes256;
 use aes_gcm::{AesGcm, Nonce, Tag};
 use sha2::{Digest, Sha256};
 
-use crate::blob::{crc32, MAGIC_ENCRYPTED};
+use crate::blob::{
+    crc32, zstd_compress, zstd_decompress, MAGIC_ENCRYPTED, MAGIC_ENCRYPTED_ZSTD,
+};
 use crate::error::{PbsError, Result};
 
 /// AES-256-GCM with PBS's 16-byte IV (the default 16-byte tag).
@@ -77,21 +79,42 @@ impl CryptConfig {
         self.compute_digest(&FINGERPRINT_INPUT)
     }
 
-    /// Encrypt a chunk/blob payload into an encrypted `DataBlob`.
+    /// Encrypt a chunk/blob payload into an AES-256-GCM `DataBlob` (no
+    /// compression).
     pub fn encrypt_blob(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_with_magic(plaintext, MAGIC_ENCRYPTED)
+    }
+
+    /// Compress then encrypt a payload, matching PBS's encrypted+zstd blob.
+    /// Compression is applied only when it shrinks the data (otherwise the
+    /// plaintext is encrypted directly), so incompressible data is never inflated.
+    /// The dedup digest is keyed over the *plaintext*, so it is identical to the
+    /// uncompressed-encrypted path and dedup is unaffected.
+    pub fn encrypt_compressed_blob(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let compressed = zstd_compress(plaintext);
+        if compressed.len() < plaintext.len() {
+            self.encrypt_with_magic(&compressed, MAGIC_ENCRYPTED_ZSTD)
+        } else {
+            self.encrypt_with_magic(plaintext, MAGIC_ENCRYPTED)
+        }
+    }
+
+    /// Encrypt `payload` (already plaintext or compressed) and frame it with the
+    /// given blob `magic` (`MAGIC_ENCRYPTED` or `MAGIC_ENCRYPTED_ZSTD`).
+    fn encrypt_with_magic(&self, payload: &[u8], magic: [u8; 8]) -> Result<Vec<u8>> {
         let mut iv = [0u8; 16];
         getrandom::getrandom(&mut iv)
             .map_err(|e| PbsError::Protocol(format!("failed to generate an IV: {e}")))?;
 
         let cipher = Aes256Gcm16::new_from_slice(&self.enc_key)
             .map_err(|_| PbsError::Protocol("invalid encryption key length".into()))?;
-        let mut buffer = plaintext.to_vec();
+        let mut buffer = payload.to_vec();
         let tag = cipher
             .encrypt_in_place_detached(Nonce::<U16>::from_slice(&iv), b"", &mut buffer)
             .map_err(|_| PbsError::Protocol("encryption failed".into()))?;
 
         let mut out = Vec::with_capacity(ENC_HEADER_SIZE + buffer.len());
-        out.extend_from_slice(&MAGIC_ENCRYPTED);
+        out.extend_from_slice(&magic);
         out.extend_from_slice(&crc32(&buffer).to_le_bytes());
         out.extend_from_slice(&iv);
         out.extend_from_slice(tag.as_slice());
@@ -99,7 +122,8 @@ impl CryptConfig {
         Ok(out)
     }
 
-    /// Decrypt an encrypted `DataBlob` back to its plaintext payload.
+    /// Decrypt an encrypted `DataBlob` back to its plaintext payload, transparently
+    /// decompressing the encrypted+zstd variant.
     pub fn decrypt_blob(&self, blob: &[u8]) -> Result<Vec<u8>> {
         if blob.len() < ENC_HEADER_SIZE {
             return Err(PbsError::Protocol(
@@ -107,11 +131,15 @@ impl CryptConfig {
             ));
         }
         let magic: [u8; 8] = blob[0..8].try_into().unwrap();
-        if magic != MAGIC_ENCRYPTED {
+        let compressed = if magic == MAGIC_ENCRYPTED {
+            false
+        } else if magic == MAGIC_ENCRYPTED_ZSTD {
+            true
+        } else {
             return Err(PbsError::Protocol(
-                "blob is not an AES-256-GCM encrypted blob (compression not supported)".into(),
+                "blob is not an AES-256-GCM encrypted blob".into(),
             ));
-        }
+        };
         let crc_stored = u32::from_le_bytes(blob[8..12].try_into().unwrap());
         let iv: [u8; 16] = blob[12..28].try_into().unwrap();
         let tag: [u8; 16] = blob[28..44].try_into().unwrap();
@@ -137,7 +165,11 @@ impl CryptConfig {
             .map_err(|_| {
                 PbsError::Protocol("decryption failed (wrong key or corrupt data)".into())
             })?;
-        Ok(buffer)
+        if compressed {
+            zstd_decompress(&buffer)
+        } else {
+            Ok(buffer)
+        }
     }
 }
 
@@ -195,5 +227,32 @@ mod tests {
         let two = crypt.encrypt_blob(b"same").unwrap();
         // Distinct IVs => distinct ciphertext for identical plaintext.
         assert_ne!(one, two);
+    }
+
+    #[test]
+    fn compressed_blob_round_trips_and_uses_zstd_magic() {
+        let crypt = CryptConfig::new([5u8; 32]);
+        // Compressible plaintext -> encrypted+zstd blob, decrypts back exactly.
+        let plaintext = b"the quick brown fox ".repeat(4096);
+        let blob = crypt.encrypt_compressed_blob(&plaintext).unwrap();
+        assert_eq!(&blob[0..8], &MAGIC_ENCRYPTED_ZSTD);
+        assert!(blob.len() < plaintext.len(), "expected compression to shrink");
+        assert_eq!(crypt.decrypt_blob(&blob).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn compressed_blob_falls_back_to_plain_encrypted_when_incompressible() {
+        let crypt = CryptConfig::new([6u8; 32]);
+        // High-entropy data does not shrink, so it is encrypted without zstd.
+        let mut state = 0x9e37_79b9u32;
+        let plaintext: Vec<u8> = (0..32 * 1024)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect();
+        let blob = crypt.encrypt_compressed_blob(&plaintext).unwrap();
+        assert_eq!(&blob[0..8], &MAGIC_ENCRYPTED);
+        assert_eq!(crypt.decrypt_blob(&blob).unwrap(), plaintext);
     }
 }

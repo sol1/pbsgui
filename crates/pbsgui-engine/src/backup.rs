@@ -3,8 +3,11 @@
 //! resolving the saved connections and their secrets, and runs the optional
 //! pre/post scripts around it.
 
+use std::fmt::Write as _;
+use std::time::{Duration, Instant};
+
 use pbs_client::session::{backup_dynamic_file_with_progress, BackupStats, SessionParams};
-use pbs_client::{CryptConfig, Repository};
+use pbs_client::{BackupProgress, CryptConfig, Repository};
 use pbsgui_ipc::{
     FileInfo, Job, JobDestination, JobSource, Reply, SqlAuth, SqlBackupType, SqlProtection,
 };
@@ -15,6 +18,83 @@ use crate::{archive, changedet, connstore, enckey, metrics, notify, scripts, sec
 
 /// Archive name for a job's filesystem backup (a tar in a dynamic index).
 const ARCHIVE_NAME: &str = "files.didx";
+
+/// Stream a `Reply::Progress` at most this often, so a million-chunk backup does
+/// not flood the channel; the live metrics gauges update on the same cadence.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Build a throttled progress reporter for a running backup. It streams a rich
+/// status line (percent when a total is known, throughput, dedup, and live
+/// compression ratio) as `Reply::Progress`, and feeds the live `/metrics` gauges.
+pub(crate) fn progress_reporter(
+    events: Sender<Reply>,
+    job_id: String,
+) -> impl FnMut(&BackupProgress) + Send {
+    let started = Instant::now();
+    let mut last_emit: Option<Instant> = None;
+    move |p: &BackupProgress| {
+        let now = Instant::now();
+        let due = last_emit.is_none_or(|t| now.duration_since(t) >= PROGRESS_INTERVAL);
+        if !due {
+            return;
+        }
+        last_emit = Some(now);
+        let secs = now.duration_since(started).as_secs_f64().max(1e-3);
+        let throughput = p.bytes_done as f64 / secs;
+        metrics::record_progress(&job_id, p, throughput);
+        let fraction = if p.total_bytes > 0 {
+            (p.bytes_done as f64 / p.total_bytes as f64).min(0.999) as f32
+        } else {
+            0.0
+        };
+        let _ = events.try_send(Reply::Progress {
+            fraction,
+            message: format_progress(p, throughput),
+        });
+    }
+}
+
+/// A compact human-readable status line for a backup in progress.
+fn format_progress(p: &BackupProgress, bytes_per_sec: f64) -> String {
+    let mut s = if p.total_bytes > 0 {
+        let pct = (p.bytes_done as f64 / p.total_bytes as f64 * 100.0).min(99.9);
+        format!(
+            "{} / {} ({pct:.0}%)",
+            human_bytes(p.bytes_done),
+            human_bytes(p.total_bytes)
+        )
+    } else {
+        human_bytes(p.bytes_done)
+    };
+    let _ = write!(s, " \u{00b7} {}/s", human_bytes(bytes_per_sec as u64));
+    if p.chunks > 0 {
+        let dedup = p.reused as f64 / p.chunks as f64 * 100.0;
+        let _ = write!(s, " \u{00b7} dedup {dedup:.0}%");
+    }
+    // Compression ratio of the data actually uploaded (plaintext / stored).
+    if p.stored_bytes > 0 && p.uploaded_bytes > 0 {
+        let ratio = p.uploaded_bytes as f64 / p.stored_bytes as f64;
+        let _ = write!(s, " \u{00b7} zstd {ratio:.1}x");
+    }
+    s
+}
+
+/// Format a byte count with a binary unit (KiB/MiB/GiB/TiB), two significant
+/// decimals for the larger units.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.2} {}", UNITS[u])
+    }
+}
 
 /// Which backup a SQL job runs on a given trigger. A point-in-time job alternates
 /// full (chain-anchoring) and log backups; other plans only ever run a full. A
@@ -245,6 +325,8 @@ async fn do_backup(
                 server_id,
                 backup_id,
                 crypt,
+                job.compress,
+                &job.id,
                 events,
             )
             .await
@@ -308,25 +390,15 @@ async fn backup_files_to_pbs(
         .await;
 
     let params = pbs_session_params(server_id, backup_id, "host", unix_now())?;
-    let progress = events.clone();
     let result = backup_dynamic_file_with_progress(
         &params,
         ARCHIVE_NAME,
         &tmp,
         true,
+        job.compress,
         catalog,
         crypt,
-        move |done, total| {
-            let fraction = if total > 0 {
-                done as f32 / total as f32
-            } else {
-                0.0
-            };
-            let _ = progress.try_send(Reply::Progress {
-                fraction,
-                message: format!("{done}/{total} bytes"),
-            });
-        },
+        progress_reporter(events.clone(), job.id.clone()),
     )
     .await;
 
@@ -343,6 +415,8 @@ async fn backup_sql_to_pbs(
     server_id: &str,
     backup_id: &str,
     crypt: Option<CryptConfig>,
+    compress: bool,
+    job_id: &str,
     events: &Sender<Reply>,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
     if databases.is_empty() {
@@ -376,6 +450,7 @@ async fn backup_sql_to_pbs(
         };
 
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
+    let (mut uploaded_bytes, mut stored_bytes) = (0u64, 0u64);
     let mut backed_up = 0u32;
     for db in databases {
         let decision = crate::sql::probe::backup_decision(&mut gate, db).await?;
@@ -409,6 +484,12 @@ async fn backup_sql_to_pbs(
                 line: format!("backing up [{db}] to PBS (group {group})"),
             })
             .await;
+        // Estimate the database's data size up front so progress can show a
+        // percentage; a streamed VDI backup has no known total otherwise. The
+        // backup stream is roughly the used portion, so this is approximate.
+        let total_estimate = crate::sql::probe::data_size_bytes(&mut gate, db)
+            .await
+            .unwrap_or(0);
         let stats = crate::sql::vdi::backup_database_to_pbs(
             &conn.server,
             conn.port,
@@ -418,6 +499,9 @@ async fn backup_sql_to_pbs(
             &params,
             &archive,
             crypt.clone(),
+            compress,
+            total_estimate,
+            progress_reporter(events.clone(), job_id.to_string()),
             backup_type,
             db_copy_only,
         )
@@ -426,6 +510,8 @@ async fn backup_sql_to_pbs(
         uploaded += stats.uploaded;
         reused += stats.reused;
         bytes += stats.bytes;
+        uploaded_bytes += stats.uploaded_bytes;
+        stored_bytes += stats.stored_bytes;
         backed_up += 1;
     }
 
@@ -439,9 +525,12 @@ async fn backup_sql_to_pbs(
         ));
     }
 
-    let summary = format!(
+    let mut summary = format!(
         "backed up {backed_up} database(s) to PBS: {bytes} bytes, {chunks} chunks, {uploaded} uploaded, {reused} reused"
     );
+    if stored_bytes > 0 {
+        let _ = write!(summary, ", {stored_bytes} stored");
+    }
     // Return the aggregated stats so the run reports "ok" (not "no-change", which
     // only the change-detection skip should give) and notifications carry metrics.
     let stats = BackupStats {
@@ -449,6 +538,8 @@ async fn backup_sql_to_pbs(
         reused,
         uploaded,
         bytes,
+        uploaded_bytes,
+        stored_bytes,
         csum: [0u8; 32],
     };
     Ok((summary, Some(stats)))
@@ -497,6 +588,8 @@ async fn backup_sql_to_folder(
         reused: 0,
         uploaded: 0,
         bytes: total,
+        uploaded_bytes: 0,
+        stored_bytes: 0,
         csum: [0u8; 32],
     };
     Ok((summary, Some(stats)))
@@ -597,6 +690,11 @@ fn push_stats_env(env: &mut Vec<(String, String)>, stats: &BackupStats) {
     env.push(("PBSGUI_CHUNKS".into(), stats.chunks.to_string()));
     env.push(("PBSGUI_UPLOADED".into(), stats.uploaded.to_string()));
     env.push(("PBSGUI_REUSED".into(), stats.reused.to_string()));
+    env.push((
+        "PBSGUI_UPLOADED_BYTES".into(),
+        stats.uploaded_bytes.to_string(),
+    ));
+    env.push(("PBSGUI_STORED_BYTES".into(), stats.stored_bytes.to_string()));
 }
 
 async fn run_script(

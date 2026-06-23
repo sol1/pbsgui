@@ -16,6 +16,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -673,7 +674,7 @@ pub async fn backup_fixed_image(
 
     for chunk in image.chunks(chunk_size as usize) {
         let digest = index::chunk_digest(chunk);
-        let encoded = blob::encode_uncompressed(chunk);
+        let encoded = blob::encode_auto(chunk);
         writer
             .upload_chunk(wid, &digest, chunk.len() as u64, &encoded)
             .await?;
@@ -721,7 +722,7 @@ pub async fn backup_fixed_image(
 }
 
 /// Outcome of a deduplicated dynamic backup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BackupStats {
     /// Total chunks in the archive.
     pub chunks: u64,
@@ -729,10 +730,39 @@ pub struct BackupStats {
     pub reused: u64,
     /// Chunks uploaded this run.
     pub uploaded: u64,
-    /// Total archive bytes.
+    /// Total archive bytes (plaintext).
     pub bytes: u64,
+    /// Plaintext bytes of the chunks uploaded this run (i.e. not deduplicated).
+    pub uploaded_bytes: u64,
+    /// Encoded bytes actually stored for the uploaded chunks (after compression
+    /// and/or encryption). `uploaded_bytes / stored_bytes` is the compression
+    /// ratio; `bytes / stored_bytes` is the overall reduction including dedup.
+    pub stored_bytes: u64,
     /// Archive index csum.
     pub csum: [u8; DIGEST_LEN],
+}
+
+/// A live snapshot of a backup in progress, delivered to the progress callback
+/// after each chunk. All byte figures are cumulative for the current archive.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BackupProgress {
+    /// Plaintext bytes processed so far (the chunk-stream offset).
+    pub bytes_done: u64,
+    /// Estimated total plaintext bytes, for a percentage (0 if unknown).
+    pub total_bytes: u64,
+    /// Chunks seen so far.
+    pub chunks: u64,
+    /// Chunks already on the server (deduplicated, not uploaded).
+    pub reused: u64,
+    /// Chunks uploaded so far.
+    pub uploaded: u64,
+    /// Plaintext bytes of the chunks uploaded so far.
+    pub uploaded_bytes: u64,
+    /// Plaintext bytes of the chunks deduplicated away so far.
+    pub reused_bytes: u64,
+    /// Encoded bytes stored so far for uploaded chunks (lags slightly: chunks
+    /// still encoding are not yet counted).
+    pub stored_bytes: u64,
 }
 
 /// Back up a file as a deduplicated dynamic-index archive, then finish the
@@ -749,24 +779,28 @@ pub async fn backup_dynamic_file(
         archive_name,
         path,
         dedup_with_previous,
+        true,
         None,
         None,
-        |_, _| {},
+        |_| {},
     )
     .await
 }
 
 /// Like [`backup_dynamic_file`] but reports progress as `(bytes_done, total_bytes)`
-/// after each chunk, and optionally encrypts with `crypt`. Chunking and hashing
-/// run on a blocking thread; uploads run on this task.
+/// after each chunk, optionally compresses chunks with zstd (`compress`), and
+/// optionally encrypts with `crypt`. Chunking and hashing run on a blocking
+/// thread; compression and uploads run concurrently.
+#[allow(clippy::too_many_arguments)]
 pub async fn backup_dynamic_file_with_progress(
     params: &SessionParams,
     archive_name: &str,
     path: &Path,
     dedup_with_previous: bool,
+    compress: bool,
     catalog: Option<(String, Vec<u8>)>,
     crypt: Option<CryptConfig>,
-    on_progress: impl FnMut(u64, u64),
+    on_progress: impl FnMut(&BackupProgress),
 ) -> Result<BackupStats> {
     let total_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let file = std::fs::File::open(path)
@@ -782,6 +816,7 @@ pub async fn backup_dynamic_file_with_progress(
         params,
         archive_name,
         dedup_with_previous,
+        compress,
         file,
         total_bytes,
         catalog_rx,
@@ -793,10 +828,12 @@ pub async fn backup_dynamic_file_with_progress(
 
 /// Back up an arbitrary byte stream as a deduplicated dynamic-index archive,
 /// then finish the snapshot. `total_bytes` is used only for progress reporting
-/// (pass 0 if unknown). With `crypt`, chunks (and the extra blob) are AES-256-GCM
-/// encrypted and the chunk digests are keyed, matching the PBS scheme. The
-/// reader is consumed on a blocking thread while chunking and upload proceed
-/// concurrently, so a streamed source (e.g. a SQL VDI backup) is never staged.
+/// (pass 0 if unknown). With `compress`, each new chunk is zstd-compressed (only
+/// when that shrinks it); with `crypt`, chunks (and the extra blob) are
+/// AES-256-GCM encrypted and the chunk digests are keyed, matching the PBS scheme.
+/// The reader is consumed on a blocking thread while chunking, compression, and
+/// upload proceed concurrently, so a streamed source (e.g. a SQL VDI backup) is
+/// never staged.
 ///
 /// `catalog` is an optional extra named blob (a file listing, or SQL chain
 /// metadata) delivered through a channel so it can be computed *after* the stream
@@ -807,11 +844,12 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     params: &SessionParams,
     archive_name: &str,
     dedup_with_previous: bool,
+    compress: bool,
     reader: R,
     total_bytes: u64,
     catalog: Option<tokio::sync::oneshot::Receiver<(String, Vec<u8>)>>,
     crypt: Option<CryptConfig>,
-    mut on_progress: impl FnMut(u64, u64),
+    mut on_progress: impl FnMut(&BackupProgress),
 ) -> Result<BackupStats> {
     let mut writer = BackupWriter::connect(params).await?;
 
@@ -854,6 +892,11 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     let mut chunks = 0u64;
     let mut reused = 0u64;
     let mut uploaded = 0u64;
+    let mut uploaded_bytes = 0u64;
+    let mut reused_bytes = 0u64;
+    // Encoded bytes are summed by the upload tasks (the encoded size is only known
+    // after compression, which runs off this loop), so progress reads it atomically.
+    let stored_bytes = Arc::new(AtomicU64::new(0));
 
     // Pipeline chunk-data uploads: keep up to MAX_INFLIGHT_UPLOADS in flight on the
     // one HTTP/2 connection instead of awaiting each in turn.
@@ -868,21 +911,36 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
         chunks += 1;
         if known.contains(&digest) {
             reused += 1;
+            reused_bytes += len;
         } else {
-            let encoded = match &crypt {
-                Some(c) => c.encrypt_blob(&data)?,
-                None => blob::encode_uncompressed(&data),
-            };
-            // Acquiring a permit bounds in-flight uploads (back-pressuring the
-            // chunker once the window is full).
+            uploaded_bytes += len;
+            // Acquiring a permit bounds in-flight work (back-pressuring the
+            // chunker once the window is full). Acquired before spawning so at
+            // most MAX_INFLIGHT_UPLOADS chunks encode/upload concurrently.
             let permit = permits
                 .clone()
                 .acquire_owned()
                 .await
                 .map_err(|_| PbsError::Protocol("upload semaphore closed".into()))?;
             let up = uploader.clone();
+            let crypt = crypt.clone();
+            let stored = stored_bytes.clone();
             inflight.spawn(async move {
                 let _permit = permit; // released when this upload finishes
+                // Compression and encryption are CPU-bound; run them on a blocking
+                // thread so chunks encode in parallel without stalling the async
+                // workers or the h2 connection driver.
+                let encoded = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+                    match (&crypt, compress) {
+                        (Some(c), true) => c.encrypt_compressed_blob(&data),
+                        (Some(c), false) => c.encrypt_blob(&data),
+                        (None, true) => Ok(blob::encode_auto(&data)),
+                        (None, false) => Ok(blob::encode_uncompressed(&data)),
+                    }
+                })
+                .await
+                .map_err(|e| PbsError::Protocol(format!("encode task failed: {e}")))??;
+                stored.fetch_add(encoded.len() as u64, Ordering::Relaxed);
                 up.upload_dynamic_chunk(wid, digest, len, encoded).await
             });
             uploaded += 1;
@@ -892,7 +950,16 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
             }
         }
         builder.push(end_offset, digest);
-        on_progress(end_offset, total_bytes);
+        on_progress(&BackupProgress {
+            bytes_done: end_offset,
+            total_bytes,
+            chunks,
+            reused,
+            uploaded,
+            uploaded_bytes,
+            reused_bytes,
+            stored_bytes: stored_bytes.load(Ordering::Relaxed),
+        });
         all_digests.push(digest);
         all_offsets.push(start_offset);
     }
@@ -926,9 +993,11 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
         // The blob may be produced after the stream (e.g. SQL metadata known only
         // once BACKUP yields); a dropped sender just means no extra blob.
         if let Ok((name, content)) = rx.await {
-            let catalog_blob = match &crypt {
-                Some(c) => c.encrypt_blob(&content)?,
-                None => blob::encode_uncompressed(&content),
+            let catalog_blob = match (&crypt, compress) {
+                (Some(c), true) => c.encrypt_compressed_blob(&content)?,
+                (Some(c), false) => c.encrypt_blob(&content)?,
+                (None, true) => blob::encode_auto(&content),
+                (None, false) => blob::encode_uncompressed(&content),
             };
             writer.upload_blob(&name, &catalog_blob).await?;
         }
@@ -955,6 +1024,8 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
         reused,
         uploaded,
         bytes: size,
+        uploaded_bytes,
+        stored_bytes: stored_bytes.load(Ordering::Relaxed),
         csum,
     })
 }
@@ -1044,11 +1115,14 @@ impl ReaderClient {
     }
 }
 
-/// Decode a downloaded blob, decrypting it when it is an encrypted blob.
-/// Encrypted blobs are recognized by their magic, so plaintext blobs (e.g. the
-/// manifest) still decode without a key.
+/// Decode a downloaded blob, decrypting it when it is an encrypted blob and
+/// decompressing zstd blobs. Encrypted blobs (compressed or not) are recognized
+/// by their magic, so plaintext blobs (e.g. the manifest) still decode without a
+/// key; `blob::decode` handles the uncompressed and zstd variants.
 fn decode_blob(raw: &[u8], crypt: Option<&CryptConfig>) -> Result<Vec<u8>> {
-    if raw.len() >= 8 && raw[0..8] == blob::MAGIC_ENCRYPTED {
+    let is_encrypted = raw.len() >= 8
+        && (raw[0..8] == blob::MAGIC_ENCRYPTED || raw[0..8] == blob::MAGIC_ENCRYPTED_ZSTD);
+    if is_encrypted {
         match crypt {
             Some(c) => c.decrypt_blob(raw),
             None => Err(PbsError::Protocol(
