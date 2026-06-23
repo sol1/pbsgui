@@ -51,17 +51,20 @@ impl Responder {
     }
 }
 
-/// On Windows, give the pipe a DACL allowing SYSTEM, Administrators, and
-/// authenticated users to connect, so the unprivileged GUI can reach the engine
-/// even when it runs as a LocalSystem service. Falls back to the default on error.
+/// On Windows, give the pipe a DACL allowing only SYSTEM and Builtin
+/// Administrators to connect, so an administrator's GUI can reach the engine
+/// (which runs as a LocalSystem service) but ordinary local users cannot drive
+/// privileged operations through it. Falls back to the default on error.
 #[cfg(windows)]
 fn with_pipe_security(options: ListenerOptions<'_>) -> ListenerOptions<'_> {
     use interprocess::os::windows::local_socket::ListenerOptionsExt;
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     use widestring::U16CString;
 
-    // SYSTEM, Builtin Administrators, and Authenticated Users: full access.
-    const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)";
+    // SYSTEM and Builtin Administrators: full access. Authenticated Users is
+    // deliberately excluded - the engine runs as SYSTEM and does privileged work
+    // (RunJob, Restore, pre/post scripts), so only administrators may drive it.
+    const SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
     let wide = match U16CString::from_str(SDDL) {
         Ok(wide) => wide,
         Err(_) => return options,

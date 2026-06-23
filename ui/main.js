@@ -1084,10 +1084,6 @@ function topologyLabel(t) {
 }
 
 // tempdb cannot be backed up; only ONLINE user/system databases get a button.
-function canBackup(db) {
-  return db.state === "ONLINE" && db.name.toLowerCase() !== "tempdb";
-}
-
 function renderSqlDatabases(databases) {
   if (!databases || !databases.length) return '<div class="muted">no databases</div>';
   return databases
@@ -1097,78 +1093,14 @@ function renderSqlDatabases(databases) {
           ? ` · log wait: ${escapeHtml(db.log_reuse_wait)}`
           : "";
       const ag = db.in_availability_group ? " · in AG" : "";
-      const db64 = escapeHtml(db.name);
       const sysBadge = db.system ? '<span class="badge">system</span>' : "";
-      const button = canBackup(db)
-        ? `<span class="spacer"></span>` +
-          `<button type="button" class="sql-db-pbs" data-db="${db64}">To PBS</button>` +
-          `<button type="button" class="sql-db-backup" data-db="${db64}">To file</button>`
-        : "";
       return (
         `<div class="sql-db"><span class="sql-db-name">${escapeHtml(db.name)}</span>` +
         `${recoveryBadge(db.recovery_model)}${sysBadge}` +
-        `<span class="muted">${escapeHtml(db.state)}${ag}${wait}</span>${button}</div>`
+        `<span class="muted">${escapeHtml(db.state)}${ag}${wait}</span></div>`
       );
     })
     .join("");
-}
-
-// Back up a database over VDI to a local .bak file (validation step before PBS).
-async function backupDatabase(inst, dbName) {
-  const path = await invoke("pick_save_file", { defaultName: `${dbName}.bak` });
-  if (!path) return;
-  streamRun(`Backing up ${dbName}`, "backup_sql_to_file", {
-    server: inst.server,
-    port: inst.port ?? null,
-    auth: { kind: "integrated" },
-    password: null,
-    database: dbName,
-    outputPath: path,
-  });
-}
-
-// Back up a database over VDI straight to PBS, sending it to a saved PBS server.
-async function backupDatabaseToPbs(inst, dbName) {
-  const pbsServerId = el("sql-pbs-server").value;
-  if (!pbsServerId) {
-    return alert("Add a PBS server first (the PBS servers tab), then pick it as the target.");
-  }
-  streamRun(`Backing up ${dbName} to PBS`, "backup_sql_to_pbs", {
-    server: inst.server,
-    port: inst.port ?? null,
-    auth: { kind: "integrated" },
-    password: null,
-    database: dbName,
-    pbsServerId,
-    backupId: `mssql-${slug(dbName)}`,
-  });
-}
-
-// Populate the PBS target dropdown from saved PBS servers.
-async function populatePbsServers() {
-  let servers = [];
-  try {
-    servers = await invoke("list_pbs_servers");
-  } catch (err) {
-    /* engine offline; leave empty */
-  }
-  const sel = el("sql-pbs-server");
-  const previous = sel.value;
-  sel.innerHTML = "";
-  if (!servers.length) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "no PBS servers yet";
-    sel.append(opt);
-    return;
-  }
-  for (const s of servers) {
-    const opt = document.createElement("option");
-    opt.value = s.id;
-    opt.textContent = `${s.name} (${s.repository})`;
-    sel.append(opt);
-  }
-  if (previous) sel.value = previous;
 }
 
 // --- Saved SQL connections ---------------------------------------------
@@ -1507,12 +1439,6 @@ function renderSqlInstanceCard(inst, card) {
   card.querySelector(".sql-probe-btn").onclick = () => probeInstance(inst, card);
   card.querySelector(".sql-check-btn").onclick = () => checkInstance(inst, card);
   card.querySelector(".sql-save-btn").onclick = () => saveSqlConnection(inst);
-  card.querySelectorAll(".sql-db-backup").forEach((btn) => {
-    btn.onclick = () => backupDatabase(inst, btn.dataset.db);
-  });
-  card.querySelectorAll(".sql-db-pbs").forEach((btn) => {
-    btn.onclick = () => backupDatabaseToPbs(inst, btn.dataset.db);
-  });
 }
 
 function renderCheck(c) {
@@ -1609,7 +1535,6 @@ window.addEventListener("DOMContentLoaded", () => {
   };
   el("tab-sql").onclick = () => {
     showView("sql");
-    populatePbsServers();
     loadSqlConnections();
   };
   el("tab-pbs").onclick = () => {

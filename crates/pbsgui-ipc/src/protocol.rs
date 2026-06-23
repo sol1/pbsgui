@@ -551,35 +551,6 @@ pub enum Request {
         #[serde(default)]
         password: Option<String>,
     },
-    /// Back up a database over VDI to a local `.bak` file (the validation step
-    /// before streaming to PBS). Streams progress; the connection must be
-    /// `sysadmin`.
-    BackupSqlToFile {
-        server: String,
-        #[serde(default)]
-        port: Option<u16>,
-        auth: SqlAuth,
-        #[serde(default)]
-        password: Option<String>,
-        database: String,
-        output_path: String,
-    },
-    /// Back up a database over VDI, streaming it to PBS as a deduplicated
-    /// snapshot. Sends it to the saved PBS server `pbs_server_id` (its
-    /// repository, fingerprint, and stored secret); `backup_id` is the snapshot
-    /// group. Streams progress.
-    BackupSqlToPbs {
-        server: String,
-        #[serde(default)]
-        port: Option<u16>,
-        auth: SqlAuth,
-        #[serde(default)]
-        password: Option<String>,
-        database: String,
-        pbs_server_id: String,
-        backup_id: String,
-    },
-
     /// List the PBS snapshots for one database of a SQL backup job, by date/time.
     ListSqlSnapshots { job_id: String, database: String },
     /// Report the restore options for one database: the full restore points and,

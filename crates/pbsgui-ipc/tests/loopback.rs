@@ -62,14 +62,6 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
-        Request::BackupSqlToFile { .. } => {
-            let _ = responder
-                .send(&Reply::Finished {
-                    success: true,
-                    message: "backed up".into(),
-                })
-                .await;
-        }
         Request::CheckSql { .. } => {
             let _ = responder.send(&Reply::SqlChecks { checks: vec![] }).await;
         }
@@ -96,14 +88,6 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 .send(&Reply::Finished {
                     success: true,
                     message: "restored".into(),
-                })
-                .await;
-        }
-        Request::BackupSqlToPbs { .. } => {
-            let _ = responder
-                .send(&Reply::Finished {
-                    success: true,
-                    message: "backed up to pbs".into(),
                 })
                 .await;
         }

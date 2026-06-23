@@ -121,6 +121,13 @@ CI on Windows and exercised manually.
   Manager.
 - VDI backup and restore require the connecting login to be in the `sysadmin`
   server role.
+- The connection to SQL Server trusts the server's TLS certificate without
+  validating it (self-signed certificates are normal for SQL Server), so the path
+  to the SQL Server should be a trusted network segment. The PBS connection, by
+  contrast, pins the server's certificate fingerprint.
+- The engine's control socket is restricted to SYSTEM and local Administrators, so
+  the GUI must run as an administrator; the optional metrics endpoint is
+  unauthenticated and defaults to localhost.
 - Encryption keys cannot be recovered. If a key is lost, backups made with it
   cannot be restored, by anyone. Copy the key into a password manager when it is
   shown.
