@@ -280,8 +280,19 @@ impl H2Conn {
         let headers = read_headers(&mut tls).await?;
         let status_line = headers.lines().next().unwrap_or_default();
         if !status_line.contains("101") {
+            // A 403 means PBS authenticated the token but denied it; a 401 means the
+            // credentials themselves were not accepted. Spell that out, since the raw
+            // status is otherwise easy to misread as a protocol fault.
+            let hint = if status_line.contains("403") {
+                " (the PBS token lacks permission on this datastore/namespace, \
+                 or another owner holds this backup group)"
+            } else if status_line.contains("401") {
+                " (the PBS token id or secret was not accepted)"
+            } else {
+                ""
+            };
             return Err(PbsError::Protocol(format!(
-                "expected 101 Switching Protocols, got: {status_line}"
+                "expected 101 Switching Protocols, got: {status_line}{hint}"
             )));
         }
 
