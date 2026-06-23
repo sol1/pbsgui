@@ -32,7 +32,8 @@ CI on Windows and exercised manually.
   shown in the GUI and printed by the engine.
 - **SQL Server discovery.** Enumerate local instances from the registry (instance
   names, TCP port, login mode, clustered flag) with no credentials, and surface
-  when an instance has TCP/IP disabled.
+  when an instance has TCP/IP disabled. Network discovery finds instances via the
+  SQL Browser (UDP 1434), by broadcast or by scanning given hosts and subnets.
 - **SQL Server probe.** Connect to an instance and report version, edition,
   topology (standalone, failover cluster, or Always On with replica role), and
   databases with recovery model, state, Availability Group membership, and
@@ -106,9 +107,6 @@ CI on Windows and exercised manually.
 
 ## Planned
 
-- **Active Directory SQL discovery** (SPN lookup) and Availability Group listener
-  enumeration. SQL Browser (UDP 1434) broadcast and host/subnet scanning already
-  work.
 - **Additional authentication**: explicit Windows accounts and Azure AD / Entra.
 - **More notifications**: Microsoft Teams cards, a heartbeat / dead-man's-switch,
   per-job routing, a durable retry queue, and daily digests (email and a
@@ -118,6 +116,8 @@ CI on Windows and exercised manually.
 
 ## Known limitations and notes
 
+- Requires Proxmox Backup Server 4.2 or newer. Older 3.x servers reject the backup
+  protocol upgrade with a 403 and are not supported.
 - SQL Server connections require TCP/IP to be enabled on the instance (the client
   uses the TDS protocol over TCP). Fresh installs often ship with TCP/IP disabled;
   pbsgui detects and flags this during discovery, and the per-instance Check

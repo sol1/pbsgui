@@ -7,6 +7,9 @@ pbsgui talks to PBS using a clean-room Rust reimplementation of the PBS backup
 protocol, so it does not embed the official client and is free to ship under its
 own license (GPL-3.0).
 
+Requires **Proxmox Backup Server 4.2 or newer**. (Older 3.x servers reject the
+backup with a 403 at the protocol upgrade and are not supported.)
+
 ## Goals
 
 - Back up Microsoft SQL Server (standalone, Failover Cluster Instance, and Always
