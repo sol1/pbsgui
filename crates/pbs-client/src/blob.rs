@@ -175,7 +175,10 @@ mod tests {
         let payload = b"the quick brown fox ".repeat(4096);
         let blob = encode_compressed(&payload);
         assert_eq!(&blob[0..8], &MAGIC_ZSTD);
-        assert!(blob.len() < payload.len(), "expected the zstd blob to shrink");
+        assert!(
+            blob.len() < payload.len(),
+            "expected the zstd blob to shrink"
+        );
         assert_eq!(decode(&blob).unwrap(), payload);
     }
 

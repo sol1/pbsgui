@@ -19,9 +19,7 @@ use aes_gcm::aes::Aes256;
 use aes_gcm::{AesGcm, Nonce, Tag};
 use sha2::{Digest, Sha256};
 
-use crate::blob::{
-    crc32, zstd_compress, zstd_decompress, MAGIC_ENCRYPTED, MAGIC_ENCRYPTED_ZSTD,
-};
+use crate::blob::{crc32, zstd_compress, zstd_decompress, MAGIC_ENCRYPTED, MAGIC_ENCRYPTED_ZSTD};
 use crate::error::{PbsError, Result};
 
 /// AES-256-GCM with PBS's 16-byte IV (the default 16-byte tag).
@@ -236,7 +234,10 @@ mod tests {
         let plaintext = b"the quick brown fox ".repeat(4096);
         let blob = crypt.encrypt_compressed_blob(&plaintext).unwrap();
         assert_eq!(&blob[0..8], &MAGIC_ENCRYPTED_ZSTD);
-        assert!(blob.len() < plaintext.len(), "expected compression to shrink");
+        assert!(
+            blob.len() < plaintext.len(),
+            "expected compression to shrink"
+        );
         assert_eq!(crypt.decrypt_blob(&blob).unwrap(), plaintext);
     }
 

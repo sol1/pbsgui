@@ -234,7 +234,13 @@ pub(crate) async fn data_size_bytes(client: &mut SqlClient, database: &str) -> O
         "SELECT CAST(SUM(CAST(size AS bigint)) * 8192 AS bigint) \
          FROM sys.master_files WHERE database_id = DB_ID(N'{db}') AND type = 0"
     );
-    let row = client.simple_query(query).await.ok()?.into_row().await.ok()??;
+    let row = client
+        .simple_query(query)
+        .await
+        .ok()?
+        .into_row()
+        .await
+        .ok()??;
     row.get::<i64, _>(0).filter(|&v| v > 0).map(|v| v as u64)
 }
 

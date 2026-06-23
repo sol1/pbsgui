@@ -927,9 +927,9 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
             let stored = stored_bytes.clone();
             inflight.spawn(async move {
                 let _permit = permit; // released when this upload finishes
-                // Compression and encryption are CPU-bound; run them on a blocking
-                // thread so chunks encode in parallel without stalling the async
-                // workers or the h2 connection driver.
+                                      // Compression and encryption are CPU-bound; run them on a blocking
+                                      // thread so chunks encode in parallel without stalling the async
+                                      // workers or the h2 connection driver.
                 let encoded = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
                     match (&crypt, compress) {
                         (Some(c), true) => c.encrypt_compressed_blob(&data),
