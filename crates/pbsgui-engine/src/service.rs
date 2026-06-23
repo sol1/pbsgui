@@ -69,6 +69,15 @@ pub fn uninstall() -> anyhow::Result<()> {
         Err(_) => return Ok(()),
     };
     let _ = service.stop(); // best effort
+                            // Wait for the engine to actually stop so its exe is unlocked (an installer can
+                            // then overwrite it during an in-place upgrade). Bounded to ~10s.
+    for _ in 0..50 {
+        match service.query_status() {
+            Ok(status) if status.current_state == ServiceState::Stopped => break,
+            Ok(_) => std::thread::sleep(Duration::from_millis(200)),
+            Err(_) => break,
+        }
+    }
     service.delete()?;
     Ok(())
 }
