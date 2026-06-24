@@ -12,6 +12,7 @@ use pbsgui_ipc::{
     FileInfo, Job, JobDestination, JobSource, Reply, SqlAuth, SqlBackupType, SqlProtection,
 };
 use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::unix_now;
 use crate::{archive, changedet, connstore, enckey, metrics, notify, scripts, secrets, sqlsched};
@@ -119,13 +120,16 @@ fn sql_backup_spec(protection: &SqlProtection, run: SqlRun) -> (SqlBackupType, b
     }
 }
 
-/// Job ids with a run currently in progress, so a manual trigger cannot collide
-/// with a scheduled one (two concurrent backups to the same PBS group lock each
-/// other out on the server).
-fn running_jobs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    R.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+/// Jobs with a run currently in progress, mapped to a cancellation token. Lets a
+/// manual trigger avoid colliding with a scheduled one (two concurrent backups to
+/// the same PBS group lock each other out on the server), and lets a `CancelJob`
+/// request abort the in-flight run.
+fn running_jobs() -> &'static std::sync::Mutex<std::collections::HashMap<String, CancellationToken>>
+{
+    static R: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, CancellationToken>>,
+    > = std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 /// An RAII claim that a job is running; releases the claim when dropped.
@@ -137,12 +141,27 @@ impl Drop for RunGuard {
     }
 }
 
-/// Claim a job as running, or `None` if a run is already in progress for it.
-fn try_claim_run(job_id: &str) -> Option<RunGuard> {
-    if running_jobs().lock().unwrap().insert(job_id.to_string()) {
-        Some(RunGuard(job_id.to_string()))
-    } else {
-        None
+/// Claim a job as running, returning the guard and a fresh cancellation token, or
+/// `None` if a run is already in progress for it.
+fn try_claim_run(job_id: &str) -> Option<(RunGuard, CancellationToken)> {
+    let mut map = running_jobs().lock().unwrap();
+    if map.contains_key(job_id) {
+        return None;
+    }
+    let token = CancellationToken::new();
+    map.insert(job_id.to_string(), token.clone());
+    Some((RunGuard(job_id.to_string()), token))
+}
+
+/// Cancel the in-flight run for `job_id`, if any. Returns whether one was running.
+/// The run's own guard clears the registry entry when it unwinds.
+pub fn cancel_job(job_id: &str) -> bool {
+    match running_jobs().lock().unwrap().get(job_id) {
+        Some(token) => {
+            token.cancel();
+            true
+        }
+        None => false,
     }
 }
 
@@ -162,8 +181,8 @@ pub async fn run_job_kind(
     // One run per job at a time: skip (don't fail) if a run is already in flight,
     // so a manual trigger during a scheduled run cannot collide on the PBS group.
     // Held for the whole run; released when `_guard` drops.
-    let _guard = match try_claim_run(&job.id) {
-        Some(g) => g,
+    let (_guard, cancel) = match try_claim_run(&job.id) {
+        Some(c) => c,
         None => {
             let _ = events
                 .send(Reply::Log {
@@ -175,7 +194,37 @@ pub async fn run_job_kind(
     };
     let started = std::time::Instant::now();
     metrics::set_running(&job.id, true);
-    let outcome = run_inner(job, sql_run, &events).await;
+    // A CancelJob cancels the token: dropping the backup future closes the PBS
+    // session without finishing (PBS discards the partial), and the SQL VDI device
+    // thread polls the same token to SignalAbort.
+    let outcome = tokio::select! {
+        _ = cancel.cancelled() => Err(anyhow::anyhow!("cancelled by request")),
+        r = run_inner(job, sql_run, &events, &cancel) => r,
+    };
+
+    // A cancel is user-initiated: report it quietly (no failure notification) but
+    // record the attempt so the scheduler does not immediately re-run it.
+    if cancel.is_cancelled() {
+        let _ = events
+            .send(Reply::Log {
+                line: "backup cancelled".to_string(),
+            })
+            .await;
+        if let JobSource::Sql { .. } = job.source {
+            let now = unix_now();
+            match sql_run {
+                SqlRun::Full => sqlsched::record_full_attempt(&job.id, now),
+                SqlRun::Log => sqlsched::record_log_attempt(&job.id, now),
+            }
+        }
+        metrics::record_run(
+            &job.id,
+            metrics::RunResult::Failure,
+            started.elapsed().as_secs_f64(),
+            None,
+        );
+        return Ok("cancelled".to_string());
+    }
 
     if let Some(post) = script_of(&job.post_script) {
         let mut env = base_env(job);
@@ -278,6 +327,7 @@ async fn run_inner(
     job: &Job,
     sql_run: SqlRun,
     events: &Sender<Reply>,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
     // Pre-job script: a non-zero exit aborts the job.
     if let Some(pre) = script_of(&job.pre_script) {
@@ -309,7 +359,7 @@ async fn run_inner(
         }
     }
 
-    let (summary, stats) = do_backup(job, sql_run, events).await?;
+    let (summary, stats) = do_backup(job, sql_run, events, cancel).await?;
 
     // Record the fingerprint only after a successful backup.
     if let Some(fp) = &fingerprint {
@@ -328,6 +378,7 @@ async fn do_backup(
     job: &Job,
     sql_run: SqlRun,
     events: &Sender<Reply>,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
     match (&job.source, &job.destination) {
         (
@@ -373,6 +424,7 @@ async fn do_backup(
                 job.compress,
                 &job.id,
                 events,
+                cancel,
             )
             .await
         }
@@ -463,6 +515,7 @@ async fn backup_sql_to_pbs(
     compress: bool,
     job_id: &str,
     events: &Sender<Reply>,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
     if databases.is_empty() {
         anyhow::bail!("no databases selected");
@@ -547,6 +600,7 @@ async fn backup_sql_to_pbs(
             compress,
             total_estimate,
             progress_reporter(events.clone(), job_id.to_string()),
+            cancel.clone(),
             backup_type,
             db_copy_only,
         )
@@ -762,4 +816,24 @@ async fn run_script(
             .await;
     }
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cancel_job, try_claim_run};
+
+    #[test]
+    fn run_guard_claims_cancels_and_releases() {
+        let job = "test-run-guard-unique-9c1f";
+        let (guard, token) = try_claim_run(job).expect("first claim succeeds");
+        // A second run for the same job is blocked while the first holds the claim.
+        assert!(try_claim_run(job).is_none());
+        // Cancelling finds the in-flight run and trips its token.
+        assert!(cancel_job(job));
+        assert!(token.is_cancelled());
+        // Dropping the guard releases the claim so the job can run again.
+        drop(guard);
+        assert!(!cancel_job(job), "no run in progress once released");
+        assert!(try_claim_run(job).is_some());
+    }
 }

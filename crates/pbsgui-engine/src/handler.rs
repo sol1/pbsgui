@@ -52,6 +52,21 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             run_job(store, id, responder).await;
         }
 
+        Request::CancelJob { id } => {
+            let running = backup::cancel_job(&id);
+            let message = if running {
+                "cancelling the running backup".to_string()
+            } else {
+                "no run is in progress for this job".to_string()
+            };
+            let _ = responder
+                .send(&Reply::Finished {
+                    success: running,
+                    message,
+                })
+                .await;
+        }
+
         Request::ListSnapshots { job_id } => {
             let reply = match list_snapshots(&store, &job_id).await {
                 Ok(snapshots) => Reply::Snapshots { snapshots },

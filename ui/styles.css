@@ -523,6 +523,16 @@ button.primary:hover:not(:disabled) {
   filter: brightness(1.08);
 }
 
+button.danger {
+  background: #b3261e;
+  border-color: #b3261e;
+  color: #fff;
+}
+
+button.danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;

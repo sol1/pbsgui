@@ -34,6 +34,14 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::CancelJob { .. } => {
+            let _ = responder
+                .send(&Reply::Finished {
+                    success: false,
+                    message: "no run in progress".into(),
+                })
+                .await;
+        }
         Request::ListSnapshots { .. } => {
             let _ = responder
                 .send(&Reply::Snapshots { snapshots: vec![] })

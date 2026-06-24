@@ -80,6 +80,16 @@ async fn run_job(id: String, on_event: Channel<Reply>) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Cancel the in-flight run for a job, if any (best-effort).
+#[tauri::command]
+async fn cancel_job(id: String) -> Result<(), String> {
+    let replies = request_all(Request::CancelJob { id }).await?;
+    match first_error(&replies) {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
 /// List snapshots for a job's backup group (by date/time).
 #[tauri::command]
 async fn list_snapshots(job_id: String) -> Result<Vec<SnapshotInfo>, String> {
@@ -660,6 +670,7 @@ pub fn run() {
         save_job,
         delete_job,
         run_job,
+        cancel_job,
         list_snapshots,
         list_files,
         restore,

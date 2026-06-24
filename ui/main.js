@@ -771,6 +771,25 @@ async function streamRun(title, command, args) {
   el("log").textContent = "";
   setProgress(0, "starting...");
 
+  // Only a backup run is cancellable; wire the Stop button to cancel_job.
+  const stop = el("run-stop");
+  if (command === "run_job") {
+    stop.classList.remove("hidden");
+    stop.disabled = false;
+    stop.onclick = async () => {
+      stop.disabled = true;
+      appendLog("stopping...");
+      try {
+        await invoke("cancel_job", { id: args.id });
+      } catch (e) {
+        appendLog("stop failed: " + e);
+        stop.disabled = false;
+      }
+    };
+  } else {
+    stop.classList.add("hidden");
+  }
+
   const channel = new Channel();
   channel.onmessage = (reply) => {
     switch (reply.reply) {
@@ -799,6 +818,8 @@ async function streamRun(title, command, args) {
   } catch (err) {
     appendLog("error: " + err);
     setProgress(0, "failed");
+  } finally {
+    stop.classList.add("hidden");
   }
 }
 

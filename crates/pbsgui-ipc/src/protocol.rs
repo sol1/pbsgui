@@ -513,6 +513,10 @@ pub enum Request {
     DeleteJob { id: String },
     /// Run a saved job now; the engine streams progress until it finishes.
     RunJob { id: String },
+    /// Cancel the in-flight run for a job, if one is running (best-effort): the
+    /// PBS upload is dropped without finishing (so the partial snapshot is
+    /// discarded) and a SQL VDI backup is aborted. A no-op if nothing is running.
+    CancelJob { id: String },
     /// List snapshots for a job's backup group, by date/time.
     ListSnapshots { job_id: String },
     /// List the files inside a snapshot's archive.

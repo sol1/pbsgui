@@ -24,6 +24,8 @@ use pbs_client::{BackupProgress, CryptConfig, SessionParams};
 #[cfg(not(windows))]
 use pbsgui_ipc::SqlAuth;
 use pbsgui_ipc::SqlBackupType;
+#[cfg(not(windows))]
+use tokio_util::sync::CancellationToken;
 
 /// Combine the two halves of a VDI-to-PBS backup into one result.
 ///
@@ -158,6 +160,7 @@ pub async fn backup_database_to_pbs<F: FnMut(&BackupProgress) + Send>(
     _compress: bool,
     _total_estimate: u64,
     _on_progress: F,
+    _cancel: CancellationToken,
     _backup_type: SqlBackupType,
     _copy_only: bool,
 ) -> anyhow::Result<BackupStats> {
@@ -216,6 +219,7 @@ mod windows_impl {
     use pbs_client::{BackupProgress, BackupStats, CryptConfig, SessionParams};
     use pbsgui_ipc::{SqlAuth, SqlBackupType};
     use tiberius::Row;
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
     use windows::core::{interface, IUnknown, IUnknown_Vtbl, Interface, HRESULT, PCWSTR};
     use windows::Win32::System::Com::{
@@ -408,8 +412,10 @@ mod windows_impl {
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let loop_name = set_name.clone();
+        // The to-file validation path is short and not user-cancellable.
+        let cancel = CancellationToken::new();
         let device_loop = tokio::task::spawn_blocking(move || {
-            run_device_loop(&loop_name, Sink::File(file), ready_tx)
+            run_device_loop(&loop_name, Sink::File(file), ready_tx, cancel)
         });
 
         ready_rx
@@ -439,6 +445,7 @@ mod windows_impl {
         compress: bool,
         total_estimate: u64,
         on_progress: F,
+        cancel: CancellationToken,
         backup_type: SqlBackupType,
         copy_only: bool,
     ) -> anyhow::Result<BackupStats> {
@@ -451,8 +458,9 @@ mod windows_impl {
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let loop_name = set_name.clone();
+        let loop_cancel = cancel.clone();
         let device_loop = tokio::task::spawn_blocking(move || {
-            run_device_loop(&loop_name, Sink::Channel(tx), ready_tx)
+            run_device_loop(&loop_name, Sink::Channel(tx), ready_tx, loop_cancel)
         });
 
         ready_rx
@@ -802,10 +810,11 @@ mod windows_impl {
         set_name: &str,
         sink: Sink,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        cancel: CancellationToken,
     ) -> anyhow::Result<u64> {
         let mut sink = sink;
         run_device_session(set_name, ready, |vds| {
-            drain_device(vds, set_name, &mut sink)
+            drain_device(vds, set_name, &mut sink, &cancel)
         })
     }
 
@@ -883,18 +892,35 @@ mod windows_impl {
         Ok(unsafe { IClientVirtualDevice::from_raw(device_ptr) })
     }
 
+    /// How long `GetCommand` waits before returning so the cancel token can be
+    /// rechecked. SQL issues commands continuously during a backup, so this only
+    /// adds a periodic wake-up when the device is momentarily idle.
+    const CANCEL_POLL_MS: u32 = 1000;
+
     /// Backup direction: handle the device's `VDC_Write` commands by writing the
-    /// backup bytes to `sink`, until the device closes.
+    /// backup bytes to `sink`, until the device closes. Polls `cancel` between
+    /// commands; on cancellation it calls `SignalAbort` (the documented VDI abort,
+    /// which fails the in-flight `BACKUP`) and bails.
     fn drain_device(
         vds: &IClientVirtualDeviceSet2,
         set_name: &str,
         sink: &mut Sink,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<u64> {
         let device = open_device(vds, set_name)?;
         let mut total: u64 = 0;
         loop {
+            if cancel.is_cancelled() {
+                // Abort the device set so SQL Server's BACKUP fails promptly and
+                // the COM device thread is released (best effort).
+                let _ = unsafe { vds.SignalAbort() };
+                anyhow::bail!("backup cancelled");
+            }
             let mut cmd_ptr: *mut VDCCommand = std::ptr::null_mut();
-            let hr = unsafe { device.GetCommand(u32::MAX, &mut cmd_ptr) };
+            let hr = unsafe { device.GetCommand(CANCEL_POLL_MS, &mut cmd_ptr) };
+            if hr == VD_E_TIMEOUT {
+                continue; // re-check the cancel token, then wait again
+            }
             if hr == VD_E_CLOSE {
                 break; // normal end of stream
             }
