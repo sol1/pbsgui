@@ -353,10 +353,23 @@ async fn test_pbs_server(
         Ok(true) => Ok(format!(
             "Reached PBS; the token can back up to datastore \"{acl}\"."
         )),
-        Ok(false) => anyhow::bail!(
-            "Reached PBS and the token authenticates, but it lacks Datastore.Backup on \
-             /datastore/{acl}. Assign the DatastoreBackup role to the token."
-        ),
+        Ok(false) => {
+            // The token authenticates but has no effective Datastore.Backup. The
+            // usual cause is privilege separation: a token's rights are the
+            // INTERSECTION of the token's and its owning user's roles, so granting
+            // the role to only the token is not enough - the user needs it too.
+            let auth_id = repo.auth_id.as_deref().unwrap_or_default();
+            let user = auth_id.split('!').next().unwrap_or(auth_id);
+            anyhow::bail!(
+                "Reached PBS and the token authenticates, but it has no effective \
+                 Datastore.Backup on /datastore/{acl}. PBS API tokens use privilege \
+                 separation: a token's rights are the intersection of the token's and \
+                 its user's roles, so both need the DatastoreBackup role on this path. \
+                 If only the token has it, grant the user '{user}' too, e.g. on the PBS \
+                 host:\n  proxmox-backup-manager acl update /datastore/{acl} \
+                 DatastoreBackup --auth-id '{user}'"
+            )
+        }
         Err(e) => {
             let detail = e.to_string();
             if detail.contains("401") {
