@@ -460,6 +460,14 @@ async fn backup_files_to_pbs(
             line: format!("archiving {} source(s)", sources.len()),
         })
         .await;
+    // Building the tar can take a while for large sources; reflect that in the
+    // status instead of leaving it on the generic "starting...".
+    let _ = events
+        .send(Reply::Progress {
+            fraction: 0.0,
+            message: format!("archiving {} source(s)...", sources.len()),
+        })
+        .await;
 
     // Archive the sources to a temp tar (blocking work off the async runtime).
     let tmp = std::env::temp_dir().join(format!("pbsgui-{}-{}.tar", job.id, unix_now()));
@@ -521,6 +529,15 @@ async fn backup_sql_to_pbs(
         anyhow::bail!("no databases selected");
     }
     let (conn, password) = sql_conn_and_password(connection_id)?;
+
+    // Reflect the connect phase in the status rather than leaving it on the
+    // generic "starting..." while the SQL handshake and readiness queries run.
+    let _ = events
+        .send(Reply::Progress {
+            fraction: 0.0,
+            message: "connecting to SQL Server...".to_string(),
+        })
+        .await;
 
     // One connection to ask SQL whether this replica should back up each database
     // (Always On preferred-replica gating; standalone databases always proceed).
@@ -588,6 +605,16 @@ async fn backup_sql_to_pbs(
         let total_estimate = crate::sql::probe::data_size_bytes(&mut gate, db)
             .await
             .unwrap_or(0);
+        // A large database can read for minutes before the first bytes reach PBS
+        // (SQL Server checkpoints and scans the data files first), so show the read
+        // phase up front instead of sitting on the generic "starting...". Real
+        // byte-progress takes over as soon as chunks start streaming.
+        let _ = events
+            .send(Reply::Progress {
+                fraction: 0.0,
+                message: format!("reading [{db}] from SQL Server..."),
+            })
+            .await;
         let stats = crate::sql::vdi::backup_database_to_pbs(
             &conn.server,
             conn.port,
