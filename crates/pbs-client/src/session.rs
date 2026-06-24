@@ -1164,6 +1164,37 @@ impl ReaderClient {
         }
         Ok(out)
     }
+
+    /// Stream a dynamic-index archive to an async writer, decoding (and decrypting)
+    /// each chunk as it arrives. Unlike [`Self::restore_dynamic_archive`], the whole
+    /// archive is never held in memory, so a very large archive (a multi-hundred-GB
+    /// SQL backup) can be written straight to a file. Returns the bytes written.
+    pub async fn restore_dynamic_archive_to_writer<W>(
+        &mut self,
+        archive_name: &str,
+        crypt: Option<&CryptConfig>,
+        out: &mut W,
+    ) -> Result<u64>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let index_bytes = self.download(archive_name).await?;
+        let index = DynamicIndex::parse(&index_bytes)?;
+        if !index.verify_csum() {
+            return Err(PbsError::Protocol(
+                "downloaded dynamic index failed its csum check".into(),
+            ));
+        }
+        let mut written = 0u64;
+        for digest in index.digests() {
+            let chunk_blob = self.download_chunk(digest).await?;
+            let chunk = decode_blob(&chunk_blob, crypt)?;
+            out.write_all(&chunk).await?;
+            written += chunk.len() as u64;
+        }
+        out.flush().await?;
+        Ok(written)
+    }
 }
 
 /// Decode a downloaded blob, decrypting it when it is an encrypted blob and

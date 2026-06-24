@@ -819,6 +819,64 @@ async fn download_sql_image(
         .await?)
 }
 
+/// Stream one SQL snapshot's native backup stream from PBS straight to `final_path`
+/// (decrypted and decompressed), without holding the whole image in memory. Writes
+/// to a `.partial` file and renames it into place on success, so an interrupted
+/// download never leaves a file that looks like a complete backup. Returns the
+/// bytes written.
+async fn download_sql_image_to_file(
+    ctx: &SqlJobPbs,
+    group: &str,
+    archive: &str,
+    backup_time: i64,
+    final_path: &std::path::Path,
+) -> anyhow::Result<u64> {
+    if final_path.exists() {
+        anyhow::bail!("{} already exists", final_path.display());
+    }
+    let params = SessionParams::from_repository(
+        &ctx.repo,
+        ctx.secret.clone(),
+        &ctx.fingerprint,
+        SQL_BACKUP_TYPE,
+        group,
+        backup_time,
+    )?;
+    let mut reader = ReaderClient::connect(&params).await?;
+
+    let mut tmp = final_path.as_os_str().to_owned();
+    tmp.push(".partial");
+    let tmp_path = std::path::PathBuf::from(tmp);
+    let file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("creating {}: {e}", tmp_path.display()))?;
+    let mut writer = tokio::io::BufWriter::new(file);
+
+    let streamed = reader
+        .restore_dynamic_archive_to_writer(archive, ctx.crypt.as_ref(), &mut writer)
+        .await;
+    // Close the file (flush the buffer) before renaming or removing it; Windows will
+    // not rename or delete a file that is still open.
+    let flushed = tokio::io::AsyncWriteExt::flush(&mut writer).await;
+    drop(writer);
+
+    let bytes = match (streamed, flushed) {
+        (Ok(bytes), Ok(())) => bytes,
+        (Err(e), _) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(e.into());
+        }
+        (Ok(_), Err(e)) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(anyhow::anyhow!("writing {}: {e}", tmp_path.display()));
+        }
+    };
+    tokio::fs::rename(&tmp_path, final_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("finalising {}: {e}", final_path.display()))?;
+    Ok(bytes)
+}
+
 /// Download and parse one SQL snapshot's chain-metadata blob (`None` on any
 /// failure, e.g. an older snapshot without it).
 async fn download_sql_meta(
@@ -914,20 +972,18 @@ async fn export_sql_full(
 ) -> anyhow::Result<String> {
     let (group, archive) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
-    let _ = responder
-        .send(&Reply::Log {
-            line: "downloading the full backup from PBS".to_string(),
-        })
-        .await;
-    let image = download_sql_image(ctx, &group, &archive, backup_time).await?;
-    let size = image.len() as u64;
     let name = format!(
         "{}-{}.bak",
         sanitize_filename(database),
         file_stamp(backup_time)
     );
     let path = dir.join(&name);
-    write_export_file(&path, image).await?;
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!("downloading the full backup from PBS to {name}"),
+        })
+        .await;
+    let size = download_sql_image_to_file(ctx, &group, &archive, backup_time, &path).await?;
     let _ = responder
         .send(&Reply::Log {
             line: format!("wrote {name} ({})", human_size(size)),
@@ -989,13 +1045,12 @@ async fn export_sql_chain(
         .await;
 
     // Download and write each in apply order; the index-prefixed names sort to the
-    // replay order. Only one image is held in memory at a time.
+    // replay order. Each archive streams straight to its file, so only one chunk is
+    // ever held in memory (a multi-hundred-GB database exports without buffering).
     let mut files: Vec<(String, bool)> = Vec::new();
     for (i, item) in chain.iter().enumerate() {
         let is_log = item.meta.is_log();
         let group = if is_log { &log_group } else { &full_group };
-        let image = download_sql_image(ctx, group, &archive, item.snapshot_time).await?;
-        let size = image.len() as u64;
         let name = format!(
             "{}-{:02}-{}-{}.{}",
             sanitize_filename(database),
@@ -1004,7 +1059,9 @@ async fn export_sql_chain(
             file_stamp(item.snapshot_time),
             if is_log { "trn" } else { "bak" },
         );
-        write_export_file(&dir.join(&name), image).await?;
+        let size =
+            download_sql_image_to_file(ctx, group, &archive, item.snapshot_time, &dir.join(&name))
+                .await?;
         let _ = responder
             .send(&Reply::Log {
                 line: format!("wrote {name} ({})", human_size(size)),
