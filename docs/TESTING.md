@@ -25,7 +25,7 @@ Windows against real SQL Server and PBS. This page makes that integration layer 
 
 - The engine service installed and running; a SQL Server with TCP/IP enabled and
   `NT AUTHORITY\SYSTEM` (or your connection's login) in the `sysadmin` role; a PBS
-  server with an API token and a datastore (see [DEVELOPMENT.md](DEVELOPMENT.md)).
+  server with an API token and a datastore (see [DEVELOPERS.md](DEVELOPERS.md)).
 - In the GUI: a saved SQL connection and a saved PBS server.
 - A test database in **FULL** recovery for the point-in-time scenarios.
 - The point-in-time verifier: `scripts/sql-pitr-probe.ps1`.

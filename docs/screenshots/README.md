@@ -6,7 +6,7 @@ cannot be shown on the headless Linux build).
 
 ## Capturing
 
-1. Build and run the app on Windows (see [../DEVELOPMENT.md](../DEVELOPMENT.md)),
+1. Build and run the app on Windows (see [../DEVELOPERS.md](../DEVELOPERS.md)),
    with the engine running and a PBS server and SQL Server connection configured
    so the views have real content.
 2. Take each shot below at a consistent window size (about 1100x800), PNG, and

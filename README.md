@@ -1,132 +1,115 @@
 # pbsgui
 
-A Windows GUI for backing up Windows machines and Microsoft SQL Server to a
+**Back up Windows and Microsoft SQL Server to a
 [Proxmox Backup Server](https://www.proxmox.com/en/products/proxmox-backup-server)
-(PBS). The primary goal is SQL Server aware backup and restore (standalone,
-Failover Cluster Instances, and Always On Availability Groups), with browse and
-point-in-time restore.
+with a native Windows app, and restore to any point in time.**
 
-> Status: early scaffold. The project structure, protocol design, and SQL backup
-> approach are in place; the backup engine is being implemented. It does not back
-> up anything yet.
+pbsgui talks to PBS through a clean-room reimplementation of the PBS backup
+protocol, so it runs natively on Windows without the Linux-only official client.
+It is built for SQL Server: standalone instances, Failover Cluster Instances, and
+Always On Availability Groups, with full and transaction-log chains and restore to
+a moment in time.
 
-## Why this exists
+![Jobs dashboard](docs/screenshots/pbsgui-joblist.png)
 
-The official Proxmox backup client is Linux only and its Rust crates do not build
-on Windows, so pbsgui talks to PBS through a clean-room Rust implementation of the
-PBS backup protocol. Two things set it apart from existing Windows PBS clients:
+> Early release. Test against non-production data first, and please report issues.
 
-- SQL Server aware backups (full, differential, and transaction log) that respect
-  recovery models and the log chain, instead of generic full-volume snapshots.
-- Client side encryption.
+## Features
 
-## Architecture
+- **SQL Server backup, done right.** Stream backups straight to PBS over the
+  Virtual Device Interface, with no on-disk staging. Pick what you want to be able
+  to restore, not a raw backup type: **point-in-time recovery** (scheduled fulls
+  plus frequent log backups that also truncate the log), **daily restore points**,
+  or a **secondary copy** (copy-only fulls that coexist with another backup tool).
+- **Restore to the second.** Recover a database to any moment in the retained
+  window (the covering full plus its log chain, replayed with `STOPAT`), or to a
+  chosen full, over the original name or a new one.
+- **Always On and Failover Cluster aware.** Install on every node; it coordinates
+  through SQL Server with no link between the pbsgui instances. Exactly one node
+  backs up at a time and it follows failover automatically.
+- **File and folder backup** with content-defined chunking and incremental
+  deduplication, so repeat backups are fast and small. Browse snapshots and restore
+  in full or by selected files.
+- **Compression and encryption.** zstd compression before upload (on by default,
+  never inflates incompressible data) and optional client-side AES-256-GCM, byte
+  compatible with the PBS scheme; keys live in the Windows Credential Manager and
+  never reach the server.
+- **Runs unattended as a Windows service.** Scheduled jobs run with the GUI closed
+  and across logoff and reboot. A tray icon and a jobs dashboard show status and
+  size-over-time, and live progress lets you see, and stop, a backup that is still
+  running, including one the scheduler started in the background.
+- **Notifications** on success, failure, and a stalled point-in-time chain, via
+  email (SMTP) and a Slack-compatible webhook.
+- **Optional Prometheus metrics** (an HTTP `/metrics` endpoint or a textfile), off
+  by default and secret-free.
 
-```
-+-------------------------------+        named pipe        +---------------------------+
-|  pbsgui (Tauri desktop app)   | <----------------------> |  pbsgui-engine            |
-|  unprivileged control / UI    |  requests, status, logs  |  elevated Windows Service |
-+-------------------------------+                          |  (or sidecar)             |
-                                                           |   - PBS protocol client   |
-                                                           |   - SQL Server VDI        |
-                                                           |   - VSS filesystem backup |
-                                                           |   - scheduler             |
-                                                           +---------------------------+
-```
+See [docs/STATUS.md](docs/STATUS.md) for the full list of what works, what is in
+progress, and the roadmap.
 
-The GUI runs unprivileged and only controls and monitors. The engine runs elevated
-(as a Windows Service, so scheduled backups survive logoff and reboot, or as a
-sidecar for interactive runs) and does the privileged SQL VDI and VSS work.
+## Requirements
 
-SQL backups use the Virtual Device Interface (VDI): a `BACKUP DATABASE/LOG ... TO
-VIRTUAL_DEVICE` statement streams SQL's native backup bytes to the engine, which
-forwards them to PBS as a fixed-index image, one snapshot per backup operation,
-with the LSN metadata needed to drive correct restore ordering.
+- **Proxmox Backup Server 4.2 or newer** (older 3.x servers reject the backup at
+  the protocol upgrade and are not supported).
+- **Windows** with the WebView2 runtime (preinstalled on current Windows; the full
+  installer can bundle it).
+- For SQL Server: **TCP/IP enabled** on the instance, and the engine's service
+  identity (`NT AUTHORITY\SYSTEM`) in the **`sysadmin`** server role. pbsgui detects
+  and flags a disabled TCP/IP during discovery and tells you the fix.
 
-## Repository layout
+## Install
 
-```
-crates/pbs-client      clean-room Rust client for the PBS backup protocol
-crates/pbsgui-engine   the privileged backup engine (PBS + SQL + VSS + IPC + service)
-src-tauri              the Tauri desktop GUI
-ui                     the frontend (static, no build step yet)
-docs                   architecture and design notes
-```
+Download an installer from the
+[latest release](https://github.com/sol1/pbsgui/releases/latest). Two are attached;
+pick one:
 
-## Building
+- **`pbsgui_<ver>_x64-setup.exe`** (full, ~200 MB) bundles the WebView2 runtime and
+  installs with no internet access. Use this for air-gapped servers.
+- **`pbsgui_<ver>_x64-setup-online.exe`** (small) downloads the WebView2 runtime at
+  install time if it is missing. Use this when the machine has internet.
 
-Prerequisites: a recent stable Rust toolchain. The UI is static (no Node build
-step). On Windows you also need NASM on `PATH` (the `ring` crypto library needs
-it), the WebView2 runtime (preinstalled on current Windows), and the Tauri CLI
-(`npm install -g @tauri-apps/cli@^2`).
+1. Download and run one of the installers.
+2. The installer is unsigned, so Windows SmartScreen may warn: choose
+   **More info -> Run anyway**.
+3. The installer registers and starts the `pbsgui-engine` background service and
+   opens the app. Add a PBS server and (optionally) a SQL Server connection, then
+   create a job.
 
-```sh
-# the cross-platform crates (CI checks these on Linux too)
-cargo test -p pbs-client -p pbsgui-ipc -p pbsgui-engine
+To upgrade, run the new installer over the old one: it restarts the service for you
+and keeps your jobs, connections, servers, settings, and secrets.
 
-# run the desktop app in development
-tauri dev
-```
+## How it works
 
-The GUI connects to the engine but does not start it. In development, run the
-engine yourself in another terminal:
+pbsgui is two processes. The **GUI** runs unprivileged and only configures and
+monitors, so closing it never stops a backup. The **engine** does the privileged
+work (the PBS protocol, the scheduler, SQL Server, secret storage) and runs as a
+LocalSystem Windows service, so scheduled jobs run unattended. The GUI requests
+admin rights at launch (a UAC prompt) so it can connect to the engine's
+administrator-only control socket. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-```sh
-cargo run -p pbsgui-engine -- serve
-```
+## Good to know
 
-In an installed build the engine runs as a Windows service instead (below). Then
-create a job, pick sources, and click Run; progress and logs stream from the engine.
+- **The app prompts for elevation (UAC) at launch** so the GUI can reach the
+  engine; accept the prompt. The service runs scheduled jobs whether or not the GUI
+  is open.
+- **Encryption keys cannot be recovered.** If you lose a key, backups made with it
+  cannot be restored, by anyone. The key is shown only once, when you create or
+  import it, so copy it into a password manager then.
+- **Always On:** give each replica's job the same backup id (it defaults to the
+  Availability Group name) so they share one continuous chain.
 
-### Building the Windows installer locally
+## Documentation
 
-Plain `tauri build` produces a GUI-only installer. To build the full installer
-that bundles the engine as a sidecar, the engine has to be staged first; the
-helper script does that for you (run it from the repository root):
+- [docs/](docs/README.md) - overview, screenshots, and the guides below.
+- [STATUS.md](docs/STATUS.md) - what works, what is in progress, and planned.
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) - components and the SQL backup strategy.
+- [DEVELOPERS.md](docs/DEVELOPERS.md) - build from source, run, and test.
+- [TESTING.md](docs/TESTING.md) - the test tiers and the manual integration pass.
 
-```bat
-scripts\build-windows-installer.bat
-```
+## Building from source
 
-It builds the engine, copies it into `src-tauri\binaries\` with the target-triple
-name Tauri expects, then runs `tauri build --config src-tauri\engine-sidecar.conf.json`.
-The installer lands in `target\release\bundle\nsis\`.
-
-## Backup jobs
-
-The GUI manages named backup jobs. A job has a PBS destination (repository,
-fingerprint, backup id), source folders/files chosen with a native picker,
-optional glob excludes, and a schedule (manual, every N minutes, or daily at a
-local time). The engine stores jobs as JSON in its config directory
-(`%ProgramData%\pbsgui` on Windows). The installer registers and starts the
-engine as a Windows service (LocalSystem), so scheduled jobs run **unattended** -
-even with the GUI closed, and across logoff and reboot. The GUI connects to that
-service and shows its status; closing the GUI never stops backups. (`pbsgui-engine
-service install` / `uninstall` manage it manually, elevated.)
-
-A job can also **skip its run** when no source file changed since the last
-success (change detection), and run a **pre-job script** (a non-zero exit aborts)
-and a **post-job script** (which receives the outcome in `PBSGUI_*` environment
-variables).
-
-Backups are deduplicated: a job's sources are archived and split into
-content-defined chunks, and each run uploads only the chunks that changed since
-the previous snapshot, so repeated backups are fast and small.
-
-Secrets are not written to the config file. The PBS API token secret is kept in
-the OS credential store (Windows Credential Manager), keyed by job id; a job
-record never contains it.
-
-## Continuous integration and installer
-
-`.github/workflows/ci.yml` lints and tests the cross-platform crates on Linux,
-and on Windows builds the engine, stages it as a Tauri sidecar, and produces an
-NSIS installer (uploaded as the `pbsgui-nsis-installer` artifact). The installer
-bundles both the GUI and the engine.
-
-Code signing is deferred for now (Azure Trusted Signing is not available to
-Australian entities), so installers are unsigned until a signing identity is in
-place. Windows will show a SmartScreen warning until then.
+pbsgui is a Cargo workspace with a static front end. See
+[docs/DEVELOPERS.md](docs/DEVELOPERS.md) for prerequisites, building the app and
+installer, and the development loop.
 
 ## License
 

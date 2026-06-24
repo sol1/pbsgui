@@ -1,4 +1,4 @@
-# Development
+# Developers
 
 pbsgui is a Cargo workspace plus a static front end. The cross-platform crates
 build and test on Linux or Windows; the full desktop app, the installer, and the

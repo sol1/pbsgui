@@ -74,6 +74,6 @@ See [screenshots/README.md](screenshots/README.md) for how these are captured.
 ## More
 
 - [STATUS.md](STATUS.md) - what works today, what is in progress, and the roadmap.
-- [DEVELOPMENT.md](DEVELOPMENT.md) - prerequisites, building, testing, and the dev loop.
+- [DEVELOPERS.md](DEVELOPERS.md) - prerequisites, building, testing, and the dev loop.
 - [TESTING.md](TESTING.md) - the test tiers and the manual integration / point-in-time pass.
 - [ARCHITECTURE.md](ARCHITECTURE.md) - components, the SQL Server backup strategy, and the storage model.
