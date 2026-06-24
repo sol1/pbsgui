@@ -12,8 +12,8 @@ pub mod transport;
 pub use protocol::{
     CheckStatus, EmailSecurity, EmailSettings, EncryptionKeyInfo, FileInfo, Job, JobDestination,
     JobSource, MetricsMode, MetricsSettings, NotificationSettings, NotifyChannel, PbsServer, Reply,
-    Request, Schedule, SnapshotInfo, SqlAuth, SqlAuthMode, SqlBackupType, SqlCheck, SqlConnection,
-    SqlDatabase, SqlDiscoverySource, SqlFullPoint, SqlInstance, SqlProbe, SqlProtection,
-    SqlRestorePoint, SqlRestoreWindow, SqlTopology, WebhookSettings,
+    Request, RunningJob, Schedule, SnapshotInfo, SqlAuth, SqlAuthMode, SqlBackupType, SqlCheck,
+    SqlConnection, SqlDatabase, SqlDiscoverySource, SqlFullPoint, SqlInstance, SqlProbe,
+    SqlProtection, SqlRestorePoint, SqlRestoreWindow, SqlTopology, WebhookSettings,
 };
 pub use transport::{send_request, serve, socket_name, Responder, DEFAULT_SOCKET};

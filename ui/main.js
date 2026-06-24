@@ -26,6 +26,11 @@ let selectedRunId = null;
 let runSeq = 0;
 const runningJobs = new Set(); // job ids with a UI-initiated run in progress
 let jobsCache = []; // last-loaded jobs, for re-resolving a job by id
+// Jobs the engine reports as running (manual OR scheduled), polled so a backup
+// still going in the background is visible the moment the window is opened.
+// jobId -> { job_id, started, fraction, message }.
+let engineRunning = new Map();
+let runningPollTimer = null;
 
 // Derive a PBS-safe snapshot group id from a job name.
 function slug(s) {
@@ -173,6 +178,8 @@ async function loadJobs() {
       `<div class="job-meta">${escapeHtml(sourceSummary(job))} <span class="arrow">&rarr;</span> ` +
       `${escapeHtml(destSummary(job))} <span class="dot-sep"></span> last backup ${escapeHtml(relativeTime(job.last_run))}</div>` +
       (failed ? `<div class="job-error">${escapeHtml(job.last_status)}</div>` : "") +
+      '<div class="job-running hidden"><div class="mini-track">' +
+      '<div class="mini-bar"></div></div><span class="mini-msg"></span></div>' +
       "</div>" +
       '<div class="job-spark"><div class="spark-wrap"><div class="spark-empty">&hellip;</div></div>' +
       '<div class="spark-label"></div></div>' +
@@ -199,6 +206,8 @@ async function loadJobs() {
       label.innerHTML = `${escapeHtml(formatBytes(points[points.length - 1].s))} <span class="muted">latest</span>`;
     });
   }
+  // Reflect any in-progress runs (including background ones) on the fresh cards.
+  updateCardProgress();
 }
 
 // Healthy / failed / never-run, from the last recorded outcome ("ok" or an error).
@@ -790,6 +799,7 @@ function setRunProgress(run, fraction, label) {
     el("progress-bar").style.width = `${Math.round(fraction * 100)}%`;
     el("progress-label").textContent = label;
   }
+  if (run.jobId) updateCardProgress();
 }
 
 // Compact tab label: drop the "Running: " prefix backups use.
@@ -870,13 +880,59 @@ function selectRun(runId) {
   renderRunPanel();
 }
 
-// Show the run for a given job (used by a card's "Running..." button).
-function selectRunForJob(jobId) {
+// Open the output for a running job (a card's "Running..." button): its live
+// stream if this window started it, otherwise a monitor that follows the engine's
+// reported progress for a run started in the background.
+function viewRun(jobId) {
+  el("run").classList.remove("hidden");
   for (const run of runs.values()) {
-    if (run.jobId === jobId) {
-      el("run").classList.remove("hidden");
+    if (run.jobId === jobId && run.running) {
       selectRun(run.runId);
       return;
+    }
+  }
+  monitorJob(jobId);
+}
+
+// Open a read-only monitor for a run already in progress in the engine. There is
+// no live log (this window did not start it), but progress is followed by polling
+// and Stop still works.
+function monitorJob(jobId) {
+  const job = jobsCache.find((j) => j.id === jobId);
+  const info = engineRunning.get(jobId);
+  const runId = "run-" + ++runSeq;
+  const run = {
+    runId,
+    title: "Running: " + (job ? job.name : jobId),
+    jobId,
+    cancellable: true,
+    monitor: true,
+    logText:
+      "Monitoring a run already in progress" +
+      (info ? " (started " + relativeTime(info.started) + ")" : "") +
+      ". A live log is only kept for runs started from this window.\n",
+    fraction: info ? info.fraction : 0,
+    label: info ? info.message : "running...",
+    running: true,
+    success: null,
+  };
+  runs.set(runId, run);
+  el("run").classList.remove("hidden");
+  selectRun(runId);
+}
+
+// Follow each open monitor's progress from the latest engine poll; when its job
+// is no longer running, close it out and refresh the cards for the real outcome.
+function updateMonitors() {
+  for (const run of runs.values()) {
+    if (!run.monitor || !run.running) continue;
+    const info = engineRunning.get(run.jobId);
+    if (info) {
+      setRunProgress(run, info.fraction, info.message);
+    } else {
+      appendRunLog(run, "the run has finished; refreshing the job for its result.");
+      finishRun(run, true);
+      loadJobs();
     }
   }
 }
@@ -903,19 +959,29 @@ function finishRun(run, success) {
   run.success = success;
   if (run.jobId) {
     runningJobs.delete(run.jobId);
+    // Drop the engine's last-seen entry too so the card flips out of "Running..."
+    // at once instead of lingering until the next poll.
+    engineRunning.delete(run.jobId);
     refreshJobRunButtons();
+    updateCardProgress();
   }
   renderRunTabs();
   if (run.runId === selectedRunId) renderRunStop(run);
 }
 
+// A run is in flight if this window started it OR the engine reports it running
+// (a scheduled run, or one started from another window).
+function isJobRunning(jobId) {
+  return runningJobs.has(jobId) || engineRunning.has(jobId);
+}
+
 // Set a job card's Run button to its current state: "Run", or "Running..." (a
-// link to that run's output) while a UI-initiated run is in flight.
+// link to that run's output) while a run is in flight, by whomever started it.
 function setRunButtonState(btn, jobId) {
-  if (runningJobs.has(jobId)) {
+  if (isJobRunning(jobId)) {
     btn.textContent = "Running...";
     btn.classList.add("running");
-    btn.onclick = () => selectRunForJob(jobId);
+    btn.onclick = () => viewRun(jobId);
   } else {
     btn.textContent = "Run";
     btn.classList.remove("running");
@@ -923,11 +989,62 @@ function setRunButtonState(btn, jobId) {
   }
 }
 
-// Refresh every visible Run button (called when a run starts or finishes).
+// Refresh every visible Run button (called when a run starts or finishes, and on
+// each engine poll).
 function refreshJobRunButtons() {
   for (const btn of document.querySelectorAll("[data-job-run]")) {
     setRunButtonState(btn, btn.dataset.jobRun);
   }
+}
+
+// Latest live progress for a job: this window's stream if it owns the run, else
+// the engine's reported figures (a background run).
+function liveInfo(jobId) {
+  for (const run of runs.values()) {
+    if (run.jobId === jobId && run.running && !run.monitor) {
+      return { fraction: run.fraction, message: run.label };
+    }
+  }
+  return engineRunning.get(jobId) || null;
+}
+
+// Show or hide the inline progress line on each job card from the latest figures.
+function updateCardProgress() {
+  for (const btn of document.querySelectorAll("[data-job-run]")) {
+    const card = btn.closest(".job-card");
+    const row = card && card.querySelector(".job-running");
+    if (!row) continue;
+    const info = liveInfo(btn.dataset.jobRun);
+    if (info) {
+      row.classList.remove("hidden");
+      card.querySelector(".mini-bar").style.width =
+        Math.round((info.fraction || 0) * 100) + "%";
+      card.querySelector(".mini-msg").textContent = info.message || "running...";
+    } else {
+      row.classList.add("hidden");
+    }
+  }
+}
+
+// Poll the engine for in-progress runs and reflect them in the cards (and any
+// open monitors). Cheap and silent; a missing engine just leaves the last state.
+async function pollRunning() {
+  let list;
+  try {
+    list = await invoke("list_running");
+  } catch {
+    return;
+  }
+  engineRunning = new Map(list.map((r) => [r.job_id, r]));
+  refreshJobRunButtons();
+  updateCardProgress();
+  updateMonitors();
+}
+
+function startRunningPoll() {
+  if (runningPollTimer) return;
+  pollRunning();
+  runningPollTimer = setInterval(pollRunning, 2500);
 }
 
 function streamRun(title, command, args) {
@@ -1847,4 +1964,7 @@ window.addEventListener("DOMContentLoaded", () => {
     .then((v) => (el("build-info").textContent = v))
     .catch(() => {});
   loadJobs();
+  // Keep the jobs list aware of runs in progress, including ones the scheduler
+  // started in the background, so opening the app shows a backup still running.
+  startRunningPoll();
 });

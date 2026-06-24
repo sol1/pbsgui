@@ -308,6 +308,20 @@ pub struct SnapshotInfo {
     pub size: Option<u64>,
 }
 
+/// A job with a run currently in progress in the engine, whether started manually
+/// or by the scheduler, with its latest progress. Lets a freshly opened GUI see a
+/// backup that is still running in the background.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunningJob {
+    pub job_id: String,
+    /// When the run started, unix seconds.
+    pub started: i64,
+    /// Latest progress fraction (0.0 to 1.0).
+    pub fraction: f32,
+    /// Latest human-readable status line (the same text a live viewer sees).
+    pub message: String,
+}
+
 /// A file inside a snapshot's archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -517,6 +531,10 @@ pub enum Request {
     /// PBS upload is dropped without finishing (so the partial snapshot is
     /// discarded) and a SQL VDI backup is aborted. A no-op if nothing is running.
     CancelJob { id: String },
+    /// List the jobs with a run currently in progress in the engine (started
+    /// manually or by the scheduler), each with its latest progress. Lets a
+    /// freshly opened GUI show a backup that is still running in the background.
+    ListRunning,
     /// List snapshots for a job's backup group, by date/time.
     ListSnapshots { job_id: String },
     /// List the files inside a snapshot's archive.
@@ -684,6 +702,8 @@ pub enum Reply {
     },
     /// Reply to [`Request::GetMetrics`] / [`Request::SaveMetrics`].
     Metrics { settings: MetricsSettings },
+    /// Reply to [`Request::ListRunning`].
+    Running { jobs: Vec<RunningJob> },
     /// A job run was accepted; progress follows.
     Accepted { job_id: String },
     /// Progress update (0.0 to 1.0) with a status line.
@@ -715,6 +735,7 @@ impl Reply {
                 | Reply::PbsServers { .. }
                 | Reply::EncryptionKey { .. }
                 | Reply::Notifications { .. }
+                | Reply::Running { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )

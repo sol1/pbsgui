@@ -545,6 +545,38 @@ button.running {
   color: var(--accent);
 }
 
+/* Inline live progress on a running job's card. */
+.job-running {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.mini-track {
+  flex: 0 0 120px;
+  height: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.mini-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.mini-msg {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Run panel */
 #run {
   margin-top: 22px;

@@ -9,8 +9,8 @@
 
 use pbsgui_ipc::{
     EncryptionKeyInfo, FileInfo, Job, MetricsSettings, NotificationSettings, NotifyChannel,
-    PbsServer, Reply, Request, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection, SqlInstance,
-    SqlProbe, SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
+    PbsServer, Reply, Request, RunningJob, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection,
+    SqlInstance, SqlProbe, SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -88,6 +88,23 @@ async fn cancel_job(id: String) -> Result<(), String> {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// List jobs with a run currently in progress in the engine, started manually or
+/// by the scheduler. Polled by the GUI so a background backup is visible on open.
+#[tauri::command]
+async fn list_running() -> Result<Vec<RunningJob>, String> {
+    let replies = request_all(Request::ListRunning).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::Running { jobs } => Some(jobs),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return the running list".to_string())
 }
 
 /// List snapshots for a job's backup group (by date/time).
@@ -671,6 +688,7 @@ pub fn run() {
         delete_job,
         run_job,
         cancel_job,
+        list_running,
         list_snapshots,
         list_files,
         restore,

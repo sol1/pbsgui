@@ -67,6 +67,14 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
                 .await;
         }
 
+        Request::ListRunning => {
+            let _ = responder
+                .send(&Reply::Running {
+                    jobs: backup::running_snapshot(),
+                })
+                .await;
+        }
+
         Request::ListSnapshots { job_id } => {
             let reply = match list_snapshots(&store, &job_id).await {
                 Ok(snapshots) => Reply::Snapshots { snapshots },

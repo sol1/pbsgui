@@ -42,6 +42,9 @@ async fn demo_handler(request: Request, mut responder: Responder) {
                 })
                 .await;
         }
+        Request::ListRunning => {
+            let _ = responder.send(&Reply::Running { jobs: vec![] }).await;
+        }
         Request::ListSnapshots { .. } => {
             let _ = responder
                 .send(&Reply::Snapshots { snapshots: vec![] })

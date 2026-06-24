@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use pbs_client::session::{backup_dynamic_file_with_progress, BackupStats, SessionParams};
 use pbs_client::{BackupProgress, CryptConfig, Repository};
 use pbsgui_ipc::{
-    FileInfo, Job, JobDestination, JobSource, Reply, SqlAuth, SqlBackupType, SqlProtection,
+    FileInfo, Job, JobDestination, JobSource, Reply, RunningJob, SqlAuth, SqlBackupType,
+    SqlProtection,
 };
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -48,11 +49,26 @@ pub(crate) fn progress_reporter(
         } else {
             0.0
         };
-        let _ = events.try_send(Reply::Progress {
-            fraction,
-            message: format_progress(p, throughput),
-        });
+        let message = format_progress(p, throughput);
+        // Record it as the job's latest progress so a GUI polling `running_snapshot`
+        // (or attaching later) sees a background run's progress, not just the live
+        // event stream.
+        set_run_status(&job_id, fraction, &message);
+        let _ = events.try_send(Reply::Progress { fraction, message });
     }
+}
+
+/// Send a phase status line to the live stream and record it as the job's latest
+/// progress, so a freshly opened GUI sees the current phase (e.g. the long initial
+/// read of a large database) even for a run the scheduler started.
+async fn report_phase(events: &Sender<Reply>, job_id: &str, message: String) {
+    set_run_status(job_id, 0.0, &message);
+    let _ = events
+        .send(Reply::Progress {
+            fraction: 0.0,
+            message,
+        })
+        .await;
 }
 
 /// A compact human-readable status line for a backup in progress.
@@ -132,12 +148,55 @@ fn running_jobs() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     R.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Latest progress of an in-flight run, so the GUI can see a backup the scheduler
+/// started in the background, not just runs it launched itself.
+struct RunStatus {
+    started: i64,
+    fraction: f32,
+    message: String,
+}
+
+/// Live status for each in-flight run, keyed by job id. An entry exists exactly
+/// while the job's `RunGuard` is alive (created in `try_claim_run`, removed on
+/// drop), in lockstep with `running_jobs`.
+fn run_status() -> &'static std::sync::Mutex<std::collections::HashMap<String, RunStatus>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, RunStatus>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Update the latest progress for an in-flight run (a no-op once it has ended).
+fn set_run_status(job_id: &str, fraction: f32, message: &str) {
+    if let Some(s) = run_status().lock().unwrap().get_mut(job_id) {
+        s.fraction = fraction;
+        message.clone_into(&mut s.message);
+    }
+}
+
+/// A snapshot of every job with a run in progress (manual or scheduled), with its
+/// latest progress. The GUI polls this so a run still going in the background is
+/// visible the moment the window is opened.
+pub fn running_snapshot() -> Vec<RunningJob> {
+    run_status()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, s)| RunningJob {
+            job_id: id.clone(),
+            started: s.started,
+            fraction: s.fraction,
+            message: s.message.clone(),
+        })
+        .collect()
+}
+
 /// An RAII claim that a job is running; releases the claim when dropped.
 struct RunGuard(String);
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
         running_jobs().lock().unwrap().remove(&self.0);
+        run_status().lock().unwrap().remove(&self.0);
     }
 }
 
@@ -150,6 +209,14 @@ fn try_claim_run(job_id: &str) -> Option<(RunGuard, CancellationToken)> {
     }
     let token = CancellationToken::new();
     map.insert(job_id.to_string(), token.clone());
+    run_status().lock().unwrap().insert(
+        job_id.to_string(),
+        RunStatus {
+            started: unix_now(),
+            fraction: 0.0,
+            message: "starting...".to_string(),
+        },
+    );
     Some((RunGuard(job_id.to_string()), token))
 }
 
@@ -462,12 +529,12 @@ async fn backup_files_to_pbs(
         .await;
     // Building the tar can take a while for large sources; reflect that in the
     // status instead of leaving it on the generic "starting...".
-    let _ = events
-        .send(Reply::Progress {
-            fraction: 0.0,
-            message: format!("archiving {} source(s)...", sources.len()),
-        })
-        .await;
+    report_phase(
+        events,
+        &job.id,
+        format!("archiving {} source(s)...", sources.len()),
+    )
+    .await;
 
     // Archive the sources to a temp tar (blocking work off the async runtime).
     let tmp = std::env::temp_dir().join(format!("pbsgui-{}-{}.tar", job.id, unix_now()));
@@ -532,12 +599,7 @@ async fn backup_sql_to_pbs(
 
     // Reflect the connect phase in the status rather than leaving it on the
     // generic "starting..." while the SQL handshake and readiness queries run.
-    let _ = events
-        .send(Reply::Progress {
-            fraction: 0.0,
-            message: "connecting to SQL Server...".to_string(),
-        })
-        .await;
+    report_phase(events, job_id, "connecting to SQL Server...".to_string()).await;
 
     // One connection to ask SQL whether this replica should back up each database
     // (Always On preferred-replica gating; standalone databases always proceed).
@@ -609,12 +671,7 @@ async fn backup_sql_to_pbs(
         // (SQL Server checkpoints and scans the data files first), so show the read
         // phase up front instead of sitting on the generic "starting...". Real
         // byte-progress takes over as soon as chunks start streaming.
-        let _ = events
-            .send(Reply::Progress {
-                fraction: 0.0,
-                message: format!("reading [{db}] from SQL Server..."),
-            })
-            .await;
+        report_phase(events, job_id, format!("reading [{db}] from SQL Server...")).await;
         let stats = crate::sql::vdi::backup_database_to_pbs(
             &conn.server,
             conn.port,
