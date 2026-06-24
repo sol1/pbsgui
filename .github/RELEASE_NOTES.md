@@ -7,6 +7,31 @@ issues.
 
 ## New in 0.0.6
 
+- **Backup compression.** Backups are now compressed with zstd before upload, so
+  compressible databases and files take much less space on PBS and less bandwidth
+  to send. It is on by default and configurable per job; data that does not shrink
+  (already-compressed or high-entropy content) is stored as-is, so compression
+  never inflates a backup. It is a pure-Rust implementation, so there is no extra
+  runtime to install, and the format stays compatible with the PBS client.
+- **Live backup progress and stats.** A running backup now shows real-time
+  throughput, how much was deduplicated, the live compression ratio, and - for SQL
+  Server - a percentage against the database size. The same figures are exported to
+  the optional Prometheus endpoint (current bytes and throughput while running,
+  plus per-run compression and dedup stats).
+- **Stop a running backup.** A new Stop button cancels an in-flight backup cleanly:
+  the partial snapshot is discarded on the server and the SQL Server BACKUP is
+  aborted. A job can also no longer run twice at once, so a manual run cannot
+  collide with a scheduled one.
+- **Reliability fixes.**
+  - A backup that had actually succeeded could be reported as FAILED when PBS
+    closed the connection at the very end (right after committing the snapshot). It
+    is now reported correctly as a success.
+  - A failed (or wrongly-failed) backup could be re-run by the scheduler over and
+    over, sending a flood of failure notifications. After a failure the scheduler
+    now waits for the next scheduled slot, so one failure is one notification.
+- **Token paste fix.** A PBS API token id or secret pasted with a trailing space or
+  newline is now trimmed before use, so a token that "isn't working" only because
+  of invisible whitespace is accepted. This also repairs already-saved tokens.
 - **Fix: "backup service is not reachable" after upgrading to 0.0.5.** 0.0.5
   restricted the engine's control socket to administrators (a security fix), but a
   normally launched GUI runs with a UAC-filtered token and could not satisfy that,

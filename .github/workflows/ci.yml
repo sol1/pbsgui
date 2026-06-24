@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel an in-progress run when a newer commit lands on the same branch/PR, so
+# rapid pushes do not pile up slow Windows installer builds.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
