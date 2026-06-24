@@ -322,7 +322,8 @@ impl H2Conn {
         })
     }
 
-    /// Issue one request and read the full response body.
+    /// Issue one request and read the full response body (strict: a connection
+    /// close mid-body is an error). Use for requests whose body we consume.
     async fn request(
         &self,
         method: Method,
@@ -337,6 +338,29 @@ impl H2Conn {
             path_and_query,
             content_type,
             body,
+            false,
+        )
+        .await
+    }
+
+    /// Issue a status-only request that commits an operation on the server (chunk
+    /// upload, index append/close, blob, `/finish`). Tolerates the server closing
+    /// the connection after a success status, since we only read the status.
+    async fn request_committing(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        content_type: Option<&str>,
+        body: Option<Bytes>,
+    ) -> Result<(StatusCode, Vec<u8>)> {
+        h2_request(
+            &self.send,
+            &self.authority,
+            method,
+            path_and_query,
+            content_type,
+            body,
+            true,
         )
         .await
     }
@@ -345,6 +369,14 @@ impl H2Conn {
 /// Issue one HTTP/2 request on a (cloned) send handle and read the full response.
 /// Cloning `send` per request is what lets many requests be in flight concurrently
 /// over the one connection (h2 multiplexes streams).
+///
+/// `tolerate_close`: for a status-only request (the server commits the operation
+/// and we only read its status, not its body), a connection close while reading
+/// the ignored body is treated as a clean end once a success status is in hand.
+/// PBS tears down the HTTP/2 connection right after a successful `/finish`, so
+/// without this a committed backup would be misreported as failed. It must stay
+/// `false` for requests whose body we actually use (GET downloads, the wid from
+/// creating an index), where a truncated read is a real error.
 async fn h2_request(
     send: &SendRequest<Bytes>,
     authority: &str,
@@ -352,6 +384,7 @@ async fn h2_request(
     path_and_query: &str,
     content_type: Option<&str>,
     body: Option<Bytes>,
+    tolerate_close: bool,
 ) -> Result<(StatusCode, Vec<u8>)> {
     let uri = format!("https://{authority}{path_and_query}");
     let mut builder = Request::builder().method(method).uri(uri);
@@ -374,9 +407,17 @@ async fn h2_request(
     let mut body_stream = response.into_body();
     let mut out = Vec::new();
     while let Some(chunk) = body_stream.data().await {
-        let chunk = chunk.map_err(h2err)?;
-        out.extend_from_slice(&chunk);
-        let _ = body_stream.flow_control().release_capacity(chunk.len());
+        match chunk {
+            Ok(chunk) => {
+                out.extend_from_slice(&chunk);
+                let _ = body_stream.flow_control().release_capacity(chunk.len());
+            }
+            // The operation is already committed once the server returned a success
+            // status; a connection close while draining the ignored body is not a
+            // failure for a status-only request.
+            Err(_) if tolerate_close && status.is_success() => break,
+            Err(e) => return Err(h2err(e)),
+        }
     }
     Ok((status, out))
 }
@@ -414,6 +455,7 @@ impl ChunkUploader {
             &q,
             Some("application/octet-stream"),
             Some(Bytes::from(encoded)),
+            true,
         )
         .await?;
         ensure_ok(status, &body)
@@ -497,7 +539,7 @@ impl BackupWriter {
         );
         let (status, body) = self
             .conn
-            .request(
+            .request_committing(
                 Method::POST,
                 &q,
                 Some("application/octet-stream"),
@@ -523,7 +565,7 @@ impl BackupWriter {
             .map_err(|e| PbsError::Protocol(format!("encoding append body: {e}")))?;
         let (status, rbody) = self
             .conn
-            .request(
+            .request_committing(
                 Method::PUT,
                 "/fixed_index",
                 Some("application/json"),
@@ -548,7 +590,10 @@ impl BackupWriter {
             size,
             hex::encode(csum)
         );
-        let (status, body) = self.conn.request(Method::POST, &q, None, None).await?;
+        let (status, body) = self
+            .conn
+            .request_committing(Method::POST, &q, None, None)
+            .await?;
         ensure_ok(status, &body)
     }
 
@@ -561,7 +606,7 @@ impl BackupWriter {
         );
         let (status, body) = self
             .conn
-            .request(
+            .request_committing(
                 Method::POST,
                 &q,
                 Some("application/octet-stream"),
@@ -602,7 +647,7 @@ impl BackupWriter {
             .map_err(|e| PbsError::Protocol(format!("encoding append body: {e}")))?;
         let (status, rbody) = self
             .conn
-            .request(
+            .request_committing(
                 Method::PUT,
                 "/dynamic_index",
                 Some("application/json"),
@@ -627,7 +672,10 @@ impl BackupWriter {
             size,
             hex::encode(csum)
         );
-        let (status, body) = self.conn.request(Method::POST, &q, None, None).await?;
+        let (status, body) = self
+            .conn
+            .request_committing(Method::POST, &q, None, None)
+            .await?;
         ensure_ok(status, &body)
     }
 
@@ -643,11 +691,14 @@ impl BackupWriter {
         }
     }
 
-    /// Commit the snapshot and end the session.
+    /// Commit the snapshot and end the session. PBS tears down the HTTP/2
+    /// connection immediately after committing, so this is a status-only request
+    /// that tolerates the post-success close (otherwise a finished backup would be
+    /// misreported as failed).
     pub async fn finish(&mut self) -> Result<()> {
         let (status, body) = self
             .conn
-            .request(Method::POST, "/finish", None, None)
+            .request_committing(Method::POST, "/finish", None, None)
             .await?;
         ensure_ok(status, &body)
     }
