@@ -18,6 +18,10 @@ use crate::sqlsched;
 /// Check every minute and run any due jobs.
 pub async fn run(store: Arc<JobStore>) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
+    // A long backup blocks this loop for its whole duration (runs are sequential).
+    // Skip the ticks it overran instead of firing them all at once on return,
+    // which would otherwise re-evaluate every job in a tight burst.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_stall_check = 0i64;
     // Per (job, database) last alert time, to avoid repeating a stall warning.
     let mut alerted: std::collections::HashMap<(String, String), i64> =
@@ -107,13 +111,16 @@ fn sql_due_kind(job_id: &str, protection: &SqlProtection, now: i64) -> Option<Sq
             full,
             log_interval_minutes,
         } => {
-            let last_full = sqlsched::last_full(job_id);
-            if schedule_due(full, last_full, now) {
+            // Full cadence is gated on the last full ATTEMPT (so a failed full is
+            // not instantly due again), but logs require a SUCCESSFUL anchoring
+            // full and run off the success timers.
+            if schedule_due(full, sqlsched::last_full_attempt(job_id), now) {
                 return Some(SqlRun::Full);
             }
+            let last_full = sqlsched::last_full(job_id);
             last_full?; // logs require an anchoring full first
             let interval = (*log_interval_minutes as i64).max(1) * 60;
-            let baseline = sqlsched::last_log(job_id).or(last_full);
+            let baseline = sqlsched::last_log_attempt(job_id).or(last_full);
             match baseline {
                 Some(b) if now - b >= interval => Some(SqlRun::Log),
                 _ => None,
@@ -121,7 +128,7 @@ fn sql_due_kind(job_id: &str, protection: &SqlProtection, now: i64) -> Option<Sq
         }
         SqlProtection::DailyRestorePoints { schedule }
         | SqlProtection::SecondaryCopy { schedule } => {
-            schedule_due(schedule, sqlsched::last_full(job_id), now).then_some(SqlRun::Full)
+            schedule_due(schedule, sqlsched::last_full_attempt(job_id), now).then_some(SqlRun::Full)
         }
     }
 }

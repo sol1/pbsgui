@@ -119,6 +119,33 @@ fn sql_backup_spec(protection: &SqlProtection, run: SqlRun) -> (SqlBackupType, b
     }
 }
 
+/// Job ids with a run currently in progress, so a manual trigger cannot collide
+/// with a scheduled one (two concurrent backups to the same PBS group lock each
+/// other out on the server).
+fn running_jobs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// An RAII claim that a job is running; releases the claim when dropped.
+struct RunGuard(String);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        running_jobs().lock().unwrap().remove(&self.0);
+    }
+}
+
+/// Claim a job as running, or `None` if a run is already in progress for it.
+fn try_claim_run(job_id: &str) -> Option<RunGuard> {
+    if running_jobs().lock().unwrap().insert(job_id.to_string()) {
+        Some(RunGuard(job_id.to_string()))
+    } else {
+        None
+    }
+}
+
 /// Run a job (manual trigger: SQL jobs take a full). See [`run_job_kind`].
 pub async fn run_job(job: &Job, events: Sender<Reply>) -> anyhow::Result<String> {
     run_job_kind(job, SqlRun::Full, events).await
@@ -132,6 +159,20 @@ pub async fn run_job_kind(
     sql_run: SqlRun,
     events: Sender<Reply>,
 ) -> anyhow::Result<String> {
+    // One run per job at a time: skip (don't fail) if a run is already in flight,
+    // so a manual trigger during a scheduled run cannot collide on the PBS group.
+    // Held for the whole run; released when `_guard` drops.
+    let _guard = match try_claim_run(&job.id) {
+        Some(g) => g,
+        None => {
+            let _ = events
+                .send(Reply::Log {
+                    line: "a run for this job is already in progress; skipping".to_string(),
+                })
+                .await;
+            return Ok("skipped: a run is already in progress".to_string());
+        }
+    };
     let started = std::time::Instant::now();
     metrics::set_running(&job.id, true);
     let outcome = run_inner(job, sql_run, &events).await;
@@ -166,13 +207,17 @@ pub async fn run_job_kind(
     }
 
     // A successful SQL backup anchors/advances the point-in-time chain timers, so
-    // a manual run starts the log cadence just like a scheduled one.
-    if outcome.is_ok() {
-        if let JobSource::Sql { .. } = job.source {
-            match sql_run {
-                SqlRun::Full => sqlsched::record_full(&job.id, unix_now()),
-                SqlRun::Log => sqlsched::record_log(&job.id, unix_now()),
-            }
+    // a manual run starts the log cadence just like a scheduled one. A FAILED run
+    // records only the attempt timer, so the scheduler waits for the next slot
+    // instead of immediately re-running (and storming) a just-failed backup,
+    // while the success anchor stays put (logs still need a real full).
+    if let JobSource::Sql { .. } = job.source {
+        let now = unix_now();
+        match (sql_run, outcome.is_ok()) {
+            (SqlRun::Full, true) => sqlsched::record_full(&job.id, now),
+            (SqlRun::Full, false) => sqlsched::record_full_attempt(&job.id, now),
+            (SqlRun::Log, true) => sqlsched::record_log(&job.id, now),
+            (SqlRun::Log, false) => sqlsched::record_log_attempt(&job.id, now),
         }
     }
 

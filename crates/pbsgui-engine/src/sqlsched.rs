@@ -14,6 +14,14 @@ struct State {
     full: Option<i64>,
     #[serde(default)]
     log: Option<i64>,
+    // Last attempt times (success OR failure). The scheduler gates re-runs on
+    // these so a failed backup is not immediately due again (which otherwise
+    // drives a retry storm, since the success timers above do not advance on
+    // failure).
+    #[serde(default)]
+    full_attempt: Option<i64>,
+    #[serde(default)]
+    log_attempt: Option<i64>,
 }
 
 fn path(job_id: &str) -> PathBuf {
@@ -38,28 +46,51 @@ fn store(job_id: &str, state: &State) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// When the last full backup ran (unix seconds), if any.
+/// When the last SUCCESSFUL full backup ran (the chain anchor), if any.
 pub fn last_full(job_id: &str) -> Option<i64> {
     load(job_id).full
 }
 
-/// When the last log backup ran (unix seconds), if any.
-pub fn last_log(job_id: &str) -> Option<i64> {
-    load(job_id).log
+/// When a full backup was last ATTEMPTED (success or failure), if any.
+pub fn last_full_attempt(job_id: &str) -> Option<i64> {
+    load(job_id).full_attempt
 }
 
-/// Record a full backup at `time`. A full also anchors the log chain, so the log
-/// timer is reset to it.
+/// When a log backup was last ATTEMPTED (success or failure), if any.
+pub fn last_log_attempt(job_id: &str) -> Option<i64> {
+    load(job_id).log_attempt
+}
+
+/// Record a SUCCESSFUL full backup at `time`. A full also anchors the log chain,
+/// so the log timer is reset to it; the attempt timers reset too.
 pub fn record_full(job_id: &str, time: i64) {
     let mut s = load(job_id);
     s.full = Some(time);
     s.log = Some(time);
+    s.full_attempt = Some(time);
+    s.log_attempt = Some(time);
     let _ = store(job_id, &s);
 }
 
-/// Record a log backup at `time`.
+/// Record a SUCCESSFUL log backup at `time`.
 pub fn record_log(job_id: &str, time: i64) {
     let mut s = load(job_id);
     s.log = Some(time);
+    s.log_attempt = Some(time);
+    let _ = store(job_id, &s);
+}
+
+/// Record a full backup ATTEMPT (called after a failed full so the scheduler does
+/// not immediately re-run it; the success anchor is left untouched).
+pub fn record_full_attempt(job_id: &str, time: i64) {
+    let mut s = load(job_id);
+    s.full_attempt = Some(time);
+    let _ = store(job_id, &s);
+}
+
+/// Record a log backup ATTEMPT (called after a failed log).
+pub fn record_log_attempt(job_id: &str, time: i64) {
+    let mut s = load(job_id);
+    s.log_attempt = Some(time);
     let _ = store(job_id, &s);
 }
