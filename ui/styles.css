@@ -538,11 +538,101 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* A job whose run is in progress: the card's Run button reads "Running...". */
+button.running {
+  background: var(--panel-2);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* Run panel */
 #run {
   margin-top: 22px;
   border-top: 1px solid var(--border);
   padding-top: 18px;
+}
+
+/* Tabs to swap the run output between concurrent runs. */
+.run-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.run-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.run-tab.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.run-tab-name {
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A small status dot: pulsing while running, green/red once finished. */
+.run-tab-name::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--idle);
+  vertical-align: middle;
+}
+
+.run-tab.running .run-tab-name::before {
+  background: var(--accent);
+  animation: run-pulse 1.2s ease-in-out infinite;
+}
+
+.run-tab.ok .run-tab-name::before {
+  background: var(--ok);
+}
+
+.run-tab.fail .run-tab-name::before {
+  background: var(--fail);
+}
+
+@keyframes run-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.run-tab-close {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.run-tab-close:hover {
+  color: var(--text);
+  background: var(--panel-2);
 }
 
 .progress-wrap {

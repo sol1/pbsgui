@@ -18,6 +18,15 @@ let sqlAgName = null; // Availability Group name from the last probe, or null if
 let wizJobId = null; // stable id for the job being edited (used to key its encryption key)
 let wizKeySet = false; // does the job being edited have an encryption key stored?
 
+// Active/recent run output streams, keyed by a generated run id. The run panel
+// shows one at a time and is swappable between them (tabs); each run buffers its
+// own log + progress so switching shows full history.
+const runs = new Map();
+let selectedRunId = null;
+let runSeq = 0;
+const runningJobs = new Set(); // job ids with a UI-initiated run in progress
+let jobsCache = []; // last-loaded jobs, for re-resolving a job by id
+
 // Derive a PBS-safe snapshot group id from a job name.
 function slug(s) {
   const out = s
@@ -137,6 +146,7 @@ async function loadJobs() {
     el("jobs-list").innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
     return;
   }
+  jobsCache = jobs;
   const list = el("jobs-list");
   list.innerHTML = "";
   if (!jobs.length) {
@@ -167,8 +177,11 @@ async function loadJobs() {
       '<div class="job-spark"><div class="spark-wrap"><div class="spark-empty">&hellip;</div></div>' +
       '<div class="spark-label"></div></div>' +
       '<div class="job-actions"></div>';
+    const runBtn = mkbtn("Run", "primary", null);
+    runBtn.dataset.jobRun = job.id;
+    setRunButtonState(runBtn, job.id);
     card.querySelector(".job-actions").append(
-      mkbtn("Run", "primary", () => runJob(job)),
+      runBtn,
       mkbtn("Edit", "", () => openEditor(job)),
       mkbtn("Delete", "", () => deleteJob(job)),
     );
@@ -752,79 +765,235 @@ async function deleteJob(job) {
   loadJobs();
 }
 
-// --- Run / restore output (shared) --------------------------------------
+// --- Run / restore output (shared, multi-run) ---------------------------
+//
+// Several runs (backups and restores) can be in flight at once. Each gets a
+// `run` record that buffers its own log and progress; the panel shows one at a
+// time and the tab bar swaps between them. A backup run also flips its job
+// card's button to "Running..." for its lifetime.
 
-function setProgress(fraction, label) {
-  el("progress-bar").style.width = `${Math.round(fraction * 100)}%`;
-  el("progress-label").textContent = label;
+// Append a line to a run's buffered log, updating the panel if it is showing.
+function appendRunLog(run, line) {
+  run.logText += line + "\n";
+  if (run.runId === selectedRunId) {
+    const log = el("log");
+    log.textContent = run.logText;
+    log.scrollTop = log.scrollHeight;
+  }
 }
 
-function appendLog(line) {
-  const log = el("log");
-  log.textContent += line + "\n";
-  log.scrollTop = log.scrollHeight;
+// Update a run's progress, reflecting it in the panel if it is showing.
+function setRunProgress(run, fraction, label) {
+  run.fraction = fraction;
+  run.label = label;
+  if (run.runId === selectedRunId) {
+    el("progress-bar").style.width = `${Math.round(fraction * 100)}%`;
+    el("progress-label").textContent = label;
+  }
 }
 
-async function streamRun(title, command, args) {
-  el("run-title").textContent = title;
-  el("run").classList.remove("hidden");
-  el("log").textContent = "";
-  setProgress(0, "starting...");
+// Compact tab label: drop the "Running: " prefix backups use.
+function runTabLabel(run) {
+  return run.title.replace(/^Running:\s*/, "");
+}
 
-  // Only a backup run is cancellable; wire the Stop button to cancel_job.
+function renderRunTabs() {
+  const tabs = el("run-tabs");
+  tabs.innerHTML = "";
+  // Only worth showing the switcher when more than one run is present.
+  tabs.classList.toggle("hidden", runs.size <= 1);
+  for (const run of runs.values()) {
+    const state = run.running ? "running" : run.success ? "ok" : "fail";
+    const tab = document.createElement("div");
+    tab.className =
+      "run-tab " + state + (run.runId === selectedRunId ? " active" : "");
+    const name = document.createElement("span");
+    name.className = "run-tab-name";
+    name.textContent = runTabLabel(run);
+    name.title = runTabLabel(run);
+    name.onclick = () => selectRun(run.runId);
+    tab.append(name);
+    // A finished run can be dismissed; a running one stays until it ends.
+    if (!run.running) {
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "run-tab-close";
+      close.textContent = "×";
+      close.title = "Close";
+      close.onclick = (e) => {
+        e.stopPropagation();
+        closeRun(run.runId);
+      };
+      tab.append(close);
+    }
+    tabs.append(tab);
+  }
+}
+
+// Wire the Stop button to the shown run (only a cancellable, still-running one).
+function renderRunStop(run) {
   const stop = el("run-stop");
-  if (command === "run_job") {
+  if (run.cancellable && run.running) {
     stop.classList.remove("hidden");
     stop.disabled = false;
     stop.onclick = async () => {
       stop.disabled = true;
-      appendLog("stopping...");
+      appendRunLog(run, "stopping...");
       try {
-        await invoke("cancel_job", { id: args.id });
+        await invoke("cancel_job", { id: run.jobId });
       } catch (e) {
-        appendLog("stop failed: " + e);
+        appendRunLog(run, "stop failed: " + e);
         stop.disabled = false;
       }
     };
   } else {
     stop.classList.add("hidden");
   }
+}
+
+// Repaint the panel (title, progress, log, stop) from a run's buffered state.
+function renderRunPanel() {
+  const run = runs.get(selectedRunId);
+  if (!run) return;
+  el("run-title").textContent = run.title;
+  el("progress-bar").style.width = `${Math.round(run.fraction * 100)}%`;
+  el("progress-label").textContent = run.label;
+  const log = el("log");
+  log.textContent = run.logText;
+  log.scrollTop = log.scrollHeight;
+  renderRunStop(run);
+}
+
+function selectRun(runId) {
+  selectedRunId = runId;
+  renderRunTabs();
+  renderRunPanel();
+}
+
+// Show the run for a given job (used by a card's "Running..." button).
+function selectRunForJob(jobId) {
+  for (const run of runs.values()) {
+    if (run.jobId === jobId) {
+      el("run").classList.remove("hidden");
+      selectRun(run.runId);
+      return;
+    }
+  }
+}
+
+function closeRun(runId) {
+  runs.delete(runId);
+  if (selectedRunId === runId) {
+    const next = [...runs.keys()].pop() || null;
+    if (next) {
+      selectRun(next);
+    } else {
+      selectedRunId = null;
+      el("run").classList.add("hidden");
+      renderRunTabs();
+    }
+  } else {
+    renderRunTabs();
+  }
+}
+
+// Mark a run finished: stop its pulse, free the job button, refresh the panel.
+function finishRun(run, success) {
+  run.running = false;
+  run.success = success;
+  if (run.jobId) {
+    runningJobs.delete(run.jobId);
+    refreshJobRunButtons();
+  }
+  renderRunTabs();
+  if (run.runId === selectedRunId) renderRunStop(run);
+}
+
+// Set a job card's Run button to its current state: "Run", or "Running..." (a
+// link to that run's output) while a UI-initiated run is in flight.
+function setRunButtonState(btn, jobId) {
+  if (runningJobs.has(jobId)) {
+    btn.textContent = "Running...";
+    btn.classList.add("running");
+    btn.onclick = () => selectRunForJob(jobId);
+  } else {
+    btn.textContent = "Run";
+    btn.classList.remove("running");
+    btn.onclick = () => runJobById(jobId);
+  }
+}
+
+// Refresh every visible Run button (called when a run starts or finishes).
+function refreshJobRunButtons() {
+  for (const btn of document.querySelectorAll("[data-job-run]")) {
+    setRunButtonState(btn, btn.dataset.jobRun);
+  }
+}
+
+function streamRun(title, command, args) {
+  const runId = "run-" + ++runSeq;
+  const cancellable = command === "run_job";
+  const run = {
+    runId,
+    title,
+    jobId: cancellable ? args.id : null,
+    cancellable,
+    logText: "",
+    fraction: 0,
+    label: "starting...",
+    running: true,
+    success: null,
+  };
+  runs.set(runId, run);
+  if (run.jobId) {
+    runningJobs.add(run.jobId);
+    refreshJobRunButtons();
+  }
+  el("run").classList.remove("hidden");
+  selectRun(runId);
 
   const channel = new Channel();
   channel.onmessage = (reply) => {
     switch (reply.reply) {
       case "accepted":
-        appendLog("accepted: " + reply.job_id);
+        appendRunLog(run, "accepted: " + reply.job_id);
         break;
       case "log":
-        appendLog(reply.line);
+        appendRunLog(run, reply.line);
         break;
       case "progress":
-        setProgress(reply.fraction, reply.message);
+        setRunProgress(run, reply.fraction, reply.message);
         break;
       case "finished":
-        setProgress(reply.success ? 1 : 0, reply.message);
-        appendLog((reply.success ? "OK: " : "FAILED: ") + reply.message);
+        setRunProgress(run, reply.success ? 1 : 0, reply.message);
+        appendRunLog(run, (reply.success ? "OK: " : "FAILED: ") + reply.message);
+        finishRun(run, reply.success);
         loadJobs();
         break;
       case "error":
-        appendLog("error: " + reply.message);
+        appendRunLog(run, "error: " + reply.message);
         break;
     }
   };
 
-  try {
-    await invoke(command, { ...args, onEvent: channel });
-  } catch (err) {
-    appendLog("error: " + err);
-    setProgress(0, "failed");
-  } finally {
-    stop.classList.add("hidden");
-  }
+  (async () => {
+    try {
+      await invoke(command, { ...args, onEvent: channel });
+    } catch (err) {
+      appendRunLog(run, "error: " + err);
+      setRunProgress(run, 0, "failed");
+      finishRun(run, false);
+    }
+  })();
 }
 
 function runJob(job) {
   streamRun("Running: " + job.name, "run_job", { id: job.id });
+}
+
+function runJobById(jobId) {
+  const job = jobsCache.find((j) => j.id === jobId);
+  if (job) runJob(job);
 }
 
 // --- Browse & restore ---------------------------------------------------
