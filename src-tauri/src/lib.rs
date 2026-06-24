@@ -495,6 +495,32 @@ async fn restore_sql(
     .map_err(|e| e.to_string())
 }
 
+/// Restore a SQL database from PBS to native backup files in a folder (a single
+/// full `.bak`, or a full plus its log chain for a point in time), streaming
+/// progress. Does not touch SQL Server.
+#[tauri::command]
+async fn restore_sql_to_file(
+    job_id: String,
+    database: String,
+    point: SqlRestorePoint,
+    destination: String,
+    on_event: Channel<Reply>,
+) -> Result<(), String> {
+    ensure_engine().await?;
+    let name = pbsgui_ipc::socket_name(DEFAULT_SOCKET).map_err(|e| e.to_string())?;
+    let request = Request::RestoreSqlToFile {
+        job_id,
+        database,
+        point,
+        destination,
+    };
+    pbsgui_ipc::send_request(name, &request, move |reply| {
+        let _ = on_event.send(reply);
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Run readiness checks against a SQL Server instance.
 #[tauri::command]
 async fn check_sql(
@@ -698,6 +724,7 @@ pub fn run() {
         list_sql_snapshots,
         get_sql_restore_window,
         restore_sql,
+        restore_sql_to_file,
         list_sql_connections,
         save_sql_connection,
         delete_sql_connection,

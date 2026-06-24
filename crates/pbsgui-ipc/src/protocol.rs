@@ -592,6 +592,18 @@ pub enum Request {
         target_database: String,
         point: SqlRestorePoint,
     },
+    /// Restore one or more SQL snapshots from PBS to native backup files in a
+    /// folder, without touching SQL Server (the stored archive is the native
+    /// backup stream). A `Full` point writes the single `.bak`; a `PointInTime`
+    /// point writes the covering full `.bak` plus each `.trn` log up to the time,
+    /// and a steps file describing the manual `RESTORE` replay. Streams progress.
+    RestoreSqlToFile {
+        job_id: String,
+        database: String,
+        point: SqlRestorePoint,
+        /// Destination folder for the written files.
+        destination: String,
+    },
 
     /// List saved SQL Server connections (without secrets).
     ListSqlConnections,

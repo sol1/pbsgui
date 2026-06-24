@@ -859,6 +859,22 @@ button.running {
   font-size: 12px;
 }
 
+/* Per-snapshot action buttons (Restore to instance / Save to file). */
+.snap-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.snap-actions button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* A row whose actions are buttons is not itself clickable. */
+.snap-row:has(.snap-actions) {
+  cursor: default;
+}
+
 /* Job wizard */
 .wiz-steps {
   display: flex;

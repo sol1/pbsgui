@@ -168,6 +168,14 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
         } => {
             restore_sql(store, job_id, database, target_database, point, responder).await;
         }
+        Request::RestoreSqlToFile {
+            job_id,
+            database,
+            point,
+            destination,
+        } => {
+            restore_sql_to_file(store, job_id, database, point, destination, responder).await;
+        }
 
         Request::ListSqlConnections => {
             let connections = connstore::sql_connections().list();
@@ -833,6 +841,315 @@ async fn download_sql_meta(
         .await
         .ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+async fn restore_sql_to_file(
+    store: Arc<JobStore>,
+    job_id: String,
+    database: String,
+    point: SqlRestorePoint,
+    destination: String,
+    mut responder: Responder,
+) {
+    let _ = responder
+        .send(&Reply::Accepted {
+            job_id: database.clone(),
+        })
+        .await;
+    let result = run_restore_sql_to_file(
+        &store,
+        &job_id,
+        &database,
+        point,
+        &destination,
+        &mut responder,
+    )
+    .await;
+    let reply = match result {
+        Ok(message) => Reply::Finished {
+            success: true,
+            message,
+        },
+        Err(e) => Reply::Finished {
+            success: false,
+            message: format!("{e:#}"),
+        },
+    };
+    let _ = responder.send(&reply).await;
+}
+
+/// Restore SQL snapshots from PBS to native backup files in a folder, without
+/// touching SQL Server. The stored archive is the native backup stream, so this is
+/// just a download (decrypted and decompressed) written to disk.
+async fn run_restore_sql_to_file(
+    store: &JobStore,
+    job_id: &str,
+    database: &str,
+    point: SqlRestorePoint,
+    destination: &str,
+    responder: &mut Responder,
+) -> anyhow::Result<String> {
+    let ctx = sql_job_pbs(store, job_id)?;
+    let dir = std::path::Path::new(destination);
+    if !dir.is_dir() {
+        anyhow::bail!("the destination folder does not exist: {destination}");
+    }
+    match point {
+        SqlRestorePoint::Full { backup_time } => {
+            export_sql_full(&ctx, database, backup_time, dir, responder).await
+        }
+        SqlRestorePoint::PointInTime { unix_time } => {
+            export_sql_chain(&ctx, database, unix_time, dir, responder).await
+        }
+    }
+}
+
+/// Write one full snapshot's native backup stream to a `.bak` in `dir`.
+async fn export_sql_full(
+    ctx: &SqlJobPbs,
+    database: &str,
+    backup_time: i64,
+    dir: &std::path::Path,
+    responder: &mut Responder,
+) -> anyhow::Result<String> {
+    let (group, archive) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
+    let _ = responder
+        .send(&Reply::Log {
+            line: "downloading the full backup from PBS".to_string(),
+        })
+        .await;
+    let image = download_sql_image(ctx, &group, &archive, backup_time).await?;
+    let size = image.len() as u64;
+    let name = format!(
+        "{}-{}.bak",
+        sanitize_filename(database),
+        file_stamp(backup_time)
+    );
+    let path = dir.join(&name);
+    write_export_file(&path, image).await?;
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!("wrote {name} ({})", human_size(size)),
+        })
+        .await;
+    Ok(format!("saved {database} to {}", path.display()))
+}
+
+/// Write the covering full plus the log chain up to `target_unix` as native files
+/// (`.bak` + `.trn`), plus a steps file describing the manual `RESTORE` replay.
+async fn export_sql_chain(
+    ctx: &SqlJobPbs,
+    database: &str,
+    target_unix: i64,
+    dir: &std::path::Path,
+    responder: &mut Responder,
+) -> anyhow::Result<String> {
+    use crate::sql::backupmeta::{self, ChainItem};
+
+    let (full_group, archive) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
+    let (log_group, _) =
+        backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Log);
+    let api = ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)?;
+    let ns = ctx.repo.namespace.as_deref();
+
+    let _ = responder
+        .send(&Reply::Log {
+            line: "reading the backup chain".to_string(),
+        })
+        .await;
+    let mut items: Vec<ChainItem> = Vec::new();
+    for group in [&full_group, &log_group] {
+        let snaps = api
+            .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, group)
+            .await
+            .unwrap_or_default();
+        for s in snaps {
+            if let Some(meta) = download_sql_meta(ctx, group, s.backup_time).await {
+                items.push(ChainItem {
+                    snapshot_time: s.backup_time,
+                    meta,
+                });
+            }
+        }
+    }
+
+    let chain = backupmeta::select_chain(&items, target_unix);
+    if chain.is_empty() {
+        anyhow::bail!("no full backup covers that time; pick a later restore point");
+    }
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!(
+                "saving 1 full + {} log backup(s) to the chosen point",
+                chain.len() - 1
+            ),
+        })
+        .await;
+
+    // Download and write each in apply order; the index-prefixed names sort to the
+    // replay order. Only one image is held in memory at a time.
+    let mut files: Vec<(String, bool)> = Vec::new();
+    for (i, item) in chain.iter().enumerate() {
+        let is_log = item.meta.is_log();
+        let group = if is_log { &log_group } else { &full_group };
+        let image = download_sql_image(ctx, group, &archive, item.snapshot_time).await?;
+        let size = image.len() as u64;
+        let name = format!(
+            "{}-{:02}-{}-{}.{}",
+            sanitize_filename(database),
+            i + 1,
+            if is_log { "LOG" } else { "FULL" },
+            file_stamp(item.snapshot_time),
+            if is_log { "trn" } else { "bak" },
+        );
+        write_export_file(&dir.join(&name), image).await?;
+        let _ = responder
+            .send(&Reply::Log {
+                line: format!("wrote {name} ({})", human_size(size)),
+            })
+            .await;
+        files.push((name, is_log));
+    }
+
+    let steps = build_restore_steps(database, &files, target_unix);
+    let steps_name = format!("{}-RESTORE-STEPS.txt", sanitize_filename(database));
+    write_export_file(&dir.join(&steps_name), steps.into_bytes()).await?;
+    let _ = responder
+        .send(&Reply::Log {
+            line: format!("wrote {steps_name}"),
+        })
+        .await;
+
+    Ok(format!(
+        "saved {} file(s) for {database} to {}",
+        files.len() + 1,
+        dir.display()
+    ))
+}
+
+/// Write `bytes` to `path`, refusing to overwrite an existing file (an export
+/// never clobbers). Blocking file I/O runs on the blocking pool.
+async fn write_export_file(path: &std::path::Path, bytes: Vec<u8>) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| anyhow::anyhow!("creating {}: {e}", path.display()))?;
+        f.write_all(&bytes)
+            .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("file write task failed: {e}"))?
+}
+
+/// A UTC timestamp for a backup file name, e.g. `20260624T020000Z`.
+fn file_stamp(unix: i64) -> String {
+    chrono::DateTime::from_timestamp(unix, 0)
+        .map(|d| d.format("%Y%m%dT%H%M%SZ").to_string())
+        .unwrap_or_else(|| unix.to_string())
+}
+
+/// Keep only filename-safe characters (so a database name is a valid file stem).
+fn sanitize_filename(value: &str) -> String {
+    let s: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        "database".to_string()
+    } else {
+        s
+    }
+}
+
+/// A short human-readable byte size for the progress log.
+fn human_size(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+/// Build the manual-restore steps text (CRLF, for Windows) accompanying an
+/// exported chain: the ordered `RESTORE DATABASE`/`RESTORE LOG` statements.
+fn build_restore_steps(database: &str, files: &[(String, bool)], target_unix: i64) -> String {
+    let target = chrono::DateTime::from_timestamp(target_unix, 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| target_unix.to_string());
+    let full = files
+        .iter()
+        .find(|(_, is_log)| !*is_log)
+        .map(|(n, _)| n.as_str())
+        .unwrap_or("<full>.bak");
+    let logs: Vec<&str> = files
+        .iter()
+        .filter(|(_, is_log)| *is_log)
+        .map(|(n, _)| n.as_str())
+        .collect();
+
+    let mut lines: Vec<String> = vec![
+        format!("SQL Server restore steps for \"{database}\""),
+        "Exported from Proxmox Backup Server by pbsgui. These are native SQL Server".to_string(),
+        "backup files; restore them on any SQL Server with the statements below, run".to_string(),
+        "in order (SQL Server Management Studio or sqlcmd).".to_string(),
+        String::new(),
+        "Before running:".to_string(),
+        "  - Change [RestoredDB] to the database name you want.".to_string(),
+        "  - Prefix each file name with the full path to this folder.".to_string(),
+    ];
+    if !logs.is_empty() {
+        lines.push(format!(
+            "  - Recovering to {target} (UTC). STOPAT below uses the SERVER's local"
+        ));
+        lines.push("    time, so adjust it to your server's timezone.".to_string());
+    }
+    lines.push(String::new());
+
+    let mut n = 1;
+    if logs.is_empty() {
+        lines.push(format!(
+            "{n}) RESTORE DATABASE [RestoredDB] FROM DISK = N'{full}'"
+        ));
+        lines.push("       WITH REPLACE, RECOVERY;".to_string());
+    } else {
+        lines.push(format!(
+            "{n}) RESTORE DATABASE [RestoredDB] FROM DISK = N'{full}'"
+        ));
+        lines.push("       WITH REPLACE, NORECOVERY;".to_string());
+        for (i, log) in logs.iter().enumerate() {
+            n += 1;
+            lines.push(format!(
+                "{n}) RESTORE LOG [RestoredDB] FROM DISK = N'{log}'"
+            ));
+            if i + 1 == logs.len() {
+                lines.push(format!("       WITH STOPAT = N'{target}', RECOVERY;"));
+            } else {
+                lines.push("       WITH NORECOVERY;".to_string());
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.join("\r\n")
 }
 
 /// The PBS connection details for browsing/restoring a job's snapshots.

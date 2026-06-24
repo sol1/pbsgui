@@ -1238,9 +1238,15 @@ async function loadSqlRestore(job) {
       const t = Math.floor(new Date(input.value).getTime() / 1000);
       restoreSqlPit(job.id, database, t);
     });
+    const fileBtn = mkbtn("Save to file", "", () => {
+      const t = Math.floor(new Date(input.value).getTime() / 1000);
+      restoreSqlPitToFile(job.id, database, t);
+    });
+    fileBtn.title =
+      "Write the native .bak plus its .trn log chain and a restore-steps file to a folder";
     const row = document.createElement("div");
     row.className = "actions";
-    row.append(input, btn);
+    row.append(input, btn, fileBtn);
     box.append(row);
     list.append(box);
   }
@@ -1259,8 +1265,19 @@ async function loadSqlRestore(job) {
     row.innerHTML =
       `<span class="snap-time">${escapeHtml(new Date(fp.backup_time * 1000).toLocaleString())}</span>` +
       `<span class="snap-size muted">${escapeHtml(formatBytes(fp.size))}</span>` +
-      `<span class="spacer"></span><span class="snap-action">Restore</span>`;
-    row.onclick = () => restoreSqlFull(job.id, database, fp.backup_time);
+      `<span class="spacer"></span>`;
+    const actions = document.createElement("span");
+    actions.className = "snap-actions";
+    const restoreBtn = mkbtn("Restore to instance", "", () =>
+      restoreSqlFull(job.id, database, fp.backup_time),
+    );
+    const fileBtn = mkbtn("Save to file", "", () =>
+      restoreSqlFullToFile(job.id, database, fp.backup_time),
+    );
+    fileBtn.title =
+      "Write this snapshot's native .bak to a folder (no SQL Server needed)";
+    actions.append(restoreBtn, fileBtn);
+    row.append(actions);
     list.append(row);
   }
 }
@@ -1291,6 +1308,33 @@ function restoreSqlFull(jobId, database, backupTime) {
     database,
     targetDatabase: target.trim(),
     point: { kind: "full", backup_time: backupTime },
+  });
+}
+
+// Save one full snapshot to a native .bak file in a chosen folder (no SQL Server).
+async function restoreSqlFullToFile(jobId, database, backupTime) {
+  const dest = await invoke("pick_destination");
+  if (!dest) return;
+  const when = new Date(backupTime * 1000).toLocaleString();
+  streamRun(`Saving ${database} (${when}) to file`, "restore_sql_to_file", {
+    jobId,
+    database,
+    destination: dest,
+    point: { kind: "full", backup_time: backupTime },
+  });
+}
+
+// Save a point-in-time chain (the full .bak plus its .trn logs and a restore-steps
+// file) to a chosen folder, for a manual restore on any SQL Server.
+async function restoreSqlPitToFile(jobId, database, unixTime) {
+  const dest = await invoke("pick_destination");
+  if (!dest) return;
+  const when = new Date(unixTime * 1000).toLocaleString();
+  streamRun(`Saving ${database} chain (to ${when}) to file`, "restore_sql_to_file", {
+    jobId,
+    database,
+    destination: dest,
+    point: { kind: "point_in_time", unix_time: unixTime },
   });
 }
 
