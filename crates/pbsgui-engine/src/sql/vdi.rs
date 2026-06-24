@@ -199,9 +199,48 @@ pub async fn restore_chain(
     anyhow::bail!("VDI restore is only available on Windows")
 }
 
+/// Restore a database by streaming its backup from PBS straight into SQL Server
+/// (bounded memory). See the Windows implementation.
+#[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
+pub async fn restore_database_streamed(
+    _server: &str,
+    _port: Option<u16>,
+    _auth: &SqlAuth,
+    _password: Option<&str>,
+    _source_database: &str,
+    _target_database: &str,
+    _pbs: &SessionParams,
+    _archive: &str,
+    _crypt: Option<CryptConfig>,
+    _files: &[crate::sql::backupmeta::SqlBackupFile],
+) -> anyhow::Result<()> {
+    anyhow::bail!("VDI restore is only available on Windows")
+}
+
+/// Restore a chain (full then logs) to a point in time by streaming each backup
+/// from PBS into SQL Server (bounded memory). See the Windows implementation.
+#[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
+pub async fn restore_chain_streamed(
+    _server: &str,
+    _port: Option<u16>,
+    _auth: &SqlAuth,
+    _password: Option<&str>,
+    _source_database: &str,
+    _target_database: &str,
+    _steps: Vec<(bool, SessionParams, String)>,
+    _crypt: Option<CryptConfig>,
+    _files: &[crate::sql::backupmeta::SqlBackupFile],
+    _target_unix: i64,
+) -> anyhow::Result<()> {
+    anyhow::bail!("VDI restore is only available on Windows")
+}
+
 #[cfg(windows)]
 pub use windows_impl::{
-    backup_database_to_file, backup_database_to_pbs, restore_chain, restore_database_from_image,
+    backup_database_to_file, backup_database_to_pbs, restore_chain, restore_chain_streamed,
+    restore_database_from_image, restore_database_streamed,
 };
 
 #[cfg(windows)]
@@ -369,28 +408,67 @@ mod windows_impl {
             .await?
             .context("no msdb.dbo.backupset row for the database")?;
         let btype = row.get::<&str, _>("btype").unwrap_or("D");
+        let kind = if btype.eq_ignore_ascii_case("L") {
+            "log"
+        } else {
+            "full"
+        }
+        .to_string();
+        let backup_time = row.get::<i64, _>("finish_unix").unwrap_or(0);
+        let first_lsn = row
+            .get::<&str, _>("first_lsn")
+            .unwrap_or_default()
+            .to_string();
+        let last_lsn = row
+            .get::<&str, _>("last_lsn")
+            .unwrap_or_default()
+            .to_string();
+        let database_backup_lsn = row
+            .get::<&str, _>("db_backup_lsn")
+            .unwrap_or_default()
+            .to_string();
+        // Drop the borrow of `client` from the row before the next query.
+        drop(row);
+        let files = query_db_files(client, database).await.unwrap_or_default();
         let meta = crate::sql::backupmeta::SqlBackupMeta {
-            kind: if btype.eq_ignore_ascii_case("L") {
-                "log"
-            } else {
-                "full"
-            }
-            .to_string(),
-            backup_time: row.get::<i64, _>("finish_unix").unwrap_or(0),
-            first_lsn: row
-                .get::<&str, _>("first_lsn")
-                .unwrap_or_default()
-                .to_string(),
-            last_lsn: row
-                .get::<&str, _>("last_lsn")
-                .unwrap_or_default()
-                .to_string(),
-            database_backup_lsn: row
-                .get::<&str, _>("db_backup_lsn")
-                .unwrap_or_default()
-                .to_string(),
+            kind,
+            backup_time,
+            first_lsn,
+            last_lsn,
+            database_backup_lsn,
+            files,
         };
         Ok(serde_json::to_vec(&meta)?)
+    }
+
+    /// The database's logical files at backup time (name, physical path, and whether
+    /// it is a log file), so a renamed restore can relocate them without a second
+    /// read of the backup.
+    async fn query_db_files(
+        client: &mut SqlClient,
+        database: &str,
+    ) -> anyhow::Result<Vec<crate::sql::backupmeta::SqlBackupFile>> {
+        let db = database.replace('\'', "''");
+        let sql = format!(
+            "SELECT name, physical_name, type_desc FROM sys.master_files \
+             WHERE database_id = DB_ID(N'{db}')"
+        );
+        let results = client.simple_query(sql).await?.into_results().await?;
+        let rows = results.into_iter().next().unwrap_or_default();
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::sql::backupmeta::SqlBackupFile {
+                logical: row.get::<&str, _>("name").unwrap_or_default().to_string(),
+                physical: row
+                    .get::<&str, _>("physical_name")
+                    .unwrap_or_default()
+                    .to_string(),
+                is_log: row
+                    .get::<&str, _>("type_desc")
+                    .map(|t| t.eq_ignore_ascii_case("LOG"))
+                    .unwrap_or(false),
+            })
+            .collect())
     }
 
     pub async fn backup_database_to_file(
@@ -510,21 +588,69 @@ mod windows_impl {
         super::combine_pbs_result(backup, upload)
     }
 
-    /// An in-memory restore source: the downloaded native backup stream, served
-    /// sequentially to the device's `VDC_Read` requests.
+    /// A source of bytes for a RESTORE: fill `out` as much as possible, returning
+    /// fewer than `out.len()` only at true end of stream, so the device loop can
+    /// treat a short read as EOF (mirroring the VDI sample).
+    trait RestoreSource {
+        fn read_into(&mut self, out: &mut [u8]) -> usize;
+    }
+
+    /// An in-memory restore source: a fully-downloaded native backup stream, served
+    /// sequentially to the device's `VDC_Read` requests (the buffered restore path).
     struct ImageSource {
         data: Vec<u8>,
         pos: usize,
     }
 
-    impl ImageSource {
-        /// Copy up to `out.len()` bytes into `out`; returns how many (fewer only
-        /// at end of stream).
+    impl RestoreSource for ImageSource {
         fn read_into(&mut self, out: &mut [u8]) -> usize {
             let n = (self.data.len() - self.pos).min(out.len());
             out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
             self.pos += n;
             n
+        }
+    }
+
+    /// A streaming restore source fed by an async producer over a bounded channel:
+    /// the device thread pulls bytes with `blocking_recv`, blocking until the next
+    /// chunk or the senders drop (end of stream). It fills the whole request unless
+    /// the stream has ended, so the device loop's short-read EOF rule still holds.
+    struct StreamReader {
+        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        buf: Vec<u8>,
+        pos: usize,
+    }
+
+    impl StreamReader {
+        fn new(rx: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+            Self {
+                rx,
+                buf: Vec::new(),
+                pos: 0,
+            }
+        }
+    }
+
+    impl RestoreSource for StreamReader {
+        fn read_into(&mut self, out: &mut [u8]) -> usize {
+            let mut filled = 0;
+            while filled < out.len() {
+                if self.pos >= self.buf.len() {
+                    match self.rx.blocking_recv() {
+                        Some(next) => {
+                            self.buf = next;
+                            self.pos = 0;
+                        }
+                        None => break, // every sender dropped: end of stream
+                    }
+                    continue;
+                }
+                let n = (self.buf.len() - self.pos).min(out.len() - filled);
+                out[filled..filled + n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+                self.pos += n;
+                filled += n;
+            }
+            filled
         }
     }
 
@@ -687,6 +813,204 @@ mod windows_impl {
         }
 
         // Bring the database online at the recovered point.
+        client
+            .simple_query(format!("RESTORE DATABASE [{target}] WITH RECOVERY"))
+            .await?
+            .into_results()
+            .await?;
+        Ok(())
+    }
+
+    /// Run one RESTORE statement whose backup is streamed from PBS instead of held
+    /// in memory. A background task streams the archive into a bounded channel; the
+    /// device thread serves the statement's reads from it. `make_sql` builds the
+    /// statement from the device set name. Only one chunk is buffered at a time.
+    async fn restore_one_streamed<F>(
+        client: &mut SqlClient,
+        pbs: &SessionParams,
+        archive: &str,
+        crypt: Option<&CryptConfig>,
+        make_sql: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let set_name = format!("pbsgui-{}", Uuid::new_v4());
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+        let loop_name = set_name.clone();
+        let device = tokio::task::spawn_blocking(move || {
+            let mut source = StreamReader::new(rx);
+            run_device_session(&loop_name, ready_tx, |vds| {
+                fill_device(vds, &loop_name, &mut source)
+            })
+        });
+        ready_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("VDI thread exited before signaling readiness"))??;
+
+        // Background task: stream the archive from PBS into the channel. Dropping the
+        // sender at the end signals end of stream to the device.
+        let pbs = pbs.clone();
+        let archive = archive.to_string();
+        let crypt = crypt.cloned();
+        let download = tokio::spawn(async move {
+            let mut reader = pbs_client::session::ReaderClient::connect(&pbs).await?;
+            reader
+                .restore_dynamic_archive_streamed(&archive, crypt.as_ref(), |chunk| {
+                    let tx = tx.clone();
+                    async move {
+                        tx.send(chunk).await.map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "restore consumer stopped",
+                            )
+                        })
+                    }
+                })
+                .await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        // Issue the RESTORE; it reads from the device, which the download feeds.
+        let sql = make_sql(&set_name);
+        let restore_result: anyhow::Result<()> = async {
+            client.simple_query(sql).await?.into_results().await?;
+            Ok(())
+        }
+        .await;
+
+        let download_result = download.await;
+        let device_result = device.await;
+
+        // The RESTORE error is the most informative; then the download; then device.
+        restore_result.context("the RESTORE statement failed")?;
+        match download_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e.context("streaming the backup from PBS failed")),
+            Err(e) => return Err(anyhow::anyhow!("PBS download task panicked: {e}")),
+        }
+        match device_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e.context("the VDI device loop failed")),
+            Err(e) => return Err(anyhow::anyhow!("VDI thread panicked: {e}")),
+        }
+        Ok(())
+    }
+
+    /// MOVE clauses for a renamed restore, built from the file list captured at
+    /// backup time (so no `RESTORE FILELISTONLY` pass over the streamed backup).
+    async fn moves_from_files(
+        client: &mut SqlClient,
+        files: &[crate::sql::backupmeta::SqlBackupFile],
+        target_database: &str,
+    ) -> anyhow::Result<String> {
+        let (data_dir, log_dir) = default_dirs(client).await?;
+        let converted: Vec<BackupFile> = files
+            .iter()
+            .map(|f| BackupFile {
+                logical: f.logical.clone(),
+                physical: f.physical.clone(),
+                is_log: f.is_log,
+            })
+            .collect();
+        Ok(move_clause(
+            &converted,
+            &data_dir,
+            &log_dir,
+            target_database,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn restore_database_streamed(
+        server: &str,
+        port: Option<u16>,
+        auth: &SqlAuth,
+        password: Option<&str>,
+        source_database: &str,
+        target_database: &str,
+        pbs: &SessionParams,
+        archive: &str,
+        crypt: Option<CryptConfig>,
+        files: &[crate::sql::backupmeta::SqlBackupFile],
+    ) -> anyhow::Result<()> {
+        let mut client = probe::connect(server, port, auth, password).await?;
+        let target = target_database.replace(']', "]]");
+        let moves = if source_database.eq_ignore_ascii_case(target_database) {
+            String::new()
+        } else {
+            moves_from_files(&mut client, files, target_database).await?
+        };
+        restore_one_streamed(&mut client, pbs, archive, crypt.as_ref(), move |set| {
+            format!(
+                "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                 WITH REPLACE, RECOVERY{moves}"
+            )
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn restore_chain_streamed(
+        server: &str,
+        port: Option<u16>,
+        auth: &SqlAuth,
+        password: Option<&str>,
+        source_database: &str,
+        target_database: &str,
+        steps: Vec<(bool, SessionParams, String)>,
+        crypt: Option<CryptConfig>,
+        files: &[crate::sql::backupmeta::SqlBackupFile],
+        target_unix: i64,
+    ) -> anyhow::Result<()> {
+        if steps.is_empty() {
+            anyhow::bail!("empty restore chain");
+        }
+        let mut client = probe::connect(server, port, auth, password).await?;
+        let target = target_database.replace(']', "]]");
+        let new_name = !source_database.eq_ignore_ascii_case(target_database);
+
+        // STOPAT must be a datetime in the server's local time.
+        let offset_min: i32 = client
+            .simple_query("SELECT DATEDIFF(MINUTE, GETUTCDATE(), GETDATE())")
+            .await?
+            .into_row()
+            .await?
+            .and_then(|r| r.get::<i32, _>(0))
+            .unwrap_or(0);
+        let local_unix = target_unix + (offset_min as i64) * 60;
+        let stopat = chrono::DateTime::from_timestamp(local_unix, 0)
+            .map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string())
+            .unwrap_or_default();
+
+        let moves = if new_name {
+            moves_from_files(&mut client, files, target_database).await?
+        } else {
+            String::new()
+        };
+
+        for (i, (_is_log, pbs, archive)) in steps.iter().enumerate() {
+            let target = target.clone();
+            let moves = moves.clone();
+            let stopat = stopat.clone();
+            restore_one_streamed(&mut client, pbs, archive, crypt.as_ref(), move |set| {
+                if i == 0 {
+                    format!(
+                        "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                         WITH REPLACE, NORECOVERY{moves}"
+                    )
+                } else {
+                    format!(
+                        "RESTORE LOG [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                         WITH STOPAT = N'{stopat}', NORECOVERY"
+                    )
+                }
+            })
+            .await?;
+        }
+
         client
             .simple_query(format!("RESTORE DATABASE [{target}] WITH RECOVERY"))
             .await?
@@ -964,7 +1288,7 @@ mod windows_impl {
     fn fill_device(
         vds: &IClientVirtualDeviceSet2,
         set_name: &str,
-        source: &mut ImageSource,
+        source: &mut dyn RestoreSource,
     ) -> anyhow::Result<u64> {
         let device = open_device(vds, set_name)?;
         let mut total: u64 = 0;

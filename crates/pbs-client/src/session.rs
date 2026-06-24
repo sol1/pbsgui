@@ -1195,6 +1195,38 @@ impl ReaderClient {
         out.flush().await?;
         Ok(written)
     }
+
+    /// Stream a dynamic-index archive, handing each decoded (and decrypted) chunk to
+    /// `on_chunk` in order. Like [`Self::restore_dynamic_archive_to_writer`] but the
+    /// sink is an async callback, so the bytes can be fed to a consumer that is not a
+    /// writer (e.g. a channel driving a SQL Server VDI restore). Returns the bytes
+    /// produced. A callback error ends the stream early.
+    pub async fn restore_dynamic_archive_streamed<F, Fut>(
+        &mut self,
+        archive_name: &str,
+        crypt: Option<&CryptConfig>,
+        mut on_chunk: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<()>>,
+    {
+        let index_bytes = self.download(archive_name).await?;
+        let index = DynamicIndex::parse(&index_bytes)?;
+        if !index.verify_csum() {
+            return Err(PbsError::Protocol(
+                "downloaded dynamic index failed its csum check".into(),
+            ));
+        }
+        let mut produced = 0u64;
+        for digest in index.digests() {
+            let chunk_blob = self.download_chunk(digest).await?;
+            let chunk = decode_blob(&chunk_blob, crypt)?;
+            produced += chunk.len() as u64;
+            on_chunk(chunk).await?;
+        }
+        Ok(produced)
+    }
 }
 
 /// Decode a downloaded blob, decrypting it when it is an encrypted blob and

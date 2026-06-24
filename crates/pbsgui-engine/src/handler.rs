@@ -694,27 +694,70 @@ async fn run_restore_full(
 ) -> anyhow::Result<String> {
     let (group, archive) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
-    let _ = responder
-        .send(&Reply::Log {
-            line: "downloading the database backup".to_string(),
-        })
-        .await;
-    let image = download_sql_image(ctx, &group, &archive, backup_time).await?;
+    let new_name = !database.eq_ignore_ascii_case(target_database);
+    // A renamed restore relocates the files, which needs the file list captured at
+    // backup time. When it is present (or restoring over the original name) the
+    // restore streams straight into SQL Server with bounded memory; an older backup
+    // without it falls back to a buffered restore.
+    let files = if new_name {
+        download_sql_meta(ctx, &group, backup_time)
+            .await
+            .map(|m| m.files)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let _ = responder
         .send(&Reply::Log {
             line: format!("restoring as [{target_database}] (overwrites it if it exists)"),
         })
         .await;
-    crate::sql::vdi::restore_database_from_image(
-        &ctx.conn.server,
-        ctx.conn.port,
-        &ctx.conn.auth,
-        ctx.password.as_deref(),
-        database,
-        target_database,
-        image,
-    )
-    .await?;
+    if !new_name || !files.is_empty() {
+        let _ = responder
+            .send(&Reply::Log {
+                line: "streaming the restore from PBS into SQL Server".to_string(),
+            })
+            .await;
+        let pbs = SessionParams::from_repository(
+            &ctx.repo,
+            ctx.secret.clone(),
+            &ctx.fingerprint,
+            SQL_BACKUP_TYPE,
+            &group,
+            backup_time,
+        )?;
+        crate::sql::vdi::restore_database_streamed(
+            &ctx.conn.server,
+            ctx.conn.port,
+            &ctx.conn.auth,
+            ctx.password.as_deref(),
+            database,
+            target_database,
+            &pbs,
+            &archive,
+            ctx.crypt.clone(),
+            &files,
+        )
+        .await?;
+    } else {
+        let _ = responder
+            .send(&Reply::Log {
+                line: "older backup without a stored file list; using a buffered restore"
+                    .to_string(),
+            })
+            .await;
+        let image = download_sql_image(ctx, &group, &archive, backup_time).await?;
+        crate::sql::vdi::restore_database_from_image(
+            &ctx.conn.server,
+            ctx.conn.port,
+            &ctx.conn.auth,
+            ctx.password.as_deref(),
+            database,
+            target_database,
+            image,
+        )
+        .await?;
+    }
     Ok(format!("restored {database} as {target_database}"))
 }
 
@@ -770,29 +813,82 @@ async fn run_restore_pit(
         })
         .await;
 
-    // Download each image in apply order (full first); memory holds one chain.
-    let mut steps: Vec<(bool, Vec<u8>)> = Vec::new();
-    for item in &chain {
-        let group = if item.meta.is_log() {
-            &log_group
-        } else {
-            &full_group
-        };
-        let image = download_sql_image(ctx, group, &archive, item.snapshot_time).await?;
-        steps.push((item.meta.is_log(), image));
-    }
+    // A renamed restore needs the full's file list (captured at backup time) to
+    // relocate files without a second read of the backup. Stream when it is present
+    // or the name is unchanged; otherwise fall back to a buffered restore.
+    let new_name = !database.eq_ignore_ascii_case(target_database);
+    let full_files = chain
+        .iter()
+        .find(|c| !c.meta.is_log())
+        .map(|c| c.meta.files.clone())
+        .unwrap_or_default();
 
-    crate::sql::vdi::restore_chain(
-        &ctx.conn.server,
-        ctx.conn.port,
-        &ctx.conn.auth,
-        ctx.password.as_deref(),
-        database,
-        target_database,
-        steps,
-        target_unix,
-    )
-    .await?;
+    if !new_name || !full_files.is_empty() {
+        let _ = responder
+            .send(&Reply::Log {
+                line: "streaming the restore from PBS into SQL Server".to_string(),
+            })
+            .await;
+        let mut steps: Vec<(bool, SessionParams, String)> = Vec::new();
+        for item in &chain {
+            let group = if item.meta.is_log() {
+                &log_group
+            } else {
+                &full_group
+            };
+            let pbs = SessionParams::from_repository(
+                &ctx.repo,
+                ctx.secret.clone(),
+                &ctx.fingerprint,
+                SQL_BACKUP_TYPE,
+                group,
+                item.snapshot_time,
+            )?;
+            steps.push((item.meta.is_log(), pbs, archive.clone()));
+        }
+        crate::sql::vdi::restore_chain_streamed(
+            &ctx.conn.server,
+            ctx.conn.port,
+            &ctx.conn.auth,
+            ctx.password.as_deref(),
+            database,
+            target_database,
+            steps,
+            ctx.crypt.clone(),
+            &full_files,
+            target_unix,
+        )
+        .await?;
+    } else {
+        let _ = responder
+            .send(&Reply::Log {
+                line: "older backup without a stored file list; using a buffered restore"
+                    .to_string(),
+            })
+            .await;
+        // Download each image in apply order (full first); memory holds one chain.
+        let mut steps: Vec<(bool, Vec<u8>)> = Vec::new();
+        for item in &chain {
+            let group = if item.meta.is_log() {
+                &log_group
+            } else {
+                &full_group
+            };
+            let image = download_sql_image(ctx, group, &archive, item.snapshot_time).await?;
+            steps.push((item.meta.is_log(), image));
+        }
+        crate::sql::vdi::restore_chain(
+            &ctx.conn.server,
+            ctx.conn.port,
+            &ctx.conn.auth,
+            ctx.password.as_deref(),
+            database,
+            target_database,
+            steps,
+            target_unix,
+        )
+        .await?;
+    }
     Ok(format!(
         "restored {database} as {target_database} to the chosen point in time"
     ))

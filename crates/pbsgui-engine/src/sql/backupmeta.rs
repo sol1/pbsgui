@@ -11,6 +11,20 @@ use serde::{Deserialize, Serialize};
 /// Name of the metadata blob stored inside each SQL snapshot.
 pub const META_BLOB_NAME: &str = "meta.json.blob";
 
+/// One logical file in a backed-up database (captured at backup time), so a
+/// restore under a new name can relocate the files without a `RESTORE FILELISTONLY`
+/// pass over the backup (which a streamed restore cannot afford to do twice).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqlBackupFile {
+    /// Logical file name (used in `MOVE 'logical' TO ...`).
+    pub logical: String,
+    /// Original physical path (its file name seeds the relocated path).
+    pub physical: String,
+    /// Whether this is a log file (chooses the log vs data default directory).
+    #[serde(default)]
+    pub is_log: bool,
+}
+
 /// Metadata for one SQL backup (full or log).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SqlBackupMeta {
@@ -24,6 +38,10 @@ pub struct SqlBackupMeta {
     /// LSN of the full this backup chains from (for diagnostics).
     #[serde(default)]
     pub database_backup_lsn: String,
+    /// The database's logical files at backup time (empty for snapshots made before
+    /// this was captured; such backups fall back to a buffered restore when renamed).
+    #[serde(default)]
+    pub files: Vec<SqlBackupFile>,
 }
 
 impl SqlBackupMeta {
@@ -96,6 +114,7 @@ mod tests {
                 first_lsn: first.into(),
                 last_lsn: last.into(),
                 database_backup_lsn: String::new(),
+                files: Vec::new(),
             },
         }
     }
@@ -108,6 +127,7 @@ mod tests {
                 first_lsn: first.into(),
                 last_lsn: last.into(),
                 database_backup_lsn: String::new(),
+                files: Vec::new(),
             },
         }
     }
