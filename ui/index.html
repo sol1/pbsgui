@@ -421,8 +421,12 @@
 
       <!-- Shared run / restore output -->
       <section id="run" class="hidden">
-        <!-- One chip per active/recent run; click to swap the panel between them. -->
-        <div id="run-tabs" class="run-tabs hidden"></div>
+        <!-- Switch the output between concurrent runs; only shown with 2+ runs. -->
+        <div id="run-switcher" class="run-switcher hidden">
+          <span class="run-switcher-label">Active runs</span>
+          <div id="run-tabs" class="run-tabs"></div>
+          <span class="run-switcher-hint">click to switch</span>
+        </div>
         <h2 id="run-title">Running</h2>
         <div class="progress-wrap">
           <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>

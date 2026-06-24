@@ -810,18 +810,19 @@ function runTabLabel(run) {
 function renderRunTabs() {
   const tabs = el("run-tabs");
   tabs.innerHTML = "";
-  // Only worth showing the switcher when more than one run is present.
-  tabs.classList.toggle("hidden", runs.size <= 1);
+  // The whole switcher (label + tabs) only matters with more than one run.
+  el("run-switcher").classList.toggle("hidden", runs.size <= 1);
   for (const run of runs.values()) {
     const state = run.running ? "running" : run.success ? "ok" : "fail";
     const tab = document.createElement("div");
     tab.className =
       "run-tab " + state + (run.runId === selectedRunId ? " active" : "");
+    // The whole tab is clickable, so it reads as a button, not just the text.
+    tab.title = runTabLabel(run);
+    tab.onclick = () => selectRun(run.runId);
     const name = document.createElement("span");
     name.className = "run-tab-name";
     name.textContent = runTabLabel(run);
-    name.title = runTabLabel(run);
-    name.onclick = () => selectRun(run.runId);
     tab.append(name);
     // A finished run can be dismissed; a running one stays until it ends.
     if (!run.running) {
@@ -829,7 +830,8 @@ function renderRunTabs() {
       close.type = "button";
       close.className = "run-tab-close";
       close.textContent = "×";
-      close.title = "Close";
+      close.title = "Close this run";
+      close.setAttribute("aria-label", "Close this run");
       close.onclick = (e) => {
         e.stopPropagation();
         closeRun(run.runId);

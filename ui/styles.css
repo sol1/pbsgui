@@ -584,34 +584,68 @@ button.running {
   padding-top: 18px;
 }
 
-/* Tabs to swap the run output between concurrent runs. */
+/* Switch the run output between concurrent runs: a label plus clickable tabs. */
+.run-switcher {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.run-switcher-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.run-switcher-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .run-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 12px;
 }
 
 .run-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 260px;
-  padding: 4px 6px 4px 10px;
+  max-width: 240px;
+  padding: 5px 8px 5px 11px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--panel);
-  font-size: 12px;
+  background: var(--panel-2);
+  font-size: 12.5px;
   color: var(--muted);
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    color 0.12s ease;
 }
 
-.run-tab.active {
+.run-tab:hover {
   border-color: var(--accent);
   color: var(--text);
 }
 
+/* The selected tab: accent border, bold, and an accent underline so it clearly
+   reads as the one being shown. */
+.run-tab.active {
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
 .run-tab-name {
-  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
