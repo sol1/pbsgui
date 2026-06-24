@@ -5,6 +5,20 @@ clean-room reimplementation of the PBS backup protocol.
 This is an early release. Please test against non-production data first and report
 issues.
 
+## New in 0.0.7
+
+- **Fix: upgrading to 0.0.6 could briefly run every SQL job at once.** 0.0.6 added
+  per-job scheduling timers that older state did not carry, so right after
+  upgrading the scheduler saw every existing SQL job as "never run" and ran them
+  all on its next cycle. Jobs that have run before are now gated by their last
+  successful backup, so only genuinely due jobs run. If you hit this on 0.0.6 it
+  was a one-time event - the extra runs were ordinary backups, not data loss.
+- **Clearer token validation error.** When a PBS token authenticates but still
+  cannot back up, the validation message now explains PBS privilege separation - a
+  token's effective rights are the intersection of the token's and its user's
+  roles, so both need the DatastoreBackup role on the path - and prints the exact
+  command to grant it to the user.
+
 ## New in 0.0.6
 
 - **Backup compression.** Backups are now compressed with zstd before upload, so
