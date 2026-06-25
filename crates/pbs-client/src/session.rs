@@ -57,6 +57,11 @@ const APPEND_BATCH: usize = 64;
 /// Maximum chunk-data uploads in flight at once. HTTP/2 multiplexes them over the
 /// one connection, so this pipelines uploads instead of waiting for each in turn.
 const MAX_INFLIGHT_UPLOADS: usize = 16;
+/// Maximum chunk downloads in flight when restoring an archive to a writer. The
+/// read-side mirror of [`MAX_INFLIGHT_UPLOADS`]: it overlaps the network read with
+/// the disk write so a restore is bandwidth-bound, not latency-bound (one
+/// round-trip per chunk) and bursty.
+const RESTORE_PIPELINE: usize = 16;
 
 /// Percent-encoding set for query parameter values.
 const QUERY: &AsciiSet = &NON_ALPHANUMERIC
@@ -1082,6 +1087,37 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
 }
 
 /// A reader session for restoring from a snapshot.
+/// A cloneable handle for downloading chunk data concurrently on a reader
+/// connection. Each clone carries its own h2 `SendRequest`, so downloads spawned
+/// from it run as separate multiplexed HTTP/2 streams (the read-side mirror of
+/// [`ChunkUploader`]), which is what lets a restore keep many chunk GETs in flight
+/// instead of waiting a full round-trip per chunk.
+#[derive(Clone)]
+pub struct ChunkDownloader {
+    send: SendRequest<Bytes>,
+    authority: String,
+}
+
+impl ChunkDownloader {
+    /// Download one chunk's DataBlob by digest. Takes `&self` so it can run from a
+    /// spawned task.
+    pub async fn download_chunk(&self, digest: &[u8; DIGEST_LEN]) -> Result<Vec<u8>> {
+        let q = format!("/chunk?digest={}", hex::encode(digest));
+        let (status, body) = h2_request(
+            &self.send,
+            &self.authority,
+            Method::GET,
+            &q,
+            None,
+            None,
+            false,
+        )
+        .await?;
+        ensure_ok(status, &body)?;
+        Ok(body)
+    }
+}
+
 pub struct ReaderClient {
     conn: H2Conn,
 }
@@ -1092,6 +1128,14 @@ impl ReaderClient {
         let path = format!("/api2/json/reader?{}", params.snapshot_query());
         let conn = H2Conn::upgrade(params, &path, READER_PROTOCOL_ID_V1).await?;
         Ok(Self { conn })
+    }
+
+    /// A cloneable handle for downloading chunks concurrently on this connection.
+    pub fn chunk_downloader(&self) -> ChunkDownloader {
+        ChunkDownloader {
+            send: self.conn.send.clone(),
+            authority: self.conn.authority.clone(),
+        }
     }
 
     /// Download a named file (index or blob) as raw bytes.
@@ -1169,6 +1213,12 @@ impl ReaderClient {
     /// each chunk as it arrives. Unlike [`Self::restore_dynamic_archive`], the whole
     /// archive is never held in memory, so a very large archive (a multi-hundred-GB
     /// SQL backup) can be written straight to a file. Returns the bytes written.
+    ///
+    /// Chunks are downloaded and decoded through a pipeline of up to
+    /// `RESTORE_PIPELINE` concurrent tasks (the read-side mirror of the backup's
+    /// in-flight uploads) and written in order, so the network read overlaps the disk
+    /// write instead of taking turns. A purely sequential download waits a full
+    /// round-trip per chunk, which makes throughput latency-bound and bursty.
     pub async fn restore_dynamic_archive_to_writer<W>(
         &mut self,
         archive_name: &str,
@@ -1185,12 +1235,44 @@ impl ReaderClient {
                 "downloaded dynamic index failed its csum check".into(),
             ));
         }
+        let digests: Vec<[u8; DIGEST_LEN]> = index.digests().copied().collect();
+        let downloader = self.chunk_downloader();
+        let crypt = crypt.cloned();
+
+        // Spawn a download+decode task for one chunk. Decoding (decompress/decrypt)
+        // runs on the blocking pool so it does not stall the connection driver.
+        let spawn_one = |digest: [u8; DIGEST_LEN]| {
+            let downloader = downloader.clone();
+            let crypt = crypt.clone();
+            tokio::spawn(async move {
+                let blob = downloader.download_chunk(&digest).await?;
+                tokio::task::spawn_blocking(move || decode_blob(&blob, crypt.as_ref()))
+                    .await
+                    .map_err(|e| PbsError::Protocol(format!("decode task failed: {e}")))?
+            })
+        };
+
+        // Keep a window of in-flight downloads; await them in order so the bytes are
+        // written sequentially while later chunks are still downloading.
+        let mut digest_iter = digests.into_iter();
+        let mut inflight: std::collections::VecDeque<_> = std::collections::VecDeque::new();
+        for _ in 0..RESTORE_PIPELINE {
+            match digest_iter.next() {
+                Some(d) => inflight.push_back(spawn_one(d)),
+                None => break,
+            }
+        }
+
         let mut written = 0u64;
-        for digest in index.digests() {
-            let chunk_blob = self.download_chunk(digest).await?;
-            let chunk = decode_blob(&chunk_blob, crypt)?;
+        while let Some(handle) = inflight.pop_front() {
+            let chunk = handle
+                .await
+                .map_err(|e| PbsError::Protocol(format!("download task failed: {e}")))??;
             out.write_all(&chunk).await?;
             written += chunk.len() as u64;
+            if let Some(d) = digest_iter.next() {
+                inflight.push_back(spawn_one(d));
+            }
         }
         out.flush().await?;
         Ok(written)
