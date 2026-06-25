@@ -1209,16 +1209,27 @@ impl ReaderClient {
         Ok(out)
     }
 
+    /// Download and verify an archive's dynamic index, returning its chunk digests
+    /// in archive order (the input to the restore pipeline).
+    async fn archive_digests(&mut self, archive_name: &str) -> Result<Vec<[u8; DIGEST_LEN]>> {
+        let index_bytes = self.download(archive_name).await?;
+        let index = DynamicIndex::parse(&index_bytes)?;
+        if !index.verify_csum() {
+            return Err(PbsError::Protocol(
+                "downloaded dynamic index failed its csum check".into(),
+            ));
+        }
+        Ok(index.digests().copied().collect())
+    }
+
     /// Stream a dynamic-index archive to an async writer, decoding (and decrypting)
     /// each chunk as it arrives. Unlike [`Self::restore_dynamic_archive`], the whole
     /// archive is never held in memory, so a very large archive (a multi-hundred-GB
     /// SQL backup) can be written straight to a file. Returns the bytes written.
     ///
-    /// Chunks are downloaded and decoded through a pipeline of up to
-    /// `RESTORE_PIPELINE` concurrent tasks (the read-side mirror of the backup's
-    /// in-flight uploads) and written in order, so the network read overlaps the disk
-    /// write instead of taking turns. A purely sequential download waits a full
-    /// round-trip per chunk, which makes throughput latency-bound and bursty.
+    /// Chunks download and decode through a pipeline of up to `RESTORE_PIPELINE`
+    /// concurrent tasks (see [`spawn_chunk_pipeline`]) and are written in order, so
+    /// the network read overlaps the disk write instead of taking turns.
     pub async fn restore_dynamic_archive_to_writer<W>(
         &mut self,
         archive_name: &str,
@@ -1228,19 +1239,68 @@ impl ReaderClient {
     where
         W: tokio::io::AsyncWrite + Unpin,
     {
-        let index_bytes = self.download(archive_name).await?;
-        let index = DynamicIndex::parse(&index_bytes)?;
-        if !index.verify_csum() {
-            return Err(PbsError::Protocol(
-                "downloaded dynamic index failed its csum check".into(),
-            ));
+        let digests = self.archive_digests(archive_name).await?;
+        let (mut rx, producer) =
+            spawn_chunk_pipeline(self.chunk_downloader(), digests, crypt.cloned());
+        let mut written = 0u64;
+        while let Some(chunk) = rx.recv().await {
+            out.write_all(&chunk).await?;
+            written += chunk.len() as u64;
         }
-        let digests: Vec<[u8; DIGEST_LEN]> = index.digests().copied().collect();
-        let downloader = self.chunk_downloader();
-        let crypt = crypt.cloned();
+        join_pipeline(producer).await?;
+        out.flush().await?;
+        Ok(written)
+    }
 
-        // Spawn a download+decode task for one chunk. Decoding (decompress/decrypt)
-        // runs on the blocking pool so it does not stall the connection driver.
+    /// Stream a dynamic-index archive, handing each decoded (and decrypted) chunk to
+    /// `on_chunk` in order. Like [`Self::restore_dynamic_archive_to_writer`] but the
+    /// sink is an async callback, so the bytes can be fed to a consumer that is not a
+    /// writer (e.g. a channel driving a SQL Server VDI restore). It uses the same
+    /// concurrent download pipeline, so the restore prefetches chunks ahead of the
+    /// consumer instead of waiting a round-trip per chunk. Returns the bytes produced;
+    /// a callback error ends the stream early.
+    pub async fn restore_dynamic_archive_streamed<F, Fut>(
+        &mut self,
+        archive_name: &str,
+        crypt: Option<&CryptConfig>,
+        mut on_chunk: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<()>>,
+    {
+        let digests = self.archive_digests(archive_name).await?;
+        let (mut rx, producer) =
+            spawn_chunk_pipeline(self.chunk_downloader(), digests, crypt.cloned());
+        let mut produced = 0u64;
+        while let Some(chunk) = rx.recv().await {
+            produced += chunk.len() as u64;
+            on_chunk(chunk).await?;
+        }
+        join_pipeline(producer).await?;
+        Ok(produced)
+    }
+}
+
+/// Spawn a pipeline that downloads and decodes an archive's chunks through a window
+/// of up to [`RESTORE_PIPELINE`] concurrent tasks and emits them IN ORDER on the
+/// returned channel: chunks are downloaded out of order but delivered sequentially,
+/// so both a file write and a VDI stream (which must be in order) can consume it.
+/// Decoding runs on the blocking pool so it does not stall the connection driver.
+/// The producer handle resolves once every chunk is sent (or a download/decode error
+/// is hit); the caller drains the receiver, then [`join_pipeline`]s the handle to
+/// surface any error. Shared by the to-file and in-place (VDI) restore paths.
+fn spawn_chunk_pipeline(
+    downloader: ChunkDownloader,
+    digests: Vec<[u8; DIGEST_LEN]>,
+    crypt: Option<CryptConfig>,
+) -> (
+    tokio::sync::mpsc::Receiver<Vec<u8>>,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(RESTORE_PIPELINE);
+    let producer = tokio::spawn(async move {
+        // Download one chunk and decode it (decompress/decrypt) off the runtime.
         let spawn_one = |digest: [u8; DIGEST_LEN]| {
             let downloader = downloader.clone();
             let crypt = crypt.clone();
@@ -1252,8 +1312,8 @@ impl ReaderClient {
             })
         };
 
-        // Keep a window of in-flight downloads; await them in order so the bytes are
-        // written sequentially while later chunks are still downloading.
+        // Keep a window of in-flight downloads; await them in order and forward each
+        // downstream while later chunks are still downloading.
         let mut digest_iter = digests.into_iter();
         let mut inflight: std::collections::VecDeque<_> = std::collections::VecDeque::new();
         for _ in 0..RESTORE_PIPELINE {
@@ -1262,53 +1322,29 @@ impl ReaderClient {
                 None => break,
             }
         }
-
-        let mut written = 0u64;
         while let Some(handle) = inflight.pop_front() {
             let chunk = handle
                 .await
                 .map_err(|e| PbsError::Protocol(format!("download task failed: {e}")))??;
-            out.write_all(&chunk).await?;
-            written += chunk.len() as u64;
+            // Stop if the consumer is gone (the writer or the SQL restore failed).
+            if tx.send(chunk).await.is_err() {
+                break;
+            }
             if let Some(d) = digest_iter.next() {
                 inflight.push_back(spawn_one(d));
             }
         }
-        out.flush().await?;
-        Ok(written)
-    }
+        Ok(())
+    });
+    (rx, producer)
+}
 
-    /// Stream a dynamic-index archive, handing each decoded (and decrypted) chunk to
-    /// `on_chunk` in order. Like [`Self::restore_dynamic_archive_to_writer`] but the
-    /// sink is an async callback, so the bytes can be fed to a consumer that is not a
-    /// writer (e.g. a channel driving a SQL Server VDI restore). Returns the bytes
-    /// produced. A callback error ends the stream early.
-    pub async fn restore_dynamic_archive_streamed<F, Fut>(
-        &mut self,
-        archive_name: &str,
-        crypt: Option<&CryptConfig>,
-        mut on_chunk: F,
-    ) -> Result<u64>
-    where
-        F: FnMut(Vec<u8>) -> Fut,
-        Fut: std::future::Future<Output = std::io::Result<()>>,
-    {
-        let index_bytes = self.download(archive_name).await?;
-        let index = DynamicIndex::parse(&index_bytes)?;
-        if !index.verify_csum() {
-            return Err(PbsError::Protocol(
-                "downloaded dynamic index failed its csum check".into(),
-            ));
-        }
-        let mut produced = 0u64;
-        for digest in index.digests() {
-            let chunk_blob = self.download_chunk(digest).await?;
-            let chunk = decode_blob(&chunk_blob, crypt)?;
-            produced += chunk.len() as u64;
-            on_chunk(chunk).await?;
-        }
-        Ok(produced)
-    }
+/// Await a [`spawn_chunk_pipeline`] producer, surfacing a join failure or the
+/// pipeline's own download/decode error.
+async fn join_pipeline(producer: tokio::task::JoinHandle<Result<()>>) -> Result<()> {
+    producer
+        .await
+        .map_err(|e| PbsError::Protocol(format!("download pipeline task failed: {e}")))?
 }
 
 /// Decode a downloaded blob, decrypting it when it is an encrypted blob and
