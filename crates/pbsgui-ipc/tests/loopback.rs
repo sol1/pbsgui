@@ -240,8 +240,6 @@ fn sample_job() -> Job {
             hour: 2,
             minute: 30,
         },
-        pre_script: None,
-        post_script: None,
         last_run: None,
         last_status: None,
         encrypted: false,

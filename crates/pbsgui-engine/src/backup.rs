@@ -16,7 +16,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::unix_now;
-use crate::{archive, changedet, connstore, enckey, metrics, notify, scripts, secrets, sqlsched};
+use crate::{archive, changedet, connstore, enckey, metrics, notify, secrets, sqlsched};
 
 /// Archive name for a job's filesystem backup (a tar in a dynamic index).
 const ARCHIVE_NAME: &str = "files.didx";
@@ -238,8 +238,7 @@ pub async fn run_job(job: &Job, events: Sender<Reply>) -> anyhow::Result<String>
 }
 
 /// Run a job, streaming `Reply::Log`/`Reply::Progress` to `events`. `sql_run`
-/// selects full vs log for a SQL point-in-time job (ignored otherwise). The
-/// post-job script (if any) always runs with the final status in its environment.
+/// selects full vs log for a SQL point-in-time job (ignored otherwise).
 pub async fn run_job_kind(
     job: &Job,
     sql_run: SqlRun,
@@ -291,35 +290,6 @@ pub async fn run_job_kind(
             None,
         );
         return Ok("cancelled".to_string());
-    }
-
-    if let Some(post) = script_of(&job.post_script) {
-        let mut env = base_env(job);
-        match &outcome {
-            Ok((message, stats)) => {
-                env.push((
-                    "PBSGUI_STATUS".into(),
-                    (if stats.is_some() { "ok" } else { "no-change" }).into(),
-                ));
-                env.push(("PBSGUI_SUCCESS".into(), "1".into()));
-                env.push(("PBSGUI_MESSAGE".into(), message.clone()));
-                if let Some(stats) = stats {
-                    push_stats_env(&mut env, stats);
-                }
-            }
-            Err(e) => {
-                env.push(("PBSGUI_STATUS".into(), "error".into()));
-                env.push(("PBSGUI_SUCCESS".into(), "0".into()));
-                env.push(("PBSGUI_MESSAGE".into(), e.to_string()));
-            }
-        }
-        if let Err(e) = run_script(post, &env, "post", &events).await {
-            let _ = events
-                .send(Reply::Log {
-                    line: format!("[post] failed to run: {e}"),
-                })
-                .await;
-        }
     }
 
     // A successful SQL backup anchors/advances the point-in-time chain timers, so
@@ -396,16 +366,6 @@ async fn run_inner(
     events: &Sender<Reply>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<(String, Option<BackupStats>)> {
-    // Pre-job script: a non-zero exit aborts the job.
-    if let Some(pre) = script_of(&job.pre_script) {
-        let mut env = base_env(job);
-        env.push(("PBSGUI_PHASE".into(), "pre".into()));
-        let code = run_script(pre, &env, "pre", events).await?;
-        if code != 0 {
-            anyhow::bail!("pre-job script exited with code {code}");
-        }
-    }
-
     // Change detection (files source only): skip if nothing changed.
     let fingerprint = match &job.source {
         JobSource::Files {
@@ -844,62 +804,6 @@ fn sanitize(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn script_of(script: &Option<String>) -> Option<&str> {
-    script.as_deref().map(str::trim).filter(|s| !s.is_empty())
-}
-
-fn base_env(job: &Job) -> Vec<(String, String)> {
-    let mut env = vec![
-        ("PBSGUI_JOB_ID".into(), job.id.clone()),
-        ("PBSGUI_JOB_NAME".into(), job.name.clone()),
-    ];
-    match &job.destination {
-        JobDestination::Pbs { backup_id, .. } => {
-            env.push(("PBSGUI_DESTINATION".into(), "pbs".into()));
-            env.push(("PBSGUI_BACKUP_ID".into(), backup_id.clone()));
-        }
-        JobDestination::Folder { path } => {
-            env.push(("PBSGUI_DESTINATION".into(), "folder".into()));
-            env.push(("PBSGUI_FOLDER".into(), path.clone()));
-        }
-    }
-    env
-}
-
-fn push_stats_env(env: &mut Vec<(String, String)>, stats: &BackupStats) {
-    env.push(("PBSGUI_BYTES".into(), stats.bytes.to_string()));
-    env.push(("PBSGUI_CHUNKS".into(), stats.chunks.to_string()));
-    env.push(("PBSGUI_UPLOADED".into(), stats.uploaded.to_string()));
-    env.push(("PBSGUI_REUSED".into(), stats.reused.to_string()));
-    env.push((
-        "PBSGUI_UPLOADED_BYTES".into(),
-        stats.uploaded_bytes.to_string(),
-    ));
-    env.push(("PBSGUI_STORED_BYTES".into(), stats.stored_bytes.to_string()));
-}
-
-async fn run_script(
-    script: &str,
-    env: &[(String, String)],
-    label: &str,
-    events: &Sender<Reply>,
-) -> anyhow::Result<i32> {
-    let _ = events
-        .send(Reply::Log {
-            line: format!("running {label}-job script"),
-        })
-        .await;
-    let (code, output) = scripts::run(script, env).await?;
-    for line in output.lines() {
-        let _ = events
-            .send(Reply::Log {
-                line: format!("[{label}] {line}"),
-            })
-            .await;
-    }
-    Ok(code)
 }
 
 #[cfg(test)]

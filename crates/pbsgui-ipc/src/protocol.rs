@@ -152,12 +152,6 @@ pub struct Job {
     pub source: JobSource,
     pub destination: JobDestination,
     pub schedule: Schedule,
-    /// Command run before the backup; a non-zero exit aborts the job. Empty = none.
-    #[serde(default)]
-    pub pre_script: Option<String>,
-    /// Command run after the backup, with the job status in the environment.
-    #[serde(default)]
-    pub post_script: Option<String>,
     /// Last run time, unix seconds.
     #[serde(default)]
     pub last_run: Option<i64>,

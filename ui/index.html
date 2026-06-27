@@ -182,17 +182,6 @@
           </div>
           <p id="sql-schedule-note" class="help muted hidden">Scheduling is set by the protection
             plan on the Source step (full backup time and log interval).</p>
-          <label>Pre-job script (runs before the backup; a non-zero exit aborts the job)
-            <input id="f-pre-script" type="text" placeholder="e.g. C:\scripts\quiesce.bat" />
-          </label>
-          <label>Post-job script (runs after the backup)
-            <input id="f-post-script" type="text" placeholder="e.g. C:\scripts\notify.bat" />
-            <span class="help muted">The post-job script receives the job status in environment
-              variables: PBSGUI_STATUS (ok | error | no-change), PBSGUI_SUCCESS (1 | 0),
-              PBSGUI_MESSAGE, PBSGUI_JOB_ID, PBSGUI_JOB_NAME, PBSGUI_DESTINATION, PBSGUI_BACKUP_ID,
-              and on a successful files-to-PBS backup PBSGUI_BYTES, PBSGUI_CHUNKS, PBSGUI_UPLOADED,
-              PBSGUI_REUSED.</span>
-          </label>
         </div>
 
         <div class="actions">

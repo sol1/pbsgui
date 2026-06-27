@@ -345,7 +345,7 @@ function updateSourceType() {
   el("src-sql").classList.toggle("hidden", !sql);
   el("src-files").classList.toggle("hidden", sql);
   // SQL jobs schedule from the protection plan, so the generic schedule controls
-  // are hidden on the Schedule step (scripts still apply).
+  // are hidden on the Schedule step.
   el("schedule-controls").classList.toggle("hidden", sql);
   el("sql-schedule-note").classList.toggle("hidden", !sql);
 }
@@ -646,8 +646,6 @@ async function openEditor(job) {
     s.kind === "daily"
       ? `${String(s.hour).padStart(2, "0")}:${String(s.minute).padStart(2, "0")}`
       : "02:00";
-  el("f-pre-script").value = job?.pre_script || "";
-  el("f-post-script").value = job?.post_script || "";
   updateScheduleFields();
   showWizStep(0);
   showView("editor");
@@ -724,8 +722,6 @@ function gatherJob() {
     source: gatherSource(),
     destination: gatherDestination(),
     schedule: isSql ? { kind: "manual" } : gatherSchedule(),
-    pre_script: el("f-pre-script").value.trim() || null,
-    post_script: el("f-post-script").value.trim() || null,
     last_run: editing?.last_run ?? null,
     last_status: editing?.last_status ?? null,
     encrypted,

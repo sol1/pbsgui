@@ -106,8 +106,6 @@ mod tests {
                 backup_id: "host".into(),
             },
             schedule: Schedule::Manual,
-            pre_script: None,
-            post_script: None,
             last_run: None,
             last_status: None,
             encrypted: false,

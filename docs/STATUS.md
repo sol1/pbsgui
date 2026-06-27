@@ -15,14 +15,14 @@ CI on Windows and exercised manually.
 - **File and folder backup jobs.** Create, edit, delete, and run jobs; manual,
   interval, and daily schedules; glob excludes; deterministic archiving for
   reliable dedup.
-- **Secure settings.** Job configuration is stored as JSON; the PBS API token
-  secret is stored in the Windows Credential Manager and never written to the
-  config file or carried in job messages.
+- **Secure settings.** Job configuration is stored as JSON in a config directory
+  restricted (by ACL) to SYSTEM and administrators; the stores are tamper-evident
+  (HMAC-signed with a key in the Windows Credential Manager). The PBS API token
+  secret is stored in the Credential Manager and never written to the config file
+  or carried in job messages.
 - **Browse and restore.** List snapshots by date and time, list files within a
   snapshot, and restore everything or selected paths, with progress.
-- **Change detection and scripts.** Optionally skip a run when no source file has
-  changed; run pre-job and post-job scripts, with job status passed to the
-  post-job script through environment variables.
+- **Change detection.** Optionally skip a run when no source file has changed.
 - **Windows service.** The engine installs and runs as a LocalSystem service; the
   installer registers and starts it, and removes it on uninstall. The GUI shows
   service reachability and connects to the service rather than spawning it.

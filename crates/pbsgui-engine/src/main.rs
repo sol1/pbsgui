@@ -1,9 +1,9 @@
 //! pbsgui backup engine.
 //!
 //! Does the backup work: archives a job's sources and streams them to a Proxmox
-//! Backup Server (deduplicated) using the clean-room [`pbs_client`] crate, runs
-//! pre/post job scripts, and serves the GUI over a local socket (a named pipe on
-//! Windows; see [`pbsgui_ipc`]). A built-in scheduler runs due jobs.
+//! Backup Server (deduplicated) using the clean-room [`pbs_client`] crate, and
+//! serves the GUI over a local socket (a named pipe on Windows; see
+//! [`pbsgui_ipc`]). A built-in scheduler runs due jobs.
 //!
 //! Modes:
 //!   - `serve` runs the engine in the foreground (for development).
@@ -22,7 +22,6 @@ mod metrics;
 mod notify;
 mod restore;
 mod scheduler;
-mod scripts;
 mod secrets;
 #[cfg(windows)]
 mod service;
