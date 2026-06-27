@@ -27,6 +27,8 @@ tar = "0.4"
 walkdir = "2"
 glob = "0.3"
 sha2 = "0.10"
+# Sign the on-disk JSON stores (HMAC-SHA256) so tampering or corruption is caught.
+hmac = "0.12"
 base64 = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Notifications: HTTP (Slack/generic webhook) and SMTP email. rustls TLS to match

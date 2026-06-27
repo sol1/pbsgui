@@ -36,10 +36,16 @@ pub struct JsonStore<T> {
 
 impl<T: Clone + Serialize + DeserializeOwned + HasId> JsonStore<T> {
     pub fn with_path(path: PathBuf) -> Self {
-        let items = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<T>>(&b).ok())
-            .unwrap_or_default();
+        // A missing file is an empty store; a present but unreadable or
+        // signature-failing file is refused (logged, started empty) rather than
+        // silently discarded.
+        let items = match std::fs::read(&path) {
+            Ok(bytes) => crate::signed::deserialize::<Vec<T>>(&bytes).unwrap_or_else(|e| {
+                tracing::error!("refusing to load {}: {e}", path.display());
+                Vec::new()
+            }),
+            Err(_) => Vec::new(),
+        };
         Self {
             path,
             items: Mutex::new(items),
@@ -78,15 +84,9 @@ impl<T: Clone + Serialize + DeserializeOwned + HasId> JsonStore<T> {
     }
 
     fn persist(&self) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let data = {
-            let items = self.items.lock().unwrap();
-            serde_json::to_vec_pretty(&*items)?
-        };
-        std::fs::write(&self.path, data)?;
-        Ok(())
+        let snapshot = self.items.lock().unwrap().clone();
+        let data = crate::signed::serialize(&snapshot)?;
+        crate::signed::write_atomic(&self.path, &data)
     }
 }
 

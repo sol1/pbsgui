@@ -2613,6 +2613,7 @@ dependencies = [
  "chrono",
  "clap",
  "glob",
+ "hmac",
  "keyring",
  "lettre",
  "pbs-client",

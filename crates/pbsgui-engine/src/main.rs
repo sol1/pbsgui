@@ -25,6 +25,7 @@ mod scheduler;
 mod secrets;
 #[cfg(windows)]
 mod service;
+mod signed;
 mod sql;
 mod sqlsched;
 

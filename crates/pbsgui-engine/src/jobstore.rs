@@ -21,10 +21,7 @@ impl JobStore {
 
     /// Load the store from a specific path.
     pub fn with_path(path: PathBuf) -> Self {
-        let jobs = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<Job>>(&b).ok())
-            .unwrap_or_default();
+        let jobs = load_jobs(&path);
         Self {
             path,
             jobs: Mutex::new(jobs),
@@ -75,15 +72,26 @@ impl JobStore {
     }
 
     fn persist(&self) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let snapshot = self.jobs.lock().unwrap().clone();
+        let data = crate::signed::serialize(&snapshot)?;
+        crate::signed::write_atomic(&self.path, &data)
+    }
+}
+
+/// Read and verify the job store. A missing file is an empty store; a present but
+/// unreadable or signature-failing file is refused (logged, started empty) rather
+/// than silently discarded, so corruption or tampering is visible.
+fn load_jobs(path: &std::path::Path) -> Vec<Job> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Vec::new(),
+    };
+    match crate::signed::deserialize::<Vec<Job>>(&bytes) {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            tracing::error!("refusing to load jobs from {}: {e}", path.display());
+            Vec::new()
         }
-        let data = {
-            let jobs = self.jobs.lock().unwrap();
-            serde_json::to_vec_pretty(&*jobs)?
-        };
-        std::fs::write(&self.path, data)?;
-        Ok(())
     }
 }
 
