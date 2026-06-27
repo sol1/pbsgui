@@ -119,6 +119,11 @@ fn run_service_loop() -> windows_service::Result<()> {
         process_id: None,
     })?;
 
+    // Restrict the config directory's ACL before reading anything from it, so a
+    // file an unprivileged user may have planted cannot drive this LocalSystem
+    // service, then re-harden on every start.
+    crate::config::ensure_dirs();
+
     // Run the engine (scheduler + IPC) until a stop is requested.
     if let Ok(runtime) = tokio::runtime::Runtime::new() {
         runtime.block_on(async move {

@@ -60,8 +60,14 @@ windows-service = "0.7"
 winreg = "0.52"
 # Windows integrated authentication (SSPI/NTLM) for SQL Server connections.
 tiberius = { version = "0.12", default-features = false, features = ["winauth"] }
-# COM bindings for the SQLVDI.dll virtual device interface (VDI streaming backup).
-windows = { version = "0.58", features = ["Win32_System_Com", "Win32_Foundation"] }
+# COM bindings for the SQLVDI.dll virtual device interface (VDI streaming backup)
+# and the security APIs used to restrict the config directory's ACL.
+windows = { version = "0.58", features = [
+    "Win32_System_Com",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }
 # Required directly: the #[interface] macro expands to `windows_core::` paths.
 windows-core = "0.58"
 # Enabled as the SQL/VSS modules are implemented:

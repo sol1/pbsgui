@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
     match Cli::parse().command {
         Command::Serve { socket } => {
+            config::ensure_dirs();
             let store = Arc::new(JobStore::load());
             tracing::info!(socket, "engine serving IPC");
             run_engine(store, &socket).await
