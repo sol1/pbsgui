@@ -84,8 +84,12 @@ impl<T: Clone + Serialize + DeserializeOwned + HasId> JsonStore<T> {
     }
 
     fn persist(&self) -> anyhow::Result<()> {
-        let snapshot = self.items.lock().unwrap().clone();
-        let data = crate::signed::serialize(&snapshot)?;
+        // Hold the lock across the snapshot and the write so two concurrent
+        // persists cannot reorder: without this a slower writer could land an
+        // older state on disk after a newer one (a lost update). The mutators
+        // release the lock before calling persist, so this does not re-enter.
+        let items = self.items.lock().unwrap();
+        let data = crate::signed::serialize(&*items)?;
         crate::signed::write_atomic(&self.path, &data)
     }
 }
