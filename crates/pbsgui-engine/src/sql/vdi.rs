@@ -93,20 +93,32 @@ fn backup_statement(
 }
 
 /// Adapts a channel of byte buffers into a blocking [`Read`], so the VDI device
-/// thread can hand its backup stream to the PBS uploader without staging to
-/// disk. Reading returns EOF once every sender has been dropped.
+/// thread can hand its backup stream to the PBS uploader without staging to disk.
+///
+/// When the data channel closes (every sender dropped) the stream has ended, but
+/// that alone does not say whether it ended cleanly: a mid-stream `BACKUP` failure
+/// closes the device the same way a successful one does. So end of stream is
+/// reported only when `done` confirms the `BACKUP` succeeded; a `false` verdict, or
+/// a dropped verdict sender (the backup future was cancelled), surfaces an I/O
+/// error instead, which fails the upload before it can commit a truncated snapshot.
 pub(crate) struct ChannelReader {
     rx: Receiver<Vec<u8>>,
+    done: Receiver<bool>,
     buf: Vec<u8>,
     pos: usize,
+    /// The `BACKUP` verdict, cached once the data channel closes so repeated reads
+    /// past the end stay consistent.
+    verdict: Option<bool>,
 }
 
 impl ChannelReader {
-    pub(crate) fn new(rx: Receiver<Vec<u8>>) -> Self {
+    pub(crate) fn new(rx: Receiver<Vec<u8>>, done: Receiver<bool>) -> Self {
         Self {
             rx,
+            done,
             buf: Vec::new(),
             pos: 0,
+            verdict: None,
         }
     }
 }
@@ -114,14 +126,35 @@ impl ChannelReader {
 impl Read for ChannelReader {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         // Pull the next non-empty buffer, blocking until one arrives or the
-        // senders drop (EOF).
+        // senders drop (end of stream).
         while self.pos >= self.buf.len() {
             match self.rx.recv() {
                 Ok(next) => {
                     self.buf = next;
                     self.pos = 0;
                 }
-                Err(_) => return Ok(0),
+                Err(_) => {
+                    // The data channel closed. Treat it as a clean end of stream
+                    // only if BACKUP confirmed success; otherwise the stream was
+                    // truncated (BACKUP failed or was cancelled) and we must not let
+                    // the uploader commit a partial snapshot.
+                    let ok = match self.verdict {
+                        Some(v) => v,
+                        None => {
+                            let v = self.done.recv().unwrap_or(false);
+                            self.verdict = Some(v);
+                            v
+                        }
+                    };
+                    if ok {
+                        return Ok(0);
+                    }
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "the SQL Server BACKUP did not complete; refusing to upload a \
+                         truncated backup",
+                    ));
+                }
             }
         }
         let n = (self.buf.len() - self.pos).min(out.len());
@@ -533,6 +566,10 @@ mod windows_impl {
         // Bounded so SQL throttles to the PBS upload rate rather than buffering
         // the whole database in memory.
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+        // Carries the BACKUP statement's verdict to the reader so it commits only a
+        // complete stream (see ChannelReader). A dropped sender (a cancelled run)
+        // reads as failure, so a cancelled backup never commits a partial snapshot.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let loop_name = set_name.clone();
@@ -552,8 +589,14 @@ mod windows_impl {
         // it to order the chain). A dropped sender (BACKUP failed) means no blob.
         let (meta_tx, meta_rx) = tokio::sync::oneshot::channel::<(String, Vec<u8>)>();
         let backup_and_meta = async {
+            // Own the verdict sender here so a dropped (cancelled) future drops it,
+            // which the reader treats as a truncated stream.
+            let done_tx = done_tx;
             let result =
                 issue_backup(&mut client, database, &set_name, backup_type, copy_only).await;
+            // Report the verdict before anything else, so even a metadata-query
+            // failure on an otherwise successful backup still commits.
+            let _ = done_tx.send(result.is_ok());
             if result.is_ok() {
                 match query_backup_meta(&mut client, database).await {
                     Ok(meta) => {
@@ -570,7 +613,7 @@ mod windows_impl {
             archive_name,
             true,
             compress,
-            ChannelReader::new(rx),
+            ChannelReader::new(rx, done_rx),
             total_estimate,
             Some(meta_rx),
             crypt,
@@ -1367,15 +1410,52 @@ mod tests {
     }
 
     #[test]
-    fn channel_reader_concatenates_buffers_and_ends_on_drop() {
+    fn channel_reader_concatenates_buffers_and_ends_on_a_good_backup() {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
         tx.send(b"hello ".to_vec()).unwrap();
         tx.send(Vec::new()).unwrap(); // empty buffers are skipped
         tx.send(b"world".to_vec()).unwrap();
-        drop(tx); // signals EOF
+        drop(tx); // end of the data stream
+        done_tx.send(true).unwrap(); // BACKUP succeeded: a clean end of stream
 
         let mut out = Vec::new();
-        ChannelReader::new(rx).read_to_end(&mut out).unwrap();
+        ChannelReader::new(rx, done_rx)
+            .read_to_end(&mut out)
+            .unwrap();
         assert_eq!(out, b"hello world");
+    }
+
+    #[test]
+    fn channel_reader_errors_when_the_backup_did_not_complete() {
+        // A failed BACKUP (verdict false) must surface as an error, not EOF, so the
+        // uploader does not commit the truncated bytes it already received.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+        tx.send(b"partial".to_vec()).unwrap();
+        drop(tx);
+        done_tx.send(false).unwrap();
+
+        let mut out = Vec::new();
+        let err = ChannelReader::new(rx, done_rx)
+            .read_to_end(&mut out)
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn channel_reader_errors_when_the_verdict_sender_is_dropped() {
+        // A cancelled run drops the verdict sender without a value; that must read
+        // as a truncated stream, never a clean end.
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+        tx.send(b"partial".to_vec()).unwrap();
+        drop(tx);
+        drop(done_tx);
+
+        let mut out = Vec::new();
+        assert!(ChannelReader::new(rx, done_rx)
+            .read_to_end(&mut out)
+            .is_err());
     }
 }
