@@ -1567,9 +1567,15 @@ async fn run_job(store: Arc<JobStore>, id: String, mut responder: Responder) {
     let job_for_run = job.clone();
     let run = tokio::spawn(async move { backup::run_job(&job_for_run, tx).await });
 
+    // Forward progress to the GUI. If it disconnects mid-run (e.g. it was closed),
+    // stop forwarding but keep draining the channel: the backup task pushes onto a
+    // bounded channel, so abandoning the receiver would block it forever and hang
+    // run.await. Draining to completion lets the run finish and be recorded, the
+    // same as a scheduled run with no GUI attached.
+    let mut forward = true;
     while let Some(reply) = rx.recv().await {
-        if responder.send(&reply).await.is_err() {
-            break;
+        if forward && responder.send(&reply).await.is_err() {
+            forward = false;
         }
     }
 
