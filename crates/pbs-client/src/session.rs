@@ -63,6 +63,13 @@ const MAX_INFLIGHT_UPLOADS: usize = 16;
 /// round-trip per chunk) and bursty.
 const RESTORE_PIPELINE: usize = 16;
 
+/// Cap the up-front buffer a buffered restore reserves from an index's declared
+/// size. The size comes from the (possibly corrupt or hostile) index, so reserving
+/// it directly would let a bogus index trigger a huge allocation before a single
+/// chunk is fetched. The buffer still grows to fit the actual chunk data, which is
+/// verified against its digest as it arrives.
+const MAX_RESTORE_PREALLOC: usize = 128 * 1024 * 1024;
+
 /// Percent-encoding set for query parameter values.
 const QUERY: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -1178,7 +1185,7 @@ impl ReaderClient {
                 "downloaded fixed index failed its csum check".into(),
             ));
         }
-        let mut image = Vec::with_capacity(fixed.size as usize);
+        let mut image = Vec::with_capacity((fixed.size as usize).min(MAX_RESTORE_PREALLOC));
         for digest in &fixed.digests {
             let chunk_blob = self.download_chunk(digest).await?;
             let chunk = decode_and_verify_chunk(&chunk_blob, crypt, digest)?;
@@ -1201,7 +1208,7 @@ impl ReaderClient {
                 "downloaded dynamic index failed its csum check".into(),
             ));
         }
-        let mut out = Vec::with_capacity(index.total_size() as usize);
+        let mut out = Vec::with_capacity((index.total_size() as usize).min(MAX_RESTORE_PREALLOC));
         for digest in index.digests() {
             let chunk_blob = self.download_chunk(digest).await?;
             out.extend_from_slice(&decode_and_verify_chunk(&chunk_blob, crypt, digest)?);
