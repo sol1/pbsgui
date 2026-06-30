@@ -263,14 +263,20 @@ pub async fn run_job_kind(
     // A CancelJob cancels the token: dropping the backup future closes the PBS
     // session without finishing (PBS discards the partial), and the SQL VDI device
     // thread polls the same token to SignalAbort.
+    // `biased`: poll the run first so a completion that is already ready is taken
+    // rather than dropped in favour of a cancel that became ready at the same time.
     let outcome = tokio::select! {
-        _ = cancel.cancelled() => Err(anyhow::anyhow!("cancelled by request")),
+        biased;
         r = run_inner(job, sql_run, &events, &cancel) => r,
+        _ = cancel.cancelled() => Err(anyhow::anyhow!("cancelled by request")),
     };
 
     // A cancel is user-initiated: report it quietly (no failure notification) but
-    // record the attempt so the scheduler does not immediately re-run it.
-    if cancel.is_cancelled() {
+    // record the attempt so the scheduler does not immediately re-run it. Only when
+    // the run did not already finish, though: if it won the race and committed
+    // (outcome is Ok), report that success instead of mislabelling a committed
+    // backup as cancelled.
+    if cancel.is_cancelled() && outcome.is_err() {
         let _ = events
             .send(Reply::Log {
                 line: "backup cancelled".to_string(),
