@@ -1181,7 +1181,7 @@ impl ReaderClient {
         let mut image = Vec::with_capacity(fixed.size as usize);
         for digest in &fixed.digests {
             let chunk_blob = self.download_chunk(digest).await?;
-            let chunk = decode_blob(&chunk_blob, crypt)?;
+            let chunk = decode_and_verify_chunk(&chunk_blob, crypt, digest)?;
             image.extend_from_slice(&chunk);
         }
         image.truncate(fixed.size as usize);
@@ -1204,7 +1204,7 @@ impl ReaderClient {
         let mut out = Vec::with_capacity(index.total_size() as usize);
         for digest in index.digests() {
             let chunk_blob = self.download_chunk(digest).await?;
-            out.extend_from_slice(&decode_blob(&chunk_blob, crypt)?);
+            out.extend_from_slice(&decode_and_verify_chunk(&chunk_blob, crypt, digest)?);
         }
         Ok(out)
     }
@@ -1306,9 +1306,11 @@ fn spawn_chunk_pipeline(
             let crypt = crypt.clone();
             tokio::spawn(async move {
                 let blob = downloader.download_chunk(&digest).await?;
-                tokio::task::spawn_blocking(move || decode_blob(&blob, crypt.as_ref()))
-                    .await
-                    .map_err(|e| PbsError::Protocol(format!("decode task failed: {e}")))?
+                tokio::task::spawn_blocking(move || {
+                    decode_and_verify_chunk(&blob, crypt.as_ref(), &digest)
+                })
+                .await
+                .map_err(|e| PbsError::Protocol(format!("decode task failed: {e}")))?
             })
         };
 
@@ -1366,6 +1368,35 @@ fn decode_blob(raw: &[u8], crypt: Option<&CryptConfig>) -> Result<Vec<u8>> {
     }
 }
 
+/// Decode a downloaded chunk and verify it against the digest it was fetched by.
+///
+/// PBS chunks are content addressed: the digest is SHA-256 of the chunk's
+/// plaintext, keyed with the encryption key's `id_key` when encrypted (the same
+/// way the backup side computes it). Recomputing it and comparing detects a
+/// datastore that returned corrupt or substituted chunk data, which the index's
+/// own csum check cannot (that only proves the index is internally consistent, not
+/// that the chunks behind the digests are intact). A mismatch fails the restore
+/// rather than reassembling silently wrong data.
+fn decode_and_verify_chunk(
+    raw: &[u8],
+    crypt: Option<&CryptConfig>,
+    expected: &[u8; DIGEST_LEN],
+) -> Result<Vec<u8>> {
+    let data = decode_blob(raw, crypt)?;
+    let actual = match crypt {
+        Some(c) => c.compute_digest(&data),
+        None => index::chunk_digest(&data),
+    };
+    if &actual != expected {
+        return Err(PbsError::Protocol(format!(
+            "chunk {} failed verification: its data does not match its digest \
+             (corrupt or tampered datastore)",
+            hex::encode(expected)
+        )));
+    }
+    Ok(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,6 +1421,42 @@ mod tests {
     #[test]
     fn rejects_wrong_length_fingerprint() {
         assert!(parse_fingerprint("abcd").is_err());
+    }
+
+    #[test]
+    fn verifies_unencrypted_chunk_against_its_digest() {
+        let data = b"the quick brown fox".repeat(40);
+        let raw = blob::encode_auto(&data);
+        let digest = index::chunk_digest(&data);
+        // The right digest decodes; a wrong one is rejected as corrupt.
+        assert_eq!(decode_and_verify_chunk(&raw, None, &digest).unwrap(), data);
+        let mut wrong = digest;
+        wrong[0] ^= 0xff;
+        assert!(decode_and_verify_chunk(&raw, None, &wrong).is_err());
+    }
+
+    #[test]
+    fn verifies_encrypted_chunk_against_its_keyed_digest() {
+        let crypt = CryptConfig::new([7u8; 32]);
+        let data = b"secret chunk bytes".repeat(40);
+        let raw = crypt.encrypt_blob(&data).unwrap();
+        let digest = crypt.compute_digest(&data);
+        assert_eq!(
+            decode_and_verify_chunk(&raw, Some(&crypt), &digest).unwrap(),
+            data
+        );
+        let mut wrong = digest;
+        wrong[0] ^= 0xff;
+        assert!(decode_and_verify_chunk(&raw, Some(&crypt), &wrong).is_err());
+    }
+
+    #[test]
+    fn rejects_a_chunk_whose_payload_was_swapped() {
+        // A datastore that returns a valid blob for the wrong digest (substituted
+        // or corrupted content) must be caught, not reassembled.
+        let real = blob::encode_auto(b"real chunk contents");
+        let other_digest = index::chunk_digest(b"a different chunk entirely");
+        assert!(decode_and_verify_chunk(&real, None, &other_digest).is_err());
     }
 
     #[test]
