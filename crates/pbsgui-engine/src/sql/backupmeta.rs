@@ -101,6 +101,18 @@ pub fn select_chain(items: &[ChainItem], target: i64) -> Vec<ChainItem> {
     chain
 }
 
+/// Whether `chain` can actually recover to `target` (unix seconds). A chain
+/// recovers only as far as its newest backup's finish time: after every log is
+/// applied the database sits at the last log's last_lsn, and STOPAT can only trim
+/// earlier. So if the newest item finished before `target`, the log backups needed
+/// to reach `target` are not present, and a caller must refuse rather than restore
+/// silently short of the requested moment. An empty chain covers nothing.
+pub fn chain_covers(chain: &[ChainItem], target: i64) -> bool {
+    chain
+        .last()
+        .is_some_and(|last| last.meta.backup_time >= target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +212,35 @@ mod tests {
             chain.iter().map(|c| c.snapshot_time).collect::<Vec<_>>(),
             vec![200, 210, 220]
         );
+    }
+
+    #[test]
+    fn chain_covers_reports_whether_target_is_reached() {
+        let items = vec![
+            full(200, "30", "40"),
+            log(210, "40", "50"),
+            log(220, "50", "60"),
+        ];
+        let chain = select_chain(&items, 215);
+        // Newest item is log@220, so any target up to 220 is reached.
+        assert!(chain_covers(&chain, 215));
+        assert!(chain_covers(&chain, 220));
+        // A target past the newest log is not covered: the logs to reach it are
+        // missing, so a restore must refuse rather than stop short.
+        assert!(!chain_covers(&chain, 225));
+    }
+
+    #[test]
+    fn full_only_chain_covers_only_its_own_time() {
+        let items = vec![full(200, "30", "40")];
+        // A full alone recovers to its own finish time and no later.
+        assert!(chain_covers(&select_chain(&items, 200), 200));
+        assert!(!chain_covers(&select_chain(&items, 205), 205));
+    }
+
+    #[test]
+    fn empty_chain_covers_nothing() {
+        assert!(!chain_covers(&[], 100));
     }
 
     #[test]

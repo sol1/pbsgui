@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use anyhow::Context;
 use pbs_client::api::ApiClient;
 use pbs_client::session::{ReaderClient, SessionParams};
 use pbs_client::{CryptConfig, Repository};
@@ -770,40 +771,25 @@ async fn run_restore_pit(
     target_unix: i64,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
-    use crate::sql::backupmeta::{self, ChainItem};
+    use crate::sql::backupmeta;
 
     let (full_group, archive) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
     let (log_group, _) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Log);
-    let api = ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)?;
-    let ns = ctx.repo.namespace.as_deref();
 
     let _ = responder
         .send(&Reply::Log {
             line: "reading the backup chain".to_string(),
         })
         .await;
-    let mut items: Vec<ChainItem> = Vec::new();
-    for (group, _is_log) in [(&full_group, false), (&log_group, true)] {
-        let snaps = api
-            .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, group)
-            .await
-            .unwrap_or_default();
-        for s in snaps {
-            if let Some(meta) = download_sql_meta(ctx, group, s.backup_time).await {
-                items.push(ChainItem {
-                    snapshot_time: s.backup_time,
-                    meta,
-                });
-            }
-        }
-    }
+    let items = read_chain_items(ctx, &[full_group.as_str(), log_group.as_str()]).await?;
 
     let chain = backupmeta::select_chain(&items, target_unix);
     if chain.is_empty() {
         anyhow::bail!("no full backup covers that time; pick a later restore point");
     }
+    ensure_chain_reaches(&chain, target_unix)?;
     let _ = responder
         .send(&Reply::Log {
             line: format!(
@@ -973,13 +959,15 @@ async fn download_sql_image_to_file(
     Ok(bytes)
 }
 
-/// Download and parse one SQL snapshot's chain-metadata blob (`None` on any
-/// failure, e.g. an older snapshot without it).
+/// Download and parse one SQL snapshot's chain-metadata blob. A connect,
+/// download, or parse failure propagates as an error so a transient fault aborts
+/// the restore rather than silently dropping the snapshot from the chain. Call
+/// only for snapshots that actually carry the blob (see [`read_chain_items`]).
 async fn download_sql_meta(
     ctx: &SqlJobPbs,
     group: &str,
     backup_time: i64,
-) -> Option<crate::sql::backupmeta::SqlBackupMeta> {
+) -> anyhow::Result<crate::sql::backupmeta::SqlBackupMeta> {
     let params = SessionParams::from_repository(
         &ctx.repo,
         ctx.secret.clone(),
@@ -987,14 +975,88 @@ async fn download_sql_meta(
         SQL_BACKUP_TYPE,
         group,
         backup_time,
-    )
-    .ok()?;
-    let mut reader = ReaderClient::connect(&params).await.ok()?;
+    )?;
+    let mut reader = ReaderClient::connect(&params).await?;
     let bytes = reader
         .download_blob(crate::sql::backupmeta::META_BLOB_NAME, ctx.crypt.as_ref())
-        .await
-        .ok()?;
-    serde_json::from_slice(&bytes).ok()
+        .await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// List the snapshots in each group and load every one that carries chain
+/// metadata, returning the candidates for [`backupmeta::select_chain`].
+///
+/// A snapshot with no metadata blob predates point-in-time support and cannot be
+/// placed in a chain, so it is skipped. But a snapshot that *has* the blob whose
+/// metadata cannot be read is a hard error: silently dropping it could shorten the
+/// chain and restore to an earlier point than asked for, so the whole restore
+/// aborts instead. A failure to list a group is likewise an error, not an empty
+/// group.
+async fn read_chain_items(
+    ctx: &SqlJobPbs,
+    groups: &[&str],
+) -> anyhow::Result<Vec<crate::sql::backupmeta::ChainItem>> {
+    use crate::sql::backupmeta::{ChainItem, META_BLOB_NAME};
+
+    let api = ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)?;
+    let ns = ctx.repo.namespace.as_deref();
+    let mut items: Vec<ChainItem> = Vec::new();
+    for &group in groups {
+        let snaps = api
+            .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, group)
+            .await
+            .with_context(|| format!("listing snapshots in {group}"))?;
+        for s in snaps {
+            // A snapshot from before point-in-time support carries no metadata
+            // blob; it cannot be ordered into a chain, so skip it.
+            if !s.files.iter().any(|f| f.filename == META_BLOB_NAME) {
+                continue;
+            }
+            let meta = download_sql_meta(ctx, group, s.backup_time)
+                .await
+                .with_context(|| {
+                    format!(
+                        "reading backup metadata for the snapshot at {}",
+                        s.backup_time
+                    )
+                })?;
+            items.push(ChainItem {
+                snapshot_time: s.backup_time,
+                meta,
+            });
+        }
+    }
+    Ok(items)
+}
+
+/// Refuse if the assembled chain does not reach `target_unix`. A chain recovers
+/// only as far as its newest backup's finish time; if that is before the requested
+/// moment the log backups needed to reach it are missing or could not be read, and
+/// restoring would silently stop short of what the user asked for.
+fn ensure_chain_reaches(
+    chain: &[crate::sql::backupmeta::ChainItem],
+    target_unix: i64,
+) -> anyhow::Result<()> {
+    if crate::sql::backupmeta::chain_covers(chain, target_unix) {
+        return Ok(());
+    }
+    let reached = chain
+        .last()
+        .map(|c| c.meta.backup_time)
+        .unwrap_or(target_unix);
+    anyhow::bail!(
+        "the backup chain only reaches {}, short of the chosen point {}; the log \
+         backups needed to reach it are missing or could not be read",
+        fmt_unix(reached),
+        fmt_unix(target_unix),
+    );
+}
+
+/// Format a unix timestamp as a readable UTC instant for user-facing messages.
+fn fmt_unix(t: i64) -> String {
+    chrono::DateTime::from_timestamp(t, 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| t.to_string())
 }
 
 async fn restore_sql_to_file(
@@ -1097,40 +1159,25 @@ async fn export_sql_chain(
     dir: &std::path::Path,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
-    use crate::sql::backupmeta::{self, ChainItem};
+    use crate::sql::backupmeta;
 
     let (full_group, archive) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
     let (log_group, _) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Log);
-    let api = ApiClient::from_repository(&ctx.repo, ctx.secret.clone(), &ctx.fingerprint)?;
-    let ns = ctx.repo.namespace.as_deref();
 
     let _ = responder
         .send(&Reply::Log {
             line: "reading the backup chain".to_string(),
         })
         .await;
-    let mut items: Vec<ChainItem> = Vec::new();
-    for group in [&full_group, &log_group] {
-        let snaps = api
-            .list_snapshots(&ctx.repo.datastore, ns, SQL_BACKUP_TYPE, group)
-            .await
-            .unwrap_or_default();
-        for s in snaps {
-            if let Some(meta) = download_sql_meta(ctx, group, s.backup_time).await {
-                items.push(ChainItem {
-                    snapshot_time: s.backup_time,
-                    meta,
-                });
-            }
-        }
-    }
+    let items = read_chain_items(ctx, &[full_group.as_str(), log_group.as_str()]).await?;
 
     let chain = backupmeta::select_chain(&items, target_unix);
     if chain.is_empty() {
         anyhow::bail!("no full backup covers that time; pick a later restore point");
     }
+    ensure_chain_reaches(&chain, target_unix)?;
     let _ = responder
         .send(&Reply::Log {
             line: format!(
