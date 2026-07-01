@@ -98,7 +98,7 @@ fn format_progress(p: &BackupProgress, bytes_per_sec: f64) -> String {
 
 /// Format a byte count with a binary unit (KiB/MiB/GiB/TiB), two significant
 /// decimals for the larger units.
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -428,8 +428,11 @@ async fn do_backup(
                 backup_files_to_pbs(job, sources, excludes, server_id, backup_id, crypt, events)
                     .await?;
             let summary = format!(
-                "backed up {} bytes: {} chunks, {} uploaded, {} reused",
-                stats.bytes, stats.chunks, stats.uploaded, stats.reused
+                "backed up {}: {} chunks, {} uploaded, {} reused",
+                human_bytes(stats.bytes),
+                stats.chunks,
+                stats.uploaded,
+                stats.reused
             );
             Ok((summary, Some(stats)))
         }
@@ -675,10 +678,11 @@ async fn backup_sql_to_pbs(
     }
 
     let mut summary = format!(
-        "backed up {backed_up} database(s) to PBS: {bytes} bytes, {chunks} chunks, {uploaded} uploaded, {reused} reused"
+        "backed up {backed_up} database(s) to PBS: {}, {chunks} chunks, {uploaded} uploaded, {reused} reused",
+        human_bytes(bytes)
     );
     if stored_bytes > 0 {
-        let _ = write!(summary, ", {stored_bytes} stored");
+        let _ = write!(summary, ", {} stored", human_bytes(stored_bytes));
     }
     // Return the aggregated stats so the run reports "ok" (not "no-change", which
     // only the change-detection skip should give) and notifications carry metrics.
@@ -729,8 +733,9 @@ async fn backup_sql_to_folder(
     }
 
     let summary = format!(
-        "backed up {} database(s) to {path}: {total} bytes",
-        databases.len()
+        "backed up {} database(s) to {path}: {}",
+        databases.len(),
+        human_bytes(total)
     );
     let stats = BackupStats {
         chunks: 0,

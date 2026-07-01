@@ -6,6 +6,8 @@
 //! `notify:smtp` / `notify:webhook`, never in the config file. Sending is
 //! best-effort: a channel failure is logged, never fatal to the backup.
 
+use std::fmt::Write;
+
 use anyhow::Context;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
@@ -127,7 +129,7 @@ pub async fn job_finished(outcome: JobOutcome<'_>) {
         }
     }
     if settings.webhook.enabled {
-        if let Err(e) = send_webhook(&subject, &outcome).await {
+        if let Err(e) = send_webhook(&outcome).await {
             tracing::warn!("webhook notification failed: {e:#}");
         }
     }
@@ -150,7 +152,7 @@ pub async fn send_test(channel: NotifyChannel) -> anyhow::Result<()> {
     };
     match channel {
         NotifyChannel::Email => send_email(&settings.email, &subject, &body).await,
-        NotifyChannel::Webhook => send_webhook(&subject, &outcome).await,
+        NotifyChannel::Webhook => send_webhook(&outcome).await,
     }
 }
 
@@ -185,9 +187,88 @@ SQL Server is reachable."
             message: &body,
             stats: None,
         };
-        if let Err(e) = send_webhook(&subject, &outcome).await {
+        if let Err(e) = send_webhook(&outcome).await {
             tracing::warn!("stall webhook notification failed: {e:#}");
         }
+    }
+}
+
+/// The at-a-glance status symbol and word for a headline. `no-change` shares the
+/// warning symbol with a stall: nothing was backed up, which may be expected
+/// (unchanged source, non-preferred replica) or may want a second look.
+fn status_badge(o: &JobOutcome<'_>) -> (&'static str, &'static str) {
+    match o.status {
+        "ok" => ("\u{2705}", "OK"),                       // green tick
+        "no-change" => ("\u{26a0}\u{fe0f}", "NO CHANGE"), // warning
+        "error" => ("\u{274c}", "FAILED"),                // cross
+        "stalled" => ("\u{26a0}\u{fe0f}", "STALLED"),     // warning
+        _ if o.success => ("\u{2705}", "OK"),
+        _ => ("\u{274c}", "FAILED"),
+    }
+}
+
+/// The databases for a headline, truncated so a job over many databases stays to
+/// one short line.
+fn db_list(dbs: &[String]) -> String {
+    const MAX: usize = 3;
+    if dbs.len() <= MAX {
+        dbs.join(", ")
+    } else {
+        format!("{} (+{} more)", dbs[..MAX].join(", "), dbs.len() - MAX)
+    }
+}
+
+/// Trim `s` to at most `max` characters (on a char boundary), adding an ellipsis
+/// when cut, so a long error or message does not sprawl across the channel.
+fn truncate(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{}\u{2026}", head.trim_end())
+    }
+}
+
+/// The one-line figures for a completed backup: total size, new data written, and
+/// dedup rate, all human readable.
+fn stats_line(s: &BackupStats) -> String {
+    let sep = " \u{00b7} ";
+    let mut line = format!("{} backed up", crate::backup::human_bytes(s.bytes));
+    if s.stored_bytes > 0 {
+        let _ = write!(
+            line,
+            "{sep}{} stored",
+            crate::backup::human_bytes(s.stored_bytes)
+        );
+    }
+    if s.chunks > 0 {
+        let dedup = s.reused as f64 / s.chunks as f64 * 100.0;
+        let _ = write!(line, "{sep}{dedup:.0}% dedup");
+    }
+    line
+}
+
+/// A compact, at-a-glance message for a Slack-compatible webhook: status first
+/// (symbol plus word), then what ran, then either the figures (for a backup) or a
+/// short reason (for a skip, failure, or stall). One or two lines.
+fn slack_text(o: &JobOutcome<'_>) -> String {
+    let (icon, word) = status_badge(o);
+    let sep = " \u{00b7} ";
+    let mut head = format!("{icon} *{word}*{sep}{}", o.job_name);
+    if o.databases.is_empty() {
+        let _ = write!(head, "{sep}{}", o.kind);
+    } else {
+        let _ = write!(head, "{sep}{} of {}", o.kind, db_list(o.databases));
+    }
+    let detail = match o.stats {
+        Some(s) => stats_line(s),
+        None => truncate(o.message, 200),
+    };
+    if detail.is_empty() {
+        head
+    } else {
+        format!("{head}\n{detail}")
     }
 }
 
@@ -244,14 +325,14 @@ async fn send_email(email: &EmailSettings, subject: &str, body: &str) -> anyhow:
     Ok(())
 }
 
-async fn send_webhook(subject: &str, o: &JobOutcome<'_>) -> anyhow::Result<()> {
+async fn send_webhook(o: &JobOutcome<'_>) -> anyhow::Result<()> {
     let url = secrets::get(WEBHOOK_SECRET_KEY)?
         .ok_or_else(|| anyhow::anyhow!("no webhook URL stored"))?;
 
-    // `text` so a Slack incoming webhook renders it; structured fields for
-    // generic consumers.
+    // `text` is the compact human line a Slack incoming webhook renders; the
+    // structured fields below are for generic machine consumers.
     let mut payload = serde_json::json!({
-        "text": format!("{subject}\n{}", render_body(o)),
+        "text": slack_text(o),
         "job": o.job_name,
         "kind": o.kind,
         "databases": o.databases,
@@ -279,4 +360,108 @@ async fn send_webhook(subject: &str, o: &JobOutcome<'_>) -> anyhow::Result<()> {
         anyhow::bail!("webhook returned HTTP {}", status.as_u16());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(bytes: u64, stored: u64, chunks: u64, reused: u64) -> BackupStats {
+        BackupStats {
+            chunks,
+            reused,
+            uploaded: chunks - reused,
+            bytes,
+            uploaded_bytes: 0,
+            stored_bytes: stored,
+            csum: [0u8; 32],
+        }
+    }
+
+    fn outcome<'a>(
+        status: &'a str,
+        success: bool,
+        dbs: &'a [String],
+        message: &'a str,
+        stats: Option<&'a BackupStats>,
+    ) -> JobOutcome<'a> {
+        JobOutcome {
+            job_name: "Nightly backup VIP DB",
+            kind: "full backup",
+            databases: dbs,
+            success,
+            status,
+            message,
+            stats,
+        }
+    }
+
+    #[test]
+    fn success_is_two_compact_lines_with_human_bytes() {
+        let dbs = ["GES_Live".to_string()];
+        // The raw byte count from the original report.
+        let s = stats(768706259456, 9816442012, 131476, 128211);
+        let text = slack_text(&outcome(
+            "ok",
+            true,
+            &dbs,
+            "backed up 1 database(s)",
+            Some(&s),
+        ));
+
+        let (head, detail) = text.split_once('\n').expect("two lines");
+        assert!(head.starts_with("\u{2705} *OK* \u{00b7} Nightly backup VIP DB"));
+        assert!(head.contains("full backup of GES_Live"));
+        // Human readable, not raw bytes.
+        assert!(detail.contains("GiB"), "{detail}");
+        assert!(
+            detail.contains("backed up") && detail.contains("stored") && detail.contains("dedup")
+        );
+        assert!(!text.contains("768706259456"));
+        // No leftover chunk-count noise in the compact line.
+        assert!(!detail.contains("131476"));
+    }
+
+    #[test]
+    fn no_change_uses_the_warning_badge() {
+        let text = slack_text(&outcome(
+            "no-change",
+            true,
+            &[],
+            "no changes since last run; skipped",
+            None,
+        ));
+        assert!(text.starts_with("\u{26a0}\u{fe0f} *NO CHANGE*"));
+        assert!(text.contains("no changes since last run"));
+    }
+
+    #[test]
+    fn failure_leads_with_the_cross_and_shows_the_reason() {
+        let dbs = ["GES_Live".to_string()];
+        let text = slack_text(&outcome(
+            "error",
+            false,
+            &dbs,
+            "BACKUP failed: login timeout",
+            None,
+        ));
+        assert!(text.starts_with("\u{274c} *FAILED* \u{00b7} Nightly backup VIP DB"));
+        assert!(text.contains("BACKUP failed: login timeout"));
+    }
+
+    #[test]
+    fn many_databases_are_truncated() {
+        let dbs: Vec<String> = (1..=7).map(|i| format!("DB{i}")).collect();
+        let s = stats(1024, 512, 2, 1);
+        let text = slack_text(&outcome("ok", true, &dbs, "", Some(&s)));
+        assert!(text.contains("DB1, DB2, DB3 (+4 more)"), "{text}");
+    }
+
+    #[test]
+    fn long_messages_are_trimmed() {
+        let long = "x".repeat(500);
+        let text = slack_text(&outcome("error", false, &[], &long, None));
+        assert!(text.chars().count() < 260);
+        assert!(text.ends_with('\u{2026}'));
+    }
 }
