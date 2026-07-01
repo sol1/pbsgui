@@ -2,16 +2,23 @@
 //!
 //! Uses a named pipe on Windows and a Unix domain socket elsewhere (via the
 //! `interprocess` crate), so the same code runs on the target and is testable on
-//! Linux. The wire format is newline-delimited JSON: the client sends one
-//! [`Request`] line, the server replies with a stream of [`Reply`] lines and
-//! closes.
+//! Linux. The wire format is newline-delimited JSON: the client sends one request
+//! line, the server replies with a stream of reply lines and closes.
+//!
+//! The transport is generic over the request and reply message types
+//! ([`serve_typed`] / [`send_request_typed`]), so each engine can define its own
+//! protocol; [`serve`] / [`send_request`] are thin wrappers bound to the SQL/files
+//! engine's [`crate::Request`] / [`crate::Reply`].
 
 use std::future::Future;
 use std::io;
+use std::marker::PhantomData;
 
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream;
 use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ListenerOptions, Name};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// Default socket base name (the engine and GUI must agree on it).
@@ -20,6 +27,19 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 /// change to [`crate::protocol`]. A new GUI then uses a new pipe name, so it can
 /// never silently connect to a leftover engine speaking the old protocol.
 pub const DEFAULT_SOCKET: &str = "pbsgui-engine-v9";
+
+/// A reply type that can carry a transport-level error (an unparseable request on
+/// the server, or an unparseable reply on the client), so the generic transport
+/// can surface those without knowing the concrete protocol.
+pub trait ErrorReply {
+    fn error(message: String) -> Self;
+}
+
+impl ErrorReply for crate::Reply {
+    fn error(message: String) -> Self {
+        crate::Reply::Error { message }
+    }
+}
 
 /// Build a platform-appropriate socket name from a base string.
 ///
@@ -35,14 +55,16 @@ pub fn socket_name(base: &str) -> io::Result<Name<'static>> {
     }
 }
 
-/// Sends [`Reply`] messages back to the client over one connection.
-pub struct Responder {
+/// Sends reply messages back to the client over one connection. The reply type
+/// defaults to the SQL/files engine's [`crate::Reply`].
+pub struct Responder<Rep = crate::Reply> {
     write: Box<dyn AsyncWrite + Send + Unpin>,
+    _marker: PhantomData<fn() -> Rep>,
 }
 
-impl Responder {
+impl<Rep: Serialize> Responder<Rep> {
     /// Send one reply.
-    pub async fn send(&mut self, reply: &crate::Reply) -> io::Result<()> {
+    pub async fn send(&mut self, reply: &Rep) -> io::Result<()> {
         let mut line =
             serde_json::to_vec(reply).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
@@ -53,8 +75,8 @@ impl Responder {
 
 /// On Windows, give the pipe a DACL allowing only SYSTEM and Builtin
 /// Administrators to connect, so the engine (which runs as LocalSystem and does
-/// privileged work: RunJob, Restore, pre/post scripts) can only be driven by an
-/// administrator. Falls back to the default on error.
+/// privileged work) can only be driven by an administrator. Falls back to the
+/// default on error.
 ///
 /// This requires the GUI to run *elevated*: under UAC a normally launched process
 /// has a filtered token with the Administrators group deny-only, which would fail
@@ -81,13 +103,16 @@ fn with_pipe_security(options: ListenerOptions<'_>) -> ListenerOptions<'_> {
     }
 }
 
-/// Listen on `name` and dispatch each connection's request to `handler`.
+/// Listen on `name` and dispatch each connection's request to `handler`, generic
+/// over the request and reply types.
 ///
 /// Each connection carries exactly one request; the handler streams replies via
 /// the [`Responder`] and returns when done. Runs until the listener errors.
-pub async fn serve<H, Fut>(name: Name<'static>, handler: H) -> io::Result<()>
+pub async fn serve_typed<Req, Rep, H, Fut>(name: Name<'static>, handler: H) -> io::Result<()>
 where
-    H: Fn(crate::Request, Responder) -> Fut + Clone + Send + Sync + 'static,
+    Req: DeserializeOwned + Send + 'static,
+    Rep: ErrorReply + Serialize + Send + Sync + 'static,
+    H: Fn(Req, Responder<Rep>) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     let options = ListenerOptions::new().name(name);
@@ -111,9 +136,21 @@ where
     }
 }
 
-async fn handle_connection<H, Fut>(conn: Stream, handler: H) -> io::Result<()>
+/// Listen and dispatch using the SQL/files engine's [`crate::Request`] /
+/// [`crate::Reply`] protocol.
+pub async fn serve<H, Fut>(name: Name<'static>, handler: H) -> io::Result<()>
 where
-    H: Fn(crate::Request, Responder) -> Fut,
+    H: Fn(crate::Request, Responder) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    serve_typed::<crate::Request, crate::Reply, H, Fut>(name, handler).await
+}
+
+async fn handle_connection<Req, Rep, H, Fut>(conn: Stream, handler: H) -> io::Result<()>
+where
+    Req: DeserializeOwned,
+    Rep: ErrorReply + Serialize,
+    H: Fn(Req, Responder<Rep>) -> Fut,
     Fut: Future<Output = ()>,
 {
     let (read_half, write_half) = tokio::io::split(conn);
@@ -125,30 +162,32 @@ where
 
     let mut responder = Responder {
         write: Box::new(write_half),
+        _marker: PhantomData,
     };
-    match serde_json::from_str::<crate::Request>(line.trim()) {
+    match serde_json::from_str::<Req>(line.trim()) {
         Ok(request) => handler(request, responder).await,
         Err(e) => {
             let _ = responder
-                .send(&crate::Reply::Error {
-                    message: format!("invalid request: {e}"),
-                })
+                .send(&Rep::error(format!("invalid request: {e}")))
                 .await;
         }
     }
     Ok(())
 }
 
-/// Connect to the engine, send one request, and pass each reply to `on_reply`.
+/// Connect, send one request, and pass each reply to `on_reply`, generic over the
+/// request and reply types.
 ///
-/// Returns when the engine closes the connection (after a terminal reply).
-pub async fn send_request<F>(
+/// Returns when the server closes the connection (after a terminal reply).
+pub async fn send_request_typed<Req, Rep, F>(
     name: Name<'static>,
-    request: &crate::Request,
+    request: &Req,
     mut on_reply: F,
 ) -> io::Result<()>
 where
-    F: FnMut(crate::Reply),
+    Req: Serialize,
+    Rep: ErrorReply + DeserializeOwned,
+    F: FnMut(Rep),
 {
     let conn = Stream::connect(name).await?;
     let (read_half, mut write_half) = tokio::io::split(conn);
@@ -166,12 +205,23 @@ where
         if reader.read_line(&mut buf).await? == 0 {
             break;
         }
-        match serde_json::from_str::<crate::Reply>(buf.trim()) {
+        match serde_json::from_str::<Rep>(buf.trim()) {
             Ok(reply) => on_reply(reply),
-            Err(e) => on_reply(crate::Reply::Error {
-                message: format!("invalid reply: {e}"),
-            }),
+            Err(e) => on_reply(Rep::error(format!("invalid reply: {e}"))),
         }
     }
     Ok(())
+}
+
+/// Send one request using the SQL/files engine's [`crate::Request`] /
+/// [`crate::Reply`] protocol.
+pub async fn send_request<F>(
+    name: Name<'static>,
+    request: &crate::Request,
+    on_reply: F,
+) -> io::Result<()>
+where
+    F: FnMut(crate::Reply),
+{
+    send_request_typed::<crate::Request, crate::Reply, F>(name, request, on_reply).await
 }

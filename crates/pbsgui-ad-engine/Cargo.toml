@@ -12,8 +12,11 @@ name = "pbsgui-ad-engine"
 path = "src/main.rs"
 
 [dependencies]
+pbsgui-ipc = { path = "../pbsgui-ipc" }
+pbsgui-core = { path = "../pbsgui-core" }
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

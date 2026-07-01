@@ -14,6 +14,7 @@
 //!   - the dev commands `backup` / `browse` / `restore` drive the capture, the
 //!     `ntds.dit` reader, and restore directly while those are built out.
 
+mod adproto;
 mod capture;
 mod dit;
 mod profile;
@@ -68,19 +69,14 @@ enum ServiceAction {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
+    // Bind this process to its own on-disk config directory and credential-store
+    // namespace, so it never collides with the SQL/files engine on the same host.
+    pbsgui_core::set_profile(pbsgui_core::Profile {
+        config_subdir: profile::CONFIG_SUBDIR,
+        keyring_service: profile::KEYRING_SERVICE,
+    });
     match Cli::parse().command {
-        Command::Serve { socket } => {
-            // The IPC server is wired in M2; for now this just reports the identity
-            // so the profile constants have a home and the skeleton is runnable.
-            tracing::info!(
-                service = profile::SERVICE_NAME,
-                socket,
-                config_subdir = profile::CONFIG_SUBDIR,
-                secrets_service = profile::KEYRING_SERVICE,
-                "AD engine skeleton: IPC not wired yet (see M2)"
-            );
-            Ok(())
-        }
+        Command::Serve { socket } => serve(&socket).await,
         Command::Service { action } => run_service(action),
         Command::Backup => capture::run_system_state_backup(),
         Command::Browse => dit::browse(),
@@ -96,6 +92,38 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Serve the AD engine's IPC protocol on its own socket until the process stops.
+async fn serve(socket: &str) -> anyhow::Result<()> {
+    let name = pbsgui_ipc::socket_name(socket)?;
+    tracing::info!(
+        service = profile::SERVICE_NAME,
+        socket,
+        "AD engine serving IPC"
+    );
+    pbsgui_ipc::serve_typed::<adproto::AdRequest, adproto::AdReply, _, _>(
+        name,
+        |request, responder| async move { handle(request, responder).await },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Handle one AD IPC request. Small for now (see [`adproto`]); it grows with the
+/// job, browse, and restore capabilities.
+async fn handle(
+    request: adproto::AdRequest,
+    mut responder: pbsgui_ipc::Responder<adproto::AdReply>,
+) {
+    use adproto::{AdReply, AdRequest};
+    let reply = match request {
+        AdRequest::Ping => AdReply::Pong,
+        AdRequest::Version => AdReply::Version {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    };
+    let _ = responder.send(&reply).await;
 }
 
 #[cfg(windows)]

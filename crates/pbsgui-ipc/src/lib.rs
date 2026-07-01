@@ -16,4 +16,7 @@ pub use protocol::{
     SqlConnection, SqlDatabase, SqlDiscoverySource, SqlFullPoint, SqlInstance, SqlProbe,
     SqlProtection, SqlRestorePoint, SqlRestoreWindow, SqlTopology, WebhookSettings,
 };
-pub use transport::{send_request, serve, socket_name, Responder, DEFAULT_SOCKET};
+pub use transport::{
+    send_request, send_request_typed, serve, serve_typed, socket_name, ErrorReply, Responder,
+    DEFAULT_SOCKET,
+};
