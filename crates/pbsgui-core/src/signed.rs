@@ -1,4 +1,4 @@
-//! Tamper-evident persistence for the engine's on-disk JSON stores.
+//! Tamper-evident persistence for the engines' on-disk JSON stores.
 //!
 //! Each store is written as a small envelope: the exact JSON text plus an
 //! HMAC-SHA256 over it, keyed by a 32-byte secret kept in the OS credential

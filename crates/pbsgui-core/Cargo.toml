@@ -1,0 +1,29 @@
+[package]
+name = "pbsgui-core"
+description = "Shared core for the pbsgui backup engines: config directory, OS secret store, and tamper-evident signed on-disk stores, parameterized by a per-app profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pbs-client = { path = "../pbs-client" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+sha2 = "0.10"
+# Sign the on-disk JSON stores (HMAC-SHA256) so tampering or corruption is caught.
+hmac = "0.12"
+base64 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Secrets in the Windows Credential Manager.
+keyring = { version = "3", features = ["windows-native"] }
+# Security APIs used to restrict the config directory's ACL.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+] }

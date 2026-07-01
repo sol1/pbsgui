@@ -3,10 +3,11 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The per-machine config directory for pbsgui.
+/// The per-machine config directory for this app (the subdirectory comes from the
+/// active [`crate::Profile`]).
 ///
-/// Windows: `%ProgramData%\pbsgui`. Elsewhere: `$XDG_CONFIG_HOME/pbsgui` or
-/// `~/.config/pbsgui` (a temp dir as last resort).
+/// Windows: `%ProgramData%\<subdir>`. Elsewhere: `$XDG_CONFIG_HOME/<subdir>` or
+/// `~/.config/<subdir>` (a temp dir as last resort).
 pub fn config_dir() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var_os("ProgramData")
@@ -18,7 +19,7 @@ pub fn config_dir() -> PathBuf {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
             .unwrap_or_else(std::env::temp_dir)
     };
-    base.join("pbsgui")
+    base.join(crate::profile().config_subdir)
 }
 
 /// Create the config directory and, on Windows, restrict its ACL to SYSTEM and

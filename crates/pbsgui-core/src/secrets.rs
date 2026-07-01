@@ -1,23 +1,26 @@
-//! Secret storage for PBS API token secrets.
+//! Secret storage (PBS token secrets, SMTP passwords, the store-signing key, ...).
 //!
 //! On Windows the secret lives in the OS credential store (Windows Credential
-//! Manager) via the `keyring` crate, keyed by job id - it never touches the job
-//! config file. On other platforms (development only) a plaintext fallback file
-//! is used, with a warning, so the engine still builds and runs.
+//! Manager) via the `keyring` crate, under the active [`crate::Profile`]'s
+//! `keyring_service` - it never touches a config file. On other platforms
+//! (development only) a plaintext fallback file is used, with a warning, so the
+//! engines still build and run.
 
 #[cfg(windows)]
 mod imp {
     use keyring::{Entry, Error};
 
-    const SERVICE: &str = "pbsgui";
+    fn service() -> &'static str {
+        crate::profile().keyring_service
+    }
 
     pub fn set(key: &str, secret: &str) -> anyhow::Result<()> {
-        Entry::new(SERVICE, key)?.set_password(secret)?;
+        Entry::new(service(), key)?.set_password(secret)?;
         Ok(())
     }
 
     pub fn get(key: &str) -> anyhow::Result<Option<String>> {
-        match Entry::new(SERVICE, key)?.get_password() {
+        match Entry::new(service(), key)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(Error::NoEntry) => Ok(None),
             Err(e) => Err(e.into()),
@@ -25,7 +28,7 @@ mod imp {
     }
 
     pub fn delete(key: &str) -> anyhow::Result<()> {
-        match Entry::new(SERVICE, key)?.delete_credential() {
+        match Entry::new(service(), key)?.delete_credential() {
             Ok(()) | Err(Error::NoEntry) => Ok(()),
             Err(e) => Err(e.into()),
         }

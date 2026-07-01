@@ -2616,6 +2616,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pbsgui-core"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "hmac",
+ "keyring",
+ "pbs-client",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "pbsgui-engine"
 version = "0.0.1"
 dependencies = [
@@ -2624,10 +2640,10 @@ dependencies = [
  "chrono",
  "clap",
  "glob",
- "hmac",
  "keyring",
  "lettre",
  "pbs-client",
+ "pbsgui-core",
  "pbsgui-ipc",
  "reqwest 0.12.28",
  "serde",

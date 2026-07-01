@@ -2,6 +2,7 @@
 #
 # Members:
 #   crates/pbs-client     clean-room Rust client for the Proxmox Backup Server protocol
+#   crates/pbsgui-core    shared core (config dir, secret store, signed stores; per-app profile)
 #   crates/pbsgui-engine  the privileged backup engine (PBS client + SQL + VSS + IPC + service)
 #   crates/pbsgui-ad-engine  the Active Directory backup engine (VSS System State + ntds.dit browse)
 #   src-tauri             the unprivileged Tauri desktop GUI (control / monitor)
@@ -10,6 +11,7 @@ resolver = "2"
 members = [
     "crates/pbs-client",
     "crates/pbsgui-ipc",
+    "crates/pbsgui-core",
     "crates/pbsgui-engine",
     "crates/pbsgui-ad-engine",
     "src-tauri",

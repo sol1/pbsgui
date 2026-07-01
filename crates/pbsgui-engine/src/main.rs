@@ -13,7 +13,6 @@
 mod archive;
 mod backup;
 mod changedet;
-mod config;
 mod connstore;
 mod enckey;
 mod handler;
@@ -22,12 +21,16 @@ mod metrics;
 mod notify;
 mod restore;
 mod scheduler;
-mod secrets;
 #[cfg(windows)]
 mod service;
-mod signed;
 mod sql;
 mod sqlsched;
+
+// The config directory, OS secret store, and signed on-disk stores live in the
+// shared core crate now, parameterized by a per-app profile. Re-export them under
+// the old `crate::` paths so the rest of the engine is unchanged; this engine uses
+// the default profile (its own identity), so behavior is identical.
+pub(crate) use pbsgui_core::{config, secrets, signed};
 
 use std::sync::Arc;
 
