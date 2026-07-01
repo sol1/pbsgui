@@ -2605,6 +2605,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pbsgui-ad-engine"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pbsgui-engine"
 version = "0.0.1"
 dependencies = [
