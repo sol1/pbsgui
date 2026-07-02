@@ -20,6 +20,8 @@ mod dit;
 mod matchspec;
 mod profile;
 mod restore;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod stream;
 #[cfg(windows)]
 mod vss;
 
@@ -49,8 +51,26 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Back up this Domain Controller's System State (dev entry point).
-    Backup,
+    /// Back up this Domain Controller's System State (dev entry point). Without
+    /// --repo it is a capture-only smoke test; with it the System State streams
+    /// to PBS (token secret from PBSGUI_AD_PBS_SECRET or PBS_PASSWORD).
+    Backup {
+        /// PBS repository, e.g. `user@pbs!token@server:datastore`.
+        #[arg(long)]
+        repo: Option<String>,
+        /// PBS server certificate fingerprint (SHA-256; required with --repo).
+        #[arg(long, default_value = "")]
+        fingerprint: String,
+        /// PBS namespace.
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Backup group id (default: `<hostname>-ad`).
+        #[arg(long)]
+        backup_id: Option<String>,
+        /// Disable zstd compression of uploaded chunks.
+        #[arg(long)]
+        no_compress: bool,
+    },
     /// Browse a backed-up ntds.dit (dev entry point).
     Browse,
     /// Restore directory objects from a backup (dev entry point).
@@ -81,7 +101,24 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Serve { socket } => serve(&socket).await,
         Command::Service { action } => run_service(action),
-        Command::Backup => capture::run_system_state_backup(),
+        Command::Backup {
+            repo,
+            fingerprint,
+            namespace,
+            backup_id,
+            no_compress,
+        } => {
+            if repo.is_some() && fingerprint.is_empty() {
+                anyhow::bail!("--fingerprint is required with --repo");
+            }
+            capture::run_system_state_backup(capture::BackupOptions {
+                repository: repo,
+                fingerprint,
+                namespace,
+                backup_id,
+                compress: !no_compress,
+            })
+        }
         Command::Browse => dit::browse(),
         Command::Restore => restore::run(),
         Command::Version => {

@@ -267,6 +267,21 @@ impl SystemStateCapture {
         })
     }
 
+    /// The Backup Components Document as it stands now (post-snapshot). The NTDS
+    /// writer stamps its backup metadata (e.g. the expiration time) during the
+    /// snapshot events, so this is the version to store INSIDE the backup; a
+    /// restore-time requester initializes from it.
+    pub fn components_xml(&self) -> anyhow::Result<String> {
+        unsafe {
+            let mut xml = BSTR::default();
+            self.backup
+                .SaveAsXML(&mut xml)
+                .ok()
+                .context("SaveAsXML failed")?;
+            Ok(xml.to_string())
+        }
+    }
+
     /// Tell every writer the backup outcome and finish the session. On success
     /// this is what makes the backup "real" to AD: the NTDS writer records the
     /// backup time (visible via `repadmin /showbackup`). Returns the Backup

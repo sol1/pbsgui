@@ -12,14 +12,18 @@ name = "pbsgui-ad-engine"
 path = "src/main.rs"
 
 [dependencies]
+pbs-client = { path = "../pbs-client" }
 pbsgui-ipc = { path = "../pbsgui-ipc" }
 pbsgui-core = { path = "../pbsgui-core" }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Stream the System State file set to PBS as one tar archive.
+tar = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 # COM bindings for the VSS requester (System State snapshots). The vsbackup.h

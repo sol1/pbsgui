@@ -2610,9 +2610,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "pbs-client",
  "pbsgui-core",
  "pbsgui-ipc",
  "serde",
+ "serde_json",
+ "tar",
  "tokio",
  "tracing",
  "tracing-subscriber",
