@@ -20,3 +20,17 @@ serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# COM bindings for the VSS requester (System State snapshots). The vsbackup.h
+# interfaces themselves are hand-declared in src/vss.rs (they are absent from the
+# crate's metadata); these features supply IVssAsync, the VSS enums/structs, COM
+# init, and volume lookup.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Storage_Vss",
+    "Win32_Storage_FileSystem",
+] }
+# Required directly: the #[interface] macro expands to `windows_core::` paths.
+windows-core = "0.58"

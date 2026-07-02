@@ -17,8 +17,11 @@
 mod adproto;
 mod capture;
 mod dit;
+mod matchspec;
 mod profile;
 mod restore;
+#[cfg(windows)]
+mod vss;
 
 use clap::{Parser, Subcommand};
 
