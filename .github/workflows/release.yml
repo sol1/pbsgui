@@ -54,16 +54,30 @@ jobs:
         if: steps.signing.outputs.enabled == 'true'
         shell: pwsh
         run: |
-          # Decode the client-auth cert (mTLS to Software Trust Manager).
-          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.p12", [Convert]::FromBase64String("${{ secrets.SM_CLIENT_CERT_FILE_B64 }}"))
-          "SM_CLIENT_CERT_FILE=$env:RUNNER_TEMP\cert.p12" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          # Install the KeyLocker client tools (smctl + KSP) and sync the cert into
-          # the Windows store so signtool can sign through the cloud key.
-          curl.exe -X GET "https://one.digicert.com/signingmanager/api-ui/v1/releases/Keylockertools-windows-x64.msi/download" -H "x-api-key:$env:SM_API_KEY" -o "$env:RUNNER_TEMP\keylockertools.msi"
-          Start-Process msiexec.exe -ArgumentList "/i `"$env:RUNNER_TEMP\keylockertools.msi`" /quiet /qn" -Wait
+          $ErrorActionPreference = 'Stop'
+          # Decode the client-auth cert (mTLS to Software Trust Manager). Make it
+          # available to smctl in THIS step (process env) AND to the later signing
+          # steps (GITHUB_ENV reaches subsequent steps only, not this one) - without
+          # the process env var, certsync below has no client cert and cannot auth.
+          $certPath = "$env:RUNNER_TEMP\cert.p12"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String("${{ secrets.SM_CLIENT_CERT_FILE_B64 }}"))
+          $env:SM_CLIENT_CERT_FILE = $certPath
+          "SM_CLIENT_CERT_FILE=$certPath" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          # Install the KeyLocker client tools (smctl + the signing KSP).
+          curl.exe -fSL -X GET "https://one.digicert.com/signingmanager/api-ui/v1/releases/Keylockertools-windows-x64.msi/download" -H "x-api-key:$env:SM_API_KEY" -o "$env:RUNNER_TEMP\keylockertools.msi"
+          $msi = Start-Process msiexec.exe -ArgumentList "/i `"$env:RUNNER_TEMP\keylockertools.msi`" /quiet /qn" -Wait -PassThru
+          if ($msi.ExitCode -ne 0) { throw "KeyLocker tools install failed (msiexec exit $($msi.ExitCode))." }
           $ssm = "C:\Program Files\DigiCert\DigiCert KeyLocker Tools"
           "$ssm" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+          # Validate the credentials up front: a clear failure here beats a cryptic
+          # signtool error later. Diagnostic only, so a healthcheck quirk cannot
+          # block an otherwise-good key.
+          & "$ssm\smctl.exe" healthcheck
+          if ($LASTEXITCODE -ne 0) { Write-Warning "smctl healthcheck reported a problem ($LASTEXITCODE); continuing to certsync." }
+          # Sync the signing cert into the Windows store and register the KSP, so
+          # signtool /sha1 <thumbprint> can sign through the cloud-held key.
           & "$ssm\smctl.exe" windows certsync
+          if ($LASTEXITCODE -ne 0) { throw "smctl windows certsync failed ($LASTEXITCODE): check SM_HOST / SM_API_KEY / SM_CLIENT_CERT_FILE_B64 / SM_CLIENT_CERT_PASSWORD." }
 
       - name: Compute version from the tag
         shell: pwsh
@@ -117,6 +131,22 @@ jobs:
           $small = Get-ChildItem "$nsis/*-setup.exe" | Select-Object -First 1
           Copy-Item $small.FullName ("dist/{0}-online{1}" -f $small.BaseName, $small.Extension)
           Get-ChildItem dist | Select-Object Name, Length
+
+      - name: Verify the installers are signed
+        # Confirm the published artifacts actually carry a valid Authenticode
+        # signature (chaining to a trusted root), so a silent signing no-op can
+        # never ship as a "signed" release.
+        if: steps.signing.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+              Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found for verification." }
+          foreach ($f in Get-ChildItem dist\*.exe) {
+              & $signtool.FullName verify /pa /v $f.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $($f.Name)" }
+          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
