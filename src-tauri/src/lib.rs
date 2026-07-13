@@ -8,9 +8,9 @@
 //! GUI never stops backups.
 
 use pbsgui_ipc::{
-    EncryptionKeyInfo, FileInfo, Job, MetricsSettings, NotificationSettings, NotifyChannel,
-    PbsServer, Reply, Request, RunningJob, SnapshotInfo, SqlAuth, SqlCheck, SqlConnection,
-    SqlInstance, SqlProbe, SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
+    DestCredentials, EncryptionKeyInfo, FileInfo, Job, MetricsSettings, NotificationSettings,
+    NotifyChannel, PbsServer, Reply, Request, RunningJob, SnapshotInfo, SqlAuth, SqlCheck,
+    SqlConnection, SqlInstance, SqlProbe, SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -151,6 +151,7 @@ async fn restore(
     backup_time: i64,
     files: Option<Vec<String>>,
     destination: String,
+    dest_credentials: Option<DestCredentials>,
     on_event: Channel<Reply>,
 ) -> Result<(), String> {
     ensure_engine().await?;
@@ -160,6 +161,7 @@ async fn restore(
         backup_time,
         files,
         destination,
+        dest_credentials,
     };
     pbsgui_ipc::send_request(name, &request, move |reply| {
         let _ = on_event.send(reply);
@@ -504,6 +506,7 @@ async fn restore_sql_to_file(
     database: String,
     point: SqlRestorePoint,
     destination: String,
+    dest_credentials: Option<DestCredentials>,
     on_event: Channel<Reply>,
 ) -> Result<(), String> {
     ensure_engine().await?;
@@ -513,6 +516,7 @@ async fn restore_sql_to_file(
         database,
         point,
         destination,
+        dest_credentials,
     };
     pbsgui_ipc::send_request(name, &request, move |reply| {
         let _ = on_event.send(reply);

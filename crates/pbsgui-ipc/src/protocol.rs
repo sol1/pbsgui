@@ -505,6 +505,26 @@ fn unknown_auth_mode() -> SqlAuthMode {
 
 /// A message from the GUI to the engine.
 // SaveJob carries a whole Job, so the enum's largest variant dominates its size.
+/// Credentials for a network (UNC) restore destination. The engine runs as
+/// LocalSystem and reaches the network as the computer account, so a share it
+/// cannot access that way can be reached by supplying a user with rights. Used
+/// only for the one restore; never persisted or written to disk.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DestCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for DestCredentials {
+    // Redact the password so it never lands in a debug log of a Request.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DestCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 // These messages are sent once per connection, so the size is not a concern.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,6 +561,10 @@ pub enum Request {
         #[serde(default)]
         files: Option<Vec<String>>,
         destination: String,
+        /// Credentials for a network (UNC) destination the service account cannot
+        /// reach on its own. `None` for a local path.
+        #[serde(default)]
+        dest_credentials: Option<DestCredentials>,
     },
     /// Discover SQL Server instances. Local enumeration always runs; when
     /// `include_network` is set, the engine also probes the Browser, scans the
@@ -597,6 +621,10 @@ pub enum Request {
         point: SqlRestorePoint,
         /// Destination folder for the written files.
         destination: String,
+        /// Credentials for a network (UNC) destination the service account cannot
+        /// reach on its own. `None` for a local path.
+        #[serde(default)]
+        dest_credentials: Option<DestCredentials>,
     },
 
     /// List saved SQL Server connections (without secrets).

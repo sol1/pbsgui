@@ -68,6 +68,7 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_NetworkManagement_WNet",
 ] }
 # Required directly: the #[interface] macro expands to `windows_core::` paths.
 windows-core = "0.58"

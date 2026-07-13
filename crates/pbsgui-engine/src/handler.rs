@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::config::unix_now;
 use crate::jobstore::JobStore;
-use crate::{backup, connstore, enckey, metrics, notify, restore, secrets};
+use crate::{backup, connstore, enckey, metrics, netdest, notify, restore, secrets};
 
 /// Archive name for a job's filesystem backup.
 const ARCHIVE_NAME: &str = "files.didx";
@@ -104,8 +104,18 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             backup_time,
             files,
             destination,
+            dest_credentials,
         } => {
-            restore_job(store, job_id, backup_time, files, destination, responder).await;
+            restore_job(
+                store,
+                job_id,
+                backup_time,
+                files,
+                destination,
+                dest_credentials,
+                responder,
+            )
+            .await;
         }
 
         Request::DiscoverSql {
@@ -174,8 +184,18 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             database,
             point,
             destination,
+            dest_credentials,
         } => {
-            restore_sql_to_file(store, job_id, database, point, destination, responder).await;
+            restore_sql_to_file(
+                store,
+                job_id,
+                database,
+                point,
+                destination,
+                dest_credentials,
+                responder,
+            )
+            .await;
         }
 
         Request::ListSqlConnections => {
@@ -1065,6 +1085,7 @@ async fn restore_sql_to_file(
     database: String,
     point: SqlRestorePoint,
     destination: String,
+    dest_credentials: Option<pbsgui_ipc::DestCredentials>,
     mut responder: Responder,
 ) {
     let _ = responder
@@ -1078,6 +1099,7 @@ async fn restore_sql_to_file(
         &database,
         point,
         &destination,
+        dest_credentials.as_ref(),
         &mut responder,
     )
     .await;
@@ -1103,13 +1125,15 @@ async fn run_restore_sql_to_file(
     database: &str,
     point: SqlRestorePoint,
     destination: &str,
+    dest_credentials: Option<&pbsgui_ipc::DestCredentials>,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
     let ctx = sql_job_pbs(store, job_id)?;
+    // Connect to the destination share (if credentials were given) and confirm the
+    // folder is reachable and writable, with a clear error if not. The connection
+    // is held for the whole restore and dropped (disconnected) when this returns.
+    let _dest_conn = netdest::prepare_destination(destination, dest_credentials)?;
     let dir = std::path::Path::new(destination);
-    if !dir.is_dir() {
-        anyhow::bail!("the destination folder does not exist: {destination}");
-    }
     match point {
         SqlRestorePoint::Full { backup_time } => {
             export_sql_full(&ctx, database, backup_time, dir, responder).await
@@ -1455,6 +1479,7 @@ async fn restore_job(
     backup_time: i64,
     files: Option<Vec<String>>,
     destination: String,
+    dest_credentials: Option<pbsgui_ipc::DestCredentials>,
     mut responder: Responder,
 ) {
     let ctx = match job_pbs_context(&store, &job_id) {
@@ -1475,7 +1500,15 @@ async fn restore_job(
         })
         .await;
 
-    let result = run_restore(&ctx, backup_time, files, &destination, &mut responder).await;
+    let result = run_restore(
+        &ctx,
+        backup_time,
+        files,
+        &destination,
+        dest_credentials.as_ref(),
+        &mut responder,
+    )
+    .await;
     let reply = match result {
         Ok(message) => Reply::Finished {
             success: true,
@@ -1494,8 +1527,14 @@ async fn run_restore(
     backup_time: i64,
     files: Option<Vec<String>>,
     destination: &str,
+    dest_credentials: Option<&pbsgui_ipc::DestCredentials>,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
+    // Connect to the destination share (if credentials were given) and confirm the
+    // folder is reachable and writable, before downloading anything. Held for the
+    // whole restore; dropped (disconnected) when this returns.
+    let _dest_conn = netdest::prepare_destination(destination, dest_credentials)?;
+
     let params = SessionParams::from_repository(
         &ctx.repo,
         ctx.secret.clone(),

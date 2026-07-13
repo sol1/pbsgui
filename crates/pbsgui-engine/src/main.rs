@@ -18,6 +18,7 @@ mod enckey;
 mod handler;
 mod jobstore;
 mod metrics;
+mod netdest;
 mod notify;
 mod restore;
 mod scheduler;
