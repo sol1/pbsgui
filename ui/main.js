@@ -1291,19 +1291,56 @@ function toLocalInput(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// Restore a specific full backup via VDI, prompting for the target name.
-function restoreSqlFull(jobId, database, backupTime) {
-  const target = prompt(
-    `Restore "${database}" as which database?\n` +
-      `This OVERWRITES the target if it exists (WITH REPLACE).`,
-    database,
-  );
-  if (!target) return;
-  streamRun(`Restoring ${database} as ${target}`, "restore_sql", {
+// Prompt for a SQL restore target: the destination database name and,
+// optionally, a different SQL Server instance (a saved connection). Resolves to
+// { targetDatabase, targetConnectionId } (targetConnectionId "" = same instance)
+// or null if cancelled.
+async function promptRestoreTarget(database, defaultName) {
+  let conns = [];
+  try {
+    conns = await invoke("list_sql_connections");
+  } catch (err) {
+    /* engine offline: leave the list with just "same instance" */
+  }
+  const sel = el("rtarget-server");
+  sel.innerHTML = '<option value="">Same instance (from the backup job)</option>';
+  for (const c of conns) {
+    const opt = document.createElement("option");
+    opt.value = c.id;
+    opt.textContent = `${c.name} (${c.server})`;
+    sel.appendChild(opt);
+  }
+  sel.value = "";
+  el("rtarget-name").value = defaultName;
+  const modal = el("rtarget-modal");
+  modal.classList.remove("hidden");
+  return new Promise((resolve) => {
+    const done = (result) => {
+      modal.classList.add("hidden");
+      el("rtarget-ok").onclick = null;
+      el("rtarget-cancel").onclick = null;
+      resolve(result);
+    };
+    el("rtarget-ok").onclick = () => {
+      const targetDatabase = el("rtarget-name").value.trim();
+      if (!targetDatabase) return alert("Enter a database name to restore as.");
+      done({ targetDatabase, targetConnectionId: sel.value });
+    };
+    el("rtarget-cancel").onclick = () => done(null);
+  });
+}
+
+// Restore a specific full backup via VDI, prompting for the target name/server.
+async function restoreSqlFull(jobId, database, backupTime) {
+  const t = await promptRestoreTarget(database, database);
+  if (!t) return;
+  const where = t.targetConnectionId ? " to another server" : "";
+  streamRun(`Restoring ${database} as ${t.targetDatabase}${where}`, "restore_sql", {
     jobId,
     database,
-    targetDatabase: target.trim(),
+    targetDatabase: t.targetDatabase,
     point: { kind: "full", backup_time: backupTime },
+    targetConnectionId: t.targetConnectionId || undefined,
   });
 }
 
@@ -1384,19 +1421,17 @@ async function restoreSqlPitToFile(jobId, database, unixTime) {
 }
 
 // Restore to a point in time (full + log chain, trimmed with STOPAT).
-function restoreSqlPit(jobId, database, unixTime) {
+async function restoreSqlPit(jobId, database, unixTime) {
   const when = new Date(unixTime * 1000).toLocaleString();
-  const target = prompt(
-    `Restore "${database}" to ${when} as which database?\n` +
-      `This OVERWRITES the target if it exists (WITH REPLACE).`,
-    `${database}_pit`,
-  );
-  if (!target) return;
-  streamRun(`Restoring ${database} to ${when}`, "restore_sql", {
+  const t = await promptRestoreTarget(database, `${database}_pit`);
+  if (!t) return;
+  const where = t.targetConnectionId ? " to another server" : "";
+  streamRun(`Restoring ${database} to ${when}${where}`, "restore_sql", {
     jobId,
     database,
-    targetDatabase: target.trim(),
+    targetDatabase: t.targetDatabase,
     point: { kind: "point_in_time", unix_time: unixTime },
+    targetConnectionId: t.targetConnectionId || undefined,
   });
 }
 

@@ -482,6 +482,28 @@
       </div>
     </div>
 
+    <div id="rtarget-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Restore target</h2>
+        <p class="help muted">Restores <strong>WITH REPLACE</strong>, overwriting the target
+          database if it already exists.</p>
+        <label>Restore as database
+          <input id="rtarget-name" type="text" />
+        </label>
+        <label>Target server
+          <select id="rtarget-server">
+            <option value="">Same instance (from the backup job)</option>
+          </select>
+        </label>
+        <p class="help muted">Restoring to a different server relocates the database files to
+          that server's default data and log folders. The connection must be a sysadmin.</p>
+        <div class="actions">
+          <button id="rtarget-ok" class="primary" type="button">Restore</button>
+          <button id="rtarget-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <script src="main.js"></script>
   </body>
 </html>
