@@ -75,6 +75,7 @@ enum ServiceAction {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
+    apply_worker_limit();
     match Cli::parse().command {
         Command::Serve { socket } => {
             config::ensure_dirs();
@@ -130,4 +131,23 @@ fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_env("PBSGUI_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+/// Backup and restore compress/decompress and encrypt/decrypt each chunk on a
+/// blocking thread; by default the client runs half the machine's cores in
+/// parallel so a run leaves CPU headroom for a live database server. Set
+/// `PBSGUI_WORKER_LIMIT` to a positive integer to override (e.g. widen it for a
+/// dedicated backup window).
+fn apply_worker_limit() {
+    if let Ok(v) = std::env::var("PBSGUI_WORKER_LIMIT") {
+        match v.trim().parse::<usize>() {
+            Ok(n) if n > 0 => {
+                pbs_client::set_pipeline_width(n);
+                tracing::info!("backup/restore worker limit set to {n} (PBSGUI_WORKER_LIMIT)");
+            }
+            _ => tracing::warn!(
+                "ignoring invalid PBSGUI_WORKER_LIMIT={v:?} (want a positive integer)"
+            ),
+        }
+    }
 }

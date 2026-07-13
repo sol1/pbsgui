@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -54,14 +54,40 @@ const H2_MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 const H2_WINDOW_SIZE: u32 = (1 << 31) - 2;
 /// Append at most this many index entries per PUT.
 const APPEND_BATCH: usize = 64;
-/// Maximum chunk-data uploads in flight at once. HTTP/2 multiplexes them over the
-/// one connection, so this pipelines uploads instead of waiting for each in turn.
-const MAX_INFLIGHT_UPLOADS: usize = 16;
-/// Maximum chunk downloads in flight when restoring an archive to a writer. The
-/// read-side mirror of [`MAX_INFLIGHT_UPLOADS`]: it overlaps the network read with
-/// the disk write so a restore is bandwidth-bound, not latency-bound (one
-/// round-trip per chunk) and bursty.
-const RESTORE_PIPELINE: usize = 16;
+
+/// Explicit override for [`pipeline_width`]; 0 means "use the core-derived
+/// default". Set once at startup via [`set_pipeline_width`].
+static PIPELINE_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+
+/// Fix the backup/restore pipeline width (the number of chunks compressed and
+/// uploaded, or downloaded and decompressed, at once). Pass 0 to restore the
+/// default. The engine wires this to a setting so a dedicated backup window can
+/// go wider; unset, the default is deliberately modest (see [`pipeline_width`]).
+pub fn set_pipeline_width(n: usize) {
+    PIPELINE_OVERRIDE.store(n, Ordering::Relaxed);
+}
+
+/// How many chunks to compress+upload (or download+decompress) concurrently.
+///
+/// Every chunk is zstd-(de)compressed and AES-(en/de)crypted on a blocking
+/// thread, so this bounds CPU use. It defaults to half the machine's cores
+/// (clamped to `[2, 16]`) rather than a fixed maximum, so a backup or restore
+/// leaves headroom for a live workload instead of saturating the box - the
+/// concurrency is the only lever, since the per-chunk crypto/compression work is
+/// inherent. [`set_pipeline_width`] overrides it. Also pipelines network I/O:
+/// HTTP/2 multiplexes the transfers over the one connection, overlapping the
+/// network with the disk/CPU work.
+fn pipeline_width() -> usize {
+    match PIPELINE_OVERRIDE.load(Ordering::Relaxed) {
+        0 => {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
+            (cores / 2).clamp(2, 16)
+        }
+        n => n,
+    }
+}
 
 /// Cap the up-front buffer a buffered restore reserves from an index's declared
 /// size. The size comes from the (possibly corrupt or hostile) index, so reserving
@@ -961,10 +987,10 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
     // after compression, which runs off this loop), so progress reads it atomically.
     let stored_bytes = Arc::new(AtomicU64::new(0));
 
-    // Pipeline chunk-data uploads: keep up to MAX_INFLIGHT_UPLOADS in flight on the
+    // Pipeline chunk-data uploads: keep up to `pipeline_width()` in flight on the
     // one HTTP/2 connection instead of awaiting each in turn.
     let uploader = writer.chunk_uploader();
-    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_UPLOADS));
+    let permits = Arc::new(tokio::sync::Semaphore::new(pipeline_width()));
     let mut inflight = tokio::task::JoinSet::new();
 
     while let Some((digest, data)) = rx.recv().await {
@@ -979,7 +1005,7 @@ pub async fn backup_dynamic_reader<R: std::io::Read + Send + 'static>(
             uploaded_bytes += len;
             // Acquiring a permit bounds in-flight work (back-pressuring the
             // chunker once the window is full). Acquired before spawning so at
-            // most MAX_INFLIGHT_UPLOADS chunks encode/upload concurrently.
+            // most `pipeline_width()` chunks encode/upload concurrently.
             let permit = permits
                 .clone()
                 .acquire_owned()
@@ -1234,7 +1260,7 @@ impl ReaderClient {
     /// archive is never held in memory, so a very large archive (a multi-hundred-GB
     /// SQL backup) can be written straight to a file. Returns the bytes written.
     ///
-    /// Chunks download and decode through a pipeline of up to `RESTORE_PIPELINE`
+    /// Chunks download and decode through a pipeline of up to [`pipeline_width`]
     /// concurrent tasks (see [`spawn_chunk_pipeline`]) and are written in order, so
     /// the network read overlaps the disk write instead of taking turns.
     pub async fn restore_dynamic_archive_to_writer<W>(
@@ -1290,7 +1316,7 @@ impl ReaderClient {
 }
 
 /// Spawn a pipeline that downloads and decodes an archive's chunks through a window
-/// of up to [`RESTORE_PIPELINE`] concurrent tasks and emits them IN ORDER on the
+/// of up to [`pipeline_width`] concurrent tasks and emits them IN ORDER on the
 /// returned channel: chunks are downloaded out of order but delivered sequentially,
 /// so both a file write and a VDI stream (which must be in order) can consume it.
 /// Decoding runs on the blocking pool so it does not stall the connection driver.
@@ -1305,7 +1331,8 @@ fn spawn_chunk_pipeline(
     tokio::sync::mpsc::Receiver<Vec<u8>>,
     tokio::task::JoinHandle<Result<()>>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(RESTORE_PIPELINE);
+    let width = pipeline_width();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(width);
     let producer = tokio::spawn(async move {
         // Download one chunk and decode it (decompress/decrypt) off the runtime.
         let spawn_one = |digest: [u8; DIGEST_LEN]| {
@@ -1325,7 +1352,7 @@ fn spawn_chunk_pipeline(
         // downstream while later chunks are still downloading.
         let mut digest_iter = digests.into_iter();
         let mut inflight: std::collections::VecDeque<_> = std::collections::VecDeque::new();
-        for _ in 0..RESTORE_PIPELINE {
+        for _ in 0..width {
             match digest_iter.next() {
                 Some(d) => inflight.push_back(spawn_one(d)),
                 None => break,
