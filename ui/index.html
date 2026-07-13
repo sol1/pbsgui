@@ -462,6 +462,26 @@
       </div>
     </div>
 
+    <div id="netcreds-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Network path credentials</h2>
+        <p class="help muted">The backup service runs as LocalSystem and may not have
+          access to <code id="netcreds-path"></code>. Enter an account with
+          write access to that share, or skip to try as the service account.</p>
+        <label>Username
+          <input id="netcreds-user" type="text" placeholder="DOMAIN\\user" />
+        </label>
+        <label>Password
+          <input id="netcreds-pass" type="password" />
+        </label>
+        <div class="actions">
+          <button id="netcreds-ok" class="primary" type="button">Use credentials</button>
+          <button id="netcreds-skip" type="button">Skip</button>
+          <button id="netcreds-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <script src="main.js"></script>
   </body>
 </html>

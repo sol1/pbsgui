@@ -1307,16 +1307,62 @@ function restoreSqlFull(jobId, database, backupTime) {
   });
 }
 
+// A UNC network path (\\server\share or //server/share)?
+function isUncPath(p) {
+  return typeof p === "string" && (p.startsWith("\\\\") || p.startsWith("//"));
+}
+
+// Resolve destination credentials for a chosen restore path. Local paths need
+// none. For a UNC path the backup service (LocalSystem) may not reach on its own,
+// prompt for an account to use. Returns extra invoke args to spread in (possibly
+// { destCredentials }), or the string "cancel" to abort the restore.
+async function destCredsFor(destination) {
+  if (!isUncPath(destination)) return {};
+  const r = await promptNetCreds(destination);
+  if (r === "cancel") return "cancel";
+  return r ? { destCredentials: r } : {};
+}
+
+// Show the network-credentials modal for `sharePath`. Resolves to
+// { username, password } to use them, null to skip (try as the service account),
+// or "cancel" to abort.
+function promptNetCreds(sharePath) {
+  return new Promise((resolve) => {
+    el("netcreds-path").textContent = sharePath;
+    el("netcreds-user").value = "";
+    el("netcreds-pass").value = "";
+    const modal = el("netcreds-modal");
+    modal.classList.remove("hidden");
+    const done = (result) => {
+      modal.classList.add("hidden");
+      el("netcreds-ok").onclick = null;
+      el("netcreds-skip").onclick = null;
+      el("netcreds-cancel").onclick = null;
+      resolve(result);
+    };
+    el("netcreds-ok").onclick = () => {
+      const username = el("netcreds-user").value.trim();
+      if (!username) return alert("Enter a username, or choose Skip.");
+      done({ username, password: el("netcreds-pass").value });
+    };
+    el("netcreds-skip").onclick = () => done(null);
+    el("netcreds-cancel").onclick = () => done("cancel");
+  });
+}
+
 // Save one full snapshot to a native .bak file in a chosen folder (no SQL Server).
 async function restoreSqlFullToFile(jobId, database, backupTime) {
   const dest = await invoke("pick_destination");
   if (!dest) return;
+  const creds = await destCredsFor(dest);
+  if (creds === "cancel") return;
   const when = new Date(backupTime * 1000).toLocaleString();
   streamRun(`Saving ${database} (${when}) to file`, "restore_sql_to_file", {
     jobId,
     database,
     destination: dest,
     point: { kind: "full", backup_time: backupTime },
+    ...creds,
   });
 }
 
@@ -1325,12 +1371,15 @@ async function restoreSqlFullToFile(jobId, database, backupTime) {
 async function restoreSqlPitToFile(jobId, database, unixTime) {
   const dest = await invoke("pick_destination");
   if (!dest) return;
+  const creds = await destCredsFor(dest);
+  if (creds === "cancel") return;
   const when = new Date(unixTime * 1000).toLocaleString();
   streamRun(`Saving ${database} chain (to ${when}) to file`, "restore_sql_to_file", {
     jobId,
     database,
     destination: dest,
     point: { kind: "point_in_time", unix_time: unixTime },
+    ...creds,
   });
 }
 
@@ -1403,11 +1452,14 @@ async function doRestore(all) {
   }
   const destination = await invoke("pick_destination");
   if (!destination) return;
+  const creds = await destCredsFor(destination);
+  if (creds === "cancel") return;
   streamRun(`Restoring to ${destination}`, "restore", {
     jobId: browseJobId,
     backupTime: snapshotTime,
     files,
     destination,
+    ...creds,
   });
 }
 
