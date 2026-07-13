@@ -184,6 +184,9 @@ pub(crate) struct BackupDecision {
     /// This is a readable AG secondary, where SQL Server only permits copy-only
     /// full backups, so a full here must be forced copy-only.
     pub secondary: bool,
+    /// The database is in SIMPLE recovery, so a transaction-log backup is not
+    /// possible (SQL Server rejects `BACKUP LOG`); its log is auto-managed.
+    pub simple_recovery: bool,
 }
 
 /// Decide whether this replica should run scheduled backups for `database`:
@@ -211,16 +214,19 @@ pub(crate) async fn backup_decision(
            CAST(CASE \
              WHEN d.replica_id IS NOT NULL \
                AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_ONLY' THEN 1 \
-             ELSE 0 END AS int) AS secondary \
+             ELSE 0 END AS int) AS secondary, \
+           CAST(CASE WHEN d.recovery_model_desc = 'SIMPLE' THEN 1 ELSE 0 END AS int) AS simple \
          FROM sys.databases d WHERE d.name = N'{db}'"
     );
     let row = client.simple_query(query).await?.into_row().await?;
     let go = row.as_ref().and_then(|r| r.get::<i32, _>(0));
     let secondary = row.as_ref().and_then(|r| r.get::<i32, _>(1)) == Some(1);
+    let simple_recovery = row.as_ref().and_then(|r| r.get::<i32, _>(2)) == Some(1);
     Ok(BackupDecision {
         // Proceed unless SQL explicitly says this is not the preferred replica.
         back_up: go != Some(0),
         secondary,
+        simple_recovery,
     })
 }
 

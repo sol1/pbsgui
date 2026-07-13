@@ -598,16 +598,36 @@ async fn backup_sql_to_pbs(
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     let (mut uploaded_bytes, mut stored_bytes) = (0u64, 0u64);
     let mut backed_up = 0u32;
+    // Per-database outcomes: one database's failure (e.g. a log backup on a
+    // database with no anchoring full) must not abandon the rest of the job, and a
+    // skip (not the preferred replica, or SIMPLE recovery) is expected, not a
+    // failure. Collect both so the summary shows exactly what happened.
+    let mut skipped: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for db in databases {
         let decision = crate::sql::probe::backup_decision(&mut gate, db).await?;
         if !decision.back_up {
+            let reason = format!("[{db}]: not the Always On preferred backup replica");
             let _ = events
                 .send(Reply::Log {
-                    line: format!(
-                        "skipping [{db}]: this node is not the Always On preferred backup replica"
-                    ),
+                    line: format!("skipping {reason}"),
                 })
                 .await;
+            skipped.push(reason);
+            continue;
+        }
+        // A SIMPLE-recovery database cannot take a transaction-log backup (SQL
+        // Server rejects BACKUP LOG); its log is truncated at each checkpoint, so
+        // this is expected, not a failure. Its recovery cover comes from fulls.
+        if backup_type == SqlBackupType::Log && decision.simple_recovery {
+            let reason =
+                format!("[{db}]: SIMPLE recovery model (no log backups; log is auto-managed)");
+            let _ = events
+                .send(Reply::Log {
+                    line: format!("skipping log backup of {reason}"),
+                })
+                .await;
+            skipped.push(reason);
             continue;
         }
         // A full on an AG secondary must be copy-only (SQL Server rule); logs are
@@ -624,7 +644,19 @@ async fn backup_sql_to_pbs(
         // PBS only allows the backup types vm/ct/host; SQL backups use "host"
         // and stay distinct by their per-database group id (log backups get a
         // separate `-log` group so they do not mix with the fulls).
-        let params = pbs_session_params(server_id, &group, "host", unix_now())?;
+        let params = match pbs_session_params(server_id, &group, "host", unix_now()) {
+            Ok(p) => p,
+            Err(e) => {
+                let reason = format!("[{db}]: {e:#}");
+                let _ = events
+                    .send(Reply::Log {
+                        line: format!("backup FAILED for {reason}"),
+                    })
+                    .await;
+                failed.push(reason);
+                continue;
+            }
+        };
         let _ = events
             .send(Reply::Log {
                 line: format!("backing up [{db}] to PBS (group {group})"),
@@ -641,7 +673,7 @@ async fn backup_sql_to_pbs(
         // phase up front instead of sitting on the generic "starting...". Real
         // byte-progress takes over as soon as chunks start streaming.
         report_phase(events, job_id, format!("reading [{db}] from SQL Server...")).await;
-        let stats = crate::sql::vdi::backup_database_to_pbs(
+        let stats = match crate::sql::vdi::backup_database_to_pbs(
             &conn.server,
             conn.port,
             &conn.auth,
@@ -657,7 +689,23 @@ async fn backup_sql_to_pbs(
             backup_type,
             db_copy_only,
         )
-        .await?;
+        .await
+        {
+            Ok(stats) => stats,
+            Err(e) => {
+                // This database failed; the others still run. A common cause for a
+                // log backup is no prior full to anchor the chain - the error text
+                // from SQL Server says which. Successful databases stay committed.
+                let reason = format!("[{db}]: {e:#}");
+                let _ = events
+                    .send(Reply::Log {
+                        line: format!("backup FAILED for {reason}"),
+                    })
+                    .await;
+                failed.push(reason);
+                continue;
+            }
+        };
         chunks += stats.chunks;
         uploaded += stats.uploaded;
         reused += stats.reused;
@@ -667,14 +715,29 @@ async fn backup_sql_to_pbs(
         backed_up += 1;
     }
 
-    // Every selected database was on a non-preferred replica: nothing to do here
-    // (the preferred node's engine handles it). Report it as a no-op, not a backup.
+    // Any real failure fails the run so notifications fire and a growing-log risk
+    // is visible - but the databases that succeeded are already committed to PBS.
+    if !failed.is_empty() {
+        let prefix = if backed_up > 0 {
+            format!("backed up {backed_up}, but ")
+        } else {
+            String::new()
+        };
+        anyhow::bail!(
+            "{prefix}{} database(s) failed: {}",
+            failed.len(),
+            failed.join("; ")
+        );
+    }
+    // Nothing failed and nothing ran: everything was skipped (not the preferred
+    // replica, or SIMPLE-recovery logs). Report a no-op, not a backup.
     if backed_up == 0 {
-        return Ok((
-            "skipped: not the Always On preferred backup replica for any selected database"
-                .to_string(),
-            None,
-        ));
+        let reason = if skipped.is_empty() {
+            "no databases selected".to_string()
+        } else {
+            skipped.join("; ")
+        };
+        return Ok((format!("skipped: {reason}"), None));
     }
 
     let mut summary = format!(
@@ -683,6 +746,14 @@ async fn backup_sql_to_pbs(
     );
     if stored_bytes > 0 {
         let _ = write!(summary, ", {} stored", human_bytes(stored_bytes));
+    }
+    if !skipped.is_empty() {
+        let _ = write!(
+            summary,
+            "; skipped {}: {}",
+            skipped.len(),
+            skipped.join(", ")
+        );
     }
     // Return the aggregated stats so the run reports "ok" (not "no-change", which
     // only the change-detection skip should give) and notifications carry metrics.
