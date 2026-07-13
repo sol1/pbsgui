@@ -3,33 +3,30 @@ pbsgui backs up Windows files and Microsoft SQL Server to a Proxmox Backup Serve
 
 ## New in this release
 
-This release is about trust: a backup or restore is now either complete and
-correct, or it fails loudly, and the place pbsgui keeps its settings is locked
-down.
+- **Restore to a different SQL Server, or to a network folder.** A SQL database can
+  now be restored into a different SQL Server instance: pick a saved connection as
+  the target, and pbsgui relocates the database files to that server's default data
+  and log directories after checking the target is reachable and a sysadmin. A
+  restore to files can also target a network (UNC) path, prompting for credentials
+  when the backup service cannot reach the share on its own.
 
-- **Restores are verified end to end.** Every chunk pulled back from PBS is checked
-  against its content hash as it arrives, so a corrupt or tampered datastore can no
-  longer produce a silently wrong restore. A point-in-time restore also refuses to
-  run unless the backup chain actually reaches the moment you picked: if the logs
-  needed to get there are missing or unreadable, you get a clear error naming how
-  far the backup really covers, instead of a restore that quietly stops short and
-  reports success.
+- **One database's failure no longer stops the rest.** A SQL job covering several
+  databases now backs up every eligible one and reports a clear per-database summary,
+  instead of aborting the whole run on the first failure. A database in SIMPLE
+  recovery is skipped for transaction-log backups with a plain message (SQL Server
+  manages that log itself) rather than being treated as an error, and any database
+  whose log backups are failing is now visible instead of silently growing its log.
 
-- **Backups never commit a partial snapshot.** If a SQL Server BACKUP fails partway,
-  or you cancel a running backup, the truncated bytes already streamed are discarded
-  rather than finalised, so a half-written snapshot can never be mistaken for a good
-  one. A backup that did finish is always recorded as the success it was, even when
-  a cancel arrives at the same instant.
+- **Backups and restores leave CPU headroom.** Compression and encryption no longer
+  run wide open across every core, so a backup, and especially a restore, no longer
+  saturates a live database server. The default is about half the machine's cores;
+  set the PBSGUI_WORKER_LIMIT environment variable to widen it for a dedicated backup
+  window.
 
-- **Hardened settings storage.** The configuration directory is restricted to SYSTEM
-  and administrators, and the job and connection files are signed and written
-  atomically, so tampering or corruption is detected and a half-written file is never
-  loaded. The pre/post job hook scripts have been removed, closing the path they
-  offered for running arbitrary commands as the backup service.
-
-- **Steadier under load.** Concurrent edits to jobs no longer risk losing an update,
-  and a GUI that disconnects mid-run no longer stalls the run: a manual backup always
-  finishes and is recorded, the same as a scheduled one.
+- **Compact notifications.** Slack and webhook messages are now a compact one or two
+  lines led by a status symbol (success, warning, or failure), with human-readable
+  sizes (for example 716 GiB) instead of raw byte counts. Email and the in-app log
+  show readable sizes too.
 
 Installers are attached below. See the
 [README](https://github.com/sol1/pbsgui#install) for which one to choose, plus
