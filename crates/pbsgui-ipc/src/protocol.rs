@@ -609,6 +609,12 @@ pub enum Request {
         database: String,
         target_database: String,
         point: SqlRestorePoint,
+        /// Restore into a different SQL Server instance: the id of a saved SQL
+        /// connection to use as the target. `None` restores into the job's own
+        /// instance. A cross-instance restore relocates the files to the target's
+        /// default data/log directories.
+        #[serde(default)]
+        target_connection_id: Option<String>,
     },
     /// Restore one or more SQL snapshots from PBS to native backup files in a
     /// folder, without touching SQL Server (the stored archive is the native

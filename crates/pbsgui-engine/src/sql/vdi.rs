@@ -212,6 +212,7 @@ pub async fn restore_database_from_image(
     _source_database: &str,
     _target_database: &str,
     _image: Vec<u8>,
+    _force_relocate: bool,
 ) -> anyhow::Result<()> {
     anyhow::bail!("VDI restore is only available on Windows")
 }
@@ -228,6 +229,7 @@ pub async fn restore_chain(
     _target_database: &str,
     _steps: Vec<(bool, Vec<u8>)>,
     _target_unix: i64,
+    _force_relocate: bool,
 ) -> anyhow::Result<()> {
     anyhow::bail!("VDI restore is only available on Windows")
 }
@@ -247,6 +249,7 @@ pub async fn restore_database_streamed(
     _archive: &str,
     _crypt: Option<CryptConfig>,
     _files: &[crate::sql::backupmeta::SqlBackupFile],
+    _force_relocate: bool,
 ) -> anyhow::Result<()> {
     anyhow::bail!("VDI restore is only available on Windows")
 }
@@ -266,6 +269,7 @@ pub async fn restore_chain_streamed(
     _crypt: Option<CryptConfig>,
     _files: &[crate::sql::backupmeta::SqlBackupFile],
     _target_unix: i64,
+    _force_relocate: bool,
 ) -> anyhow::Result<()> {
     anyhow::bail!("VDI restore is only available on Windows")
 }
@@ -750,6 +754,7 @@ mod windows_impl {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn restore_database_from_image(
         server: &str,
         port: Option<u16>,
@@ -758,11 +763,12 @@ mod windows_impl {
         source_database: &str,
         target_database: &str,
         image: Vec<u8>,
+        force_relocate: bool,
     ) -> anyhow::Result<()> {
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
 
-        if source_database.eq_ignore_ascii_case(target_database) {
+        if !force_relocate && source_database.eq_ignore_ascii_case(target_database) {
             // In-place restore: keep the backup's own file paths.
             run_vdi_read_stmt(&mut client, image, |set| {
                 format!(
@@ -804,13 +810,14 @@ mod windows_impl {
         target_database: &str,
         steps: Vec<(bool, Vec<u8>)>,
         target_unix: i64,
+        force_relocate: bool,
     ) -> anyhow::Result<()> {
         if steps.is_empty() {
             anyhow::bail!("empty restore chain");
         }
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
-        let new_name = !source_database.eq_ignore_ascii_case(target_database);
+        let new_name = force_relocate || !source_database.eq_ignore_ascii_case(target_database);
 
         // STOPAT must be a datetime in the server's local time; convert the UTC
         // target using the server's current UTC offset.
@@ -978,10 +985,11 @@ mod windows_impl {
         archive: &str,
         crypt: Option<CryptConfig>,
         files: &[crate::sql::backupmeta::SqlBackupFile],
+        force_relocate: bool,
     ) -> anyhow::Result<()> {
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
-        let moves = if source_database.eq_ignore_ascii_case(target_database) {
+        let moves = if !force_relocate && source_database.eq_ignore_ascii_case(target_database) {
             String::new()
         } else {
             moves_from_files(&mut client, files, target_database).await?
@@ -1007,13 +1015,14 @@ mod windows_impl {
         crypt: Option<CryptConfig>,
         files: &[crate::sql::backupmeta::SqlBackupFile],
         target_unix: i64,
+        force_relocate: bool,
     ) -> anyhow::Result<()> {
         if steps.is_empty() {
             anyhow::bail!("empty restore chain");
         }
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
-        let new_name = !source_database.eq_ignore_ascii_case(target_database);
+        let new_name = force_relocate || !source_database.eq_ignore_ascii_case(target_database);
 
         // STOPAT must be a datetime in the server's local time.
         let offset_min: i32 = client

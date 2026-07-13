@@ -480,6 +480,7 @@ async fn restore_sql(
     database: String,
     target_database: String,
     point: SqlRestorePoint,
+    target_connection_id: Option<String>,
     on_event: Channel<Reply>,
 ) -> Result<(), String> {
     ensure_engine().await?;
@@ -489,6 +490,7 @@ async fn restore_sql(
         database,
         target_database,
         point,
+        target_connection_id,
     };
     pbsgui_ipc::send_request(name, &request, move |reply| {
         let _ = on_event.send(reply);

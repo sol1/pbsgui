@@ -176,8 +176,18 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             database,
             target_database,
             point,
+            target_connection_id,
         } => {
-            restore_sql(store, job_id, database, target_database, point, responder).await;
+            restore_sql(
+                store,
+                job_id,
+                database,
+                target_database,
+                point,
+                target_connection_id,
+                responder,
+            )
+            .await;
         }
         Request::RestoreSqlToFile {
             job_id,
@@ -657,6 +667,7 @@ async fn restore_sql(
     database: String,
     target_database: String,
     point: SqlRestorePoint,
+    target_connection_id: Option<String>,
     mut responder: Responder,
 ) {
     let _ = responder
@@ -670,6 +681,7 @@ async fn restore_sql(
         &database,
         &target_database,
         point,
+        target_connection_id.as_deref(),
         &mut responder,
     )
     .await;
@@ -692,17 +704,84 @@ async fn run_restore_sql(
     database: &str,
     target_database: &str,
     point: SqlRestorePoint,
+    target_connection_id: Option<&str>,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
-    let ctx = sql_job_pbs(store, job_id)?;
+    let mut ctx = sql_job_pbs(store, job_id)?;
+    // Restore into a different instance: swap the SQL side of the context for the
+    // chosen saved connection (its secret from the credential store), keeping the
+    // PBS source (repo, backup id, encryption key) from the job. Cross-instance is
+    // detected by a differing server/port, which forces the files to relocate to
+    // the target's default directories (the source's paths may not exist there).
+    let mut cross_instance = false;
+    if let Some(tid) = target_connection_id {
+        let target = connstore::sql_connections()
+            .get(tid)
+            .ok_or_else(|| anyhow::anyhow!("no such target SQL connection: {tid}"))?;
+        let target_password = secrets::get(&connstore::sql_secret_key(tid))?;
+        cross_instance =
+            !target.server.eq_ignore_ascii_case(&ctx.conn.server) || target.port != ctx.conn.port;
+        if cross_instance {
+            preflight_restore_target(&target, target_password.as_deref()).await?;
+            let _ = responder
+                .send(&Reply::Log {
+                    line: format!("restoring into {} (a different instance)", target.server),
+                })
+                .await;
+        }
+        ctx.conn = target;
+        ctx.password = target_password;
+    }
     match point {
         SqlRestorePoint::Full { backup_time } => {
-            run_restore_full(&ctx, database, target_database, backup_time, responder).await
+            run_restore_full(
+                &ctx,
+                database,
+                target_database,
+                backup_time,
+                cross_instance,
+                responder,
+            )
+            .await
         }
         SqlRestorePoint::PointInTime { unix_time } => {
-            run_restore_pit(&ctx, database, target_database, unix_time, responder).await
+            run_restore_pit(
+                &ctx,
+                database,
+                target_database,
+                unix_time,
+                cross_instance,
+                responder,
+            )
+            .await
         }
     }
+}
+
+/// Confirm the target instance is reachable and the connection is sysadmin (VDI
+/// restore requires it), so a cross-instance restore fails up front with a clear
+/// message instead of part-way through the stream.
+async fn preflight_restore_target(
+    conn: &pbsgui_ipc::SqlConnection,
+    password: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut client = crate::sql::probe::connect(&conn.server, conn.port, &conn.auth, password)
+        .await
+        .with_context(|| format!("cannot reach the target SQL Server {}", conn.server))?;
+    let is_sysadmin = client
+        .simple_query("SELECT IS_SRVROLEMEMBER('sysadmin')")
+        .await?
+        .into_row()
+        .await?
+        .and_then(|r| r.get::<i32, _>(0))
+        == Some(1);
+    if !is_sysadmin {
+        anyhow::bail!(
+            "the target connection to {} is not a sysadmin, which VDI restore requires",
+            conn.server
+        );
+    }
+    Ok(())
 }
 
 /// Restore one full snapshot (no log replay).
@@ -711,16 +790,19 @@ async fn run_restore_full(
     database: &str,
     target_database: &str,
     backup_time: i64,
+    cross_instance: bool,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
     let (group, archive) =
         backup::sql_group_and_archive(&ctx.backup_id, database, SqlBackupType::Full);
+    // Relocate the files when renaming OR restoring into a different instance (the
+    // source's physical paths may not exist on the target). Relocation needs the
+    // file list captured at backup time; when it is present (or no relocation is
+    // needed) the restore streams straight into SQL Server, else it falls back to a
+    // buffered restore that reads the file list from the downloaded image.
     let new_name = !database.eq_ignore_ascii_case(target_database);
-    // A renamed restore relocates the files, which needs the file list captured at
-    // backup time. When it is present (or restoring over the original name) the
-    // restore streams straight into SQL Server with bounded memory; an older backup
-    // without it falls back to a buffered restore.
-    let files = if new_name {
+    let relocate = new_name || cross_instance;
+    let files = if relocate {
         download_sql_meta(ctx, &group, backup_time)
             .await
             .map(|m| m.files)
@@ -733,7 +815,7 @@ async fn run_restore_full(
             line: format!("restoring as [{target_database}] (overwrites it if it exists)"),
         })
         .await;
-    if !new_name || !files.is_empty() {
+    if !relocate || !files.is_empty() {
         let _ = responder
             .send(&Reply::Log {
                 line: "streaming the restore from PBS into SQL Server".to_string(),
@@ -758,6 +840,7 @@ async fn run_restore_full(
             &archive,
             ctx.crypt.clone(),
             &files,
+            cross_instance,
         )
         .await?;
     } else {
@@ -776,6 +859,7 @@ async fn run_restore_full(
             database,
             target_database,
             image,
+            cross_instance,
         )
         .await?;
     }
@@ -789,6 +873,7 @@ async fn run_restore_pit(
     database: &str,
     target_database: &str,
     target_unix: i64,
+    cross_instance: bool,
     responder: &mut Responder,
 ) -> anyhow::Result<String> {
     use crate::sql::backupmeta;
@@ -819,17 +904,19 @@ async fn run_restore_pit(
         })
         .await;
 
-    // A renamed restore needs the full's file list (captured at backup time) to
-    // relocate files without a second read of the backup. Stream when it is present
-    // or the name is unchanged; otherwise fall back to a buffered restore.
+    // Relocation (needed when renaming or restoring into a different instance)
+    // uses the full's file list captured at backup time, so no second read of the
+    // backup is needed. Stream when the list is present or no relocation is needed;
+    // otherwise fall back to a buffered restore that reads the list from the image.
     let new_name = !database.eq_ignore_ascii_case(target_database);
+    let relocate = new_name || cross_instance;
     let full_files = chain
         .iter()
         .find(|c| !c.meta.is_log())
         .map(|c| c.meta.files.clone())
         .unwrap_or_default();
 
-    if !new_name || !full_files.is_empty() {
+    if !relocate || !full_files.is_empty() {
         let _ = responder
             .send(&Reply::Log {
                 line: "streaming the restore from PBS into SQL Server".to_string(),
@@ -863,6 +950,7 @@ async fn run_restore_pit(
             ctx.crypt.clone(),
             &full_files,
             target_unix,
+            cross_instance,
         )
         .await?;
     } else {
@@ -892,6 +980,7 @@ async fn run_restore_pit(
             target_database,
             steps,
             target_unix,
+            cross_instance,
         )
         .await?;
     }
