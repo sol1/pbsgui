@@ -384,6 +384,13 @@ pub struct SqlConnection {
     /// active one) instead of failing.
     #[serde(default)]
     pub failover_cluster: bool,
+    /// Reach this instance's VDI byte stream through the named relay agent on
+    /// the SQL host (thin-agent mode: this machine is the proxy and carries the
+    /// chunk/compress/encrypt work). `None` = the instance is local to this
+    /// machine, use VDI directly. T-SQL always goes straight to the instance
+    /// over TCP either way.
+    #[serde(default)]
+    pub relay_agent: Option<String>,
 }
 
 /// The detected deployment archetype of a SQL Server instance (probe result).

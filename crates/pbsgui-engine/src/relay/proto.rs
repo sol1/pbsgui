@@ -107,7 +107,9 @@ pub enum ControlMsg {
     },
 }
 
-/// Write one frame.
+/// Write one frame. Production code writes with the typed helpers below; this
+/// generic form round-trips whole `Frame` values in the codec tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> std::io::Result<()> {
     let (kind, payload) = match frame {
         Frame::Control(msg) => (KIND_CONTROL, serde_json::to_vec(msg)?),

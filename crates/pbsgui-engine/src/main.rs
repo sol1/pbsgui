@@ -60,8 +60,38 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Configure the SQL backup relay (thin agent on the SQL host, heavy
+    /// proxy elsewhere).
+    Relay {
+        #[command(subcommand)]
+        action: RelayAction,
+    },
     /// Print version and platform information.
     Version,
+}
+
+#[derive(Subcommand)]
+enum RelayAction {
+    /// On the proxy: configure an agent name, generate its token, and print
+    /// the matching `relay join` command for the SQL host.
+    AddAgent { name: String },
+    /// On the SQL host: point this machine's agent at its proxy.
+    Join {
+        /// The proxy's relay listener, `host:port`.
+        #[arg(long)]
+        proxy: String,
+        /// The proxy's relay certificate fingerprint (printed by add-agent).
+        #[arg(long)]
+        fingerprint: String,
+        /// This agent's name in the proxy's registry.
+        #[arg(long)]
+        name: String,
+        /// The token add-agent generated for this name.
+        #[arg(long)]
+        token: String,
+    },
+    /// Show this install's relay roles.
+    Show,
 }
 
 #[derive(Subcommand, Clone, Copy)]
@@ -86,6 +116,16 @@ async fn main() -> anyhow::Result<()> {
             run_engine(store, &socket).await
         }
         Command::Service { action } => run_service(action),
+        Command::Relay { action } => match action {
+            RelayAction::AddAgent { name } => relay::setup::cli_add_agent(&name),
+            RelayAction::Join {
+                proxy,
+                fingerprint,
+                name,
+                token,
+            } => relay::setup::cli_join(&proxy, &fingerprint, &name, &token),
+            RelayAction::Show => relay::setup::cli_show(),
+        },
         Command::Version => {
             println!(
                 "pbsgui-engine {} build {} ({})",
@@ -105,6 +145,11 @@ pub(crate) async fn run_engine(store: Arc<JobStore>, socket: &str) -> anyhow::Re
 
     // Start the metrics exporter if it is configured (off by default).
     metrics::apply(store.clone());
+
+    // Start the relay roles this install is configured for (off by default):
+    // the listener if this machine is a proxy, the agent if it serves VDI
+    // sessions for one.
+    relay::setup::start().await;
 
     let name = pbsgui_ipc::socket_name(socket)?;
     pbsgui_ipc::serve(name, move |request, responder| {

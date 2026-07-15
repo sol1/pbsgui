@@ -18,6 +18,7 @@
 use std::io::Read;
 use std::sync::mpsc::Receiver;
 
+use anyhow::Context as _;
 use pbs_client::BackupStats;
 #[cfg(not(windows))]
 use pbs_client::{BackupProgress, CryptConfig, SessionParams};
@@ -27,6 +28,119 @@ use pbsgui_ipc::SqlBackupType;
 #[cfg(not(windows))]
 use tokio_util::sync::CancellationToken;
 
+use crate::sql::probe::SqlClient;
+
+/// The instance name inside a `HOST` / `HOST\INSTANCE` connection target, for
+/// the VDI device set (`CreateEx` needs the instance name; `None` = default
+/// instance). The BACKUP/RESTORE statement runs over TDS and does not need it.
+pub(crate) fn instance_of(server: &str) -> Option<&str> {
+    server
+        .split_once('\\')
+        .map(|(_, instance)| instance)
+        .filter(|i| !i.is_empty())
+}
+
+/// Build the `BACKUP` statement (see [`backup_statement`]) and run it over an
+/// open connection. Shared by the local VDI path and the relay proxy path.
+pub(crate) async fn issue_backup(
+    client: &mut SqlClient,
+    database: &str,
+    set_name: &str,
+    backup_type: SqlBackupType,
+    copy_only: bool,
+) -> anyhow::Result<()> {
+    let sql = backup_statement(database, set_name, backup_type, copy_only)?;
+    client.simple_query(sql).await?.into_results().await?;
+    Ok(())
+}
+
+/// Read the just-written backup's chain metadata from `msdb.dbo.backupset`
+/// (the newest row for the database) as JSON, for the snapshot's meta blob.
+/// Plain T-SQL: works against local and remote instances alike.
+pub(crate) async fn query_backup_meta(
+    client: &mut SqlClient,
+    database: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let db = database.replace('\'', "''");
+    let sql = format!(
+        "SELECT TOP 1 CONVERT(varchar(40), first_lsn) AS first_lsn, \
+         CONVERT(varchar(40), last_lsn) AS last_lsn, \
+         CONVERT(varchar(40), database_backup_lsn) AS db_backup_lsn, \
+         [type] AS btype, \
+         DATEDIFF_BIG(SECOND, '1970-01-01', backup_finish_date) \
+           - (DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) * 60) AS finish_unix \
+         FROM msdb.dbo.backupset WHERE database_name = N'{db}' ORDER BY backup_set_id DESC"
+    );
+    let row = client
+        .simple_query(sql)
+        .await?
+        .into_row()
+        .await?
+        .context("no msdb.dbo.backupset row for the database")?;
+    let btype = row.get::<&str, _>("btype").unwrap_or("D");
+    let kind = if btype.eq_ignore_ascii_case("L") {
+        "log"
+    } else {
+        "full"
+    }
+    .to_string();
+    let backup_time = row.get::<i64, _>("finish_unix").unwrap_or(0);
+    let first_lsn = row
+        .get::<&str, _>("first_lsn")
+        .unwrap_or_default()
+        .to_string();
+    let last_lsn = row
+        .get::<&str, _>("last_lsn")
+        .unwrap_or_default()
+        .to_string();
+    let database_backup_lsn = row
+        .get::<&str, _>("db_backup_lsn")
+        .unwrap_or_default()
+        .to_string();
+    // Drop the borrow of `client` from the row before the next query.
+    drop(row);
+    let files = query_db_files(client, database).await.unwrap_or_default();
+    let meta = crate::sql::backupmeta::SqlBackupMeta {
+        kind,
+        backup_time,
+        first_lsn,
+        last_lsn,
+        database_backup_lsn,
+        files,
+    };
+    Ok(serde_json::to_vec(&meta)?)
+}
+
+/// The database's logical files at backup time (name, physical path, and whether
+/// it is a log file), so a renamed restore can relocate them without a second
+/// read of the backup.
+pub(crate) async fn query_db_files(
+    client: &mut SqlClient,
+    database: &str,
+) -> anyhow::Result<Vec<crate::sql::backupmeta::SqlBackupFile>> {
+    let db = database.replace('\'', "''");
+    let sql = format!(
+        "SELECT name, physical_name, type_desc FROM sys.master_files \
+         WHERE database_id = DB_ID(N'{db}')"
+    );
+    let results = client.simple_query(sql).await?.into_results().await?;
+    let rows = results.into_iter().next().unwrap_or_default();
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::sql::backupmeta::SqlBackupFile {
+            logical: row.get::<&str, _>("name").unwrap_or_default().to_string(),
+            physical: row
+                .get::<&str, _>("physical_name")
+                .unwrap_or_default()
+                .to_string(),
+            is_log: row
+                .get::<&str, _>("type_desc")
+                .map(|t| t.eq_ignore_ascii_case("LOG"))
+                .unwrap_or(false),
+        })
+        .collect())
+}
+
 /// Combine the two halves of a VDI-to-PBS backup into one result.
 ///
 /// `backup` is the `BACKUP DATABASE` statement outcome; `upload` is the PBS
@@ -35,7 +149,7 @@ use tokio_util::sync::CancellationToken;
 /// cause: report it first and include the `BACKUP` error too. Kept
 /// cross-platform (not inside the Windows-only module) so this logic is
 /// typechecked on every build.
-fn combine_pbs_result(
+pub(crate) fn combine_pbs_result(
     backup: anyhow::Result<()>,
     upload: pbs_client::Result<BackupStats>,
 ) -> anyhow::Result<BackupStats> {
@@ -276,8 +390,8 @@ pub async fn restore_chain_streamed(
 
 #[cfg(windows)]
 pub use windows_impl::{
-    backup_database_to_file, backup_database_to_pbs, restore_chain, restore_chain_streamed,
-    restore_database_from_image, restore_database_streamed,
+    backup_database_to_file, backup_database_to_pbs, relay_backup_device, restore_chain,
+    restore_chain_streamed, restore_database_from_image, restore_database_streamed,
 };
 
 #[cfg(windows)]
@@ -388,6 +502,9 @@ mod windows_impl {
         File(File),
         /// Bounded channel to the PBS uploader; full = backpressure onto SQL.
         Channel(SyncSender<Vec<u8>>),
+        /// Bounded channel to the relay data socket (the thin-agent mode);
+        /// full = backpressure onto SQL, closed = the proxy stopped consuming.
+        Relay(tokio::sync::mpsc::Sender<Vec<u8>>),
     }
 
     impl Sink {
@@ -396,6 +513,12 @@ mod windows_impl {
                 Sink::File(file) => file.write_all(data),
                 Sink::Channel(tx) => tx.send(data.to_vec()).map_err(|_| {
                     std::io::Error::new(std::io::ErrorKind::BrokenPipe, "PBS upload stopped")
+                }),
+                Sink::Relay(tx) => tx.blocking_send(data.to_vec()).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "the relay proxy stopped consuming",
+                    )
                 }),
             }
         }
@@ -409,103 +532,6 @@ mod windows_impl {
 
     fn wide(value: &str) -> Vec<u16> {
         value.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    /// Issue the `BACKUP` statement for `backup_type` against the VDI device set
-    /// (see [`super::backup_statement`] for the copy-only / log truncation rules).
-    async fn issue_backup(
-        client: &mut SqlClient,
-        database: &str,
-        set_name: &str,
-        backup_type: SqlBackupType,
-        copy_only: bool,
-    ) -> anyhow::Result<()> {
-        let sql = super::backup_statement(database, set_name, backup_type, copy_only)?;
-        client.simple_query(sql).await?.into_results().await?;
-        Ok(())
-    }
-
-    /// Read the just-written backup's chain metadata from `msdb.dbo.backupset`
-    /// (the newest row for the database) as JSON, for the snapshot's meta blob.
-    async fn query_backup_meta(client: &mut SqlClient, database: &str) -> anyhow::Result<Vec<u8>> {
-        let db = database.replace('\'', "''");
-        let sql = format!(
-            "SELECT TOP 1 CONVERT(varchar(40), first_lsn) AS first_lsn, \
-             CONVERT(varchar(40), last_lsn) AS last_lsn, \
-             CONVERT(varchar(40), database_backup_lsn) AS db_backup_lsn, \
-             [type] AS btype, \
-             DATEDIFF_BIG(SECOND, '1970-01-01', backup_finish_date) \
-               - (DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) * 60) AS finish_unix \
-             FROM msdb.dbo.backupset WHERE database_name = N'{db}' ORDER BY backup_set_id DESC"
-        );
-        let row = client
-            .simple_query(sql)
-            .await?
-            .into_row()
-            .await?
-            .context("no msdb.dbo.backupset row for the database")?;
-        let btype = row.get::<&str, _>("btype").unwrap_or("D");
-        let kind = if btype.eq_ignore_ascii_case("L") {
-            "log"
-        } else {
-            "full"
-        }
-        .to_string();
-        let backup_time = row.get::<i64, _>("finish_unix").unwrap_or(0);
-        let first_lsn = row
-            .get::<&str, _>("first_lsn")
-            .unwrap_or_default()
-            .to_string();
-        let last_lsn = row
-            .get::<&str, _>("last_lsn")
-            .unwrap_or_default()
-            .to_string();
-        let database_backup_lsn = row
-            .get::<&str, _>("db_backup_lsn")
-            .unwrap_or_default()
-            .to_string();
-        // Drop the borrow of `client` from the row before the next query.
-        drop(row);
-        let files = query_db_files(client, database).await.unwrap_or_default();
-        let meta = crate::sql::backupmeta::SqlBackupMeta {
-            kind,
-            backup_time,
-            first_lsn,
-            last_lsn,
-            database_backup_lsn,
-            files,
-        };
-        Ok(serde_json::to_vec(&meta)?)
-    }
-
-    /// The database's logical files at backup time (name, physical path, and whether
-    /// it is a log file), so a renamed restore can relocate them without a second
-    /// read of the backup.
-    async fn query_db_files(
-        client: &mut SqlClient,
-        database: &str,
-    ) -> anyhow::Result<Vec<crate::sql::backupmeta::SqlBackupFile>> {
-        let db = database.replace('\'', "''");
-        let sql = format!(
-            "SELECT name, physical_name, type_desc FROM sys.master_files \
-             WHERE database_id = DB_ID(N'{db}')"
-        );
-        let results = client.simple_query(sql).await?.into_results().await?;
-        let rows = results.into_iter().next().unwrap_or_default();
-        Ok(rows
-            .into_iter()
-            .map(|row| crate::sql::backupmeta::SqlBackupFile {
-                logical: row.get::<&str, _>("name").unwrap_or_default().to_string(),
-                physical: row
-                    .get::<&str, _>("physical_name")
-                    .unwrap_or_default()
-                    .to_string(),
-                is_log: row
-                    .get::<&str, _>("type_desc")
-                    .map(|t| t.eq_ignore_ascii_case("LOG"))
-                    .unwrap_or(false),
-            })
-            .collect())
     }
 
     pub async fn backup_database_to_file(
@@ -527,10 +553,17 @@ mod windows_impl {
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let loop_name = set_name.clone();
+        let instance = super::instance_of(server).map(str::to_string);
         // The to-file validation path is short and not user-cancellable.
         let cancel = CancellationToken::new();
         let device_loop = tokio::task::spawn_blocking(move || {
-            run_device_loop(&loop_name, Sink::File(file), ready_tx, cancel)
+            run_device_loop(
+                &loop_name,
+                instance.as_deref(),
+                Sink::File(file),
+                ready_tx,
+                cancel,
+            )
         });
 
         ready_rx
@@ -539,7 +572,7 @@ mod windows_impl {
 
         // The ad-hoc "to file" path is always a full, copy-only backup.
         let backup =
-            issue_backup(&mut client, database, &set_name, SqlBackupType::Full, true).await;
+            super::issue_backup(&mut client, database, &set_name, SqlBackupType::Full, true).await;
         let device_result = device_loop
             .await
             .map_err(|e| anyhow::anyhow!("VDI thread panicked: {e}"))?;
@@ -578,8 +611,15 @@ mod windows_impl {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
         let loop_name = set_name.clone();
         let loop_cancel = cancel.clone();
+        let instance = super::instance_of(server).map(str::to_string);
         let device_loop = tokio::task::spawn_blocking(move || {
-            run_device_loop(&loop_name, Sink::Channel(tx), ready_tx, loop_cancel)
+            run_device_loop(
+                &loop_name,
+                instance.as_deref(),
+                Sink::Channel(tx),
+                ready_tx,
+                loop_cancel,
+            )
         });
 
         ready_rx
@@ -597,12 +637,12 @@ mod windows_impl {
             // which the reader treats as a truncated stream.
             let done_tx = done_tx;
             let result =
-                issue_backup(&mut client, database, &set_name, backup_type, copy_only).await;
+                super::issue_backup(&mut client, database, &set_name, backup_type, copy_only).await;
             // Report the verdict before anything else, so even a metadata-query
             // failure on an otherwise successful backup still commits.
             let _ = done_tx.send(result.is_ok());
             if result.is_ok() {
-                match query_backup_meta(&mut client, database).await {
+                match super::query_backup_meta(&mut client, database).await {
                     Ok(meta) => {
                         let _ = meta_tx
                             .send((crate::sql::backupmeta::META_BLOB_NAME.to_string(), meta));
@@ -713,6 +753,7 @@ mod windows_impl {
     /// `make_sql` builds the statement given the device set name.
     async fn run_vdi_read_stmt<F>(
         client: &mut SqlClient,
+        instance: Option<String>,
         image: Vec<u8>,
         make_sql: F,
     ) -> anyhow::Result<Vec<Vec<Row>>>
@@ -727,7 +768,7 @@ mod windows_impl {
                 data: image,
                 pos: 0,
             };
-            run_device_session(&loop_name, ready_tx, |vds| {
+            run_device_session(&loop_name, instance.as_deref(), ready_tx, |vds| {
                 fill_device(vds, &loop_name, &mut source)
             })
         });
@@ -767,10 +808,11 @@ mod windows_impl {
     ) -> anyhow::Result<()> {
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
+        let instance = super::instance_of(server).map(str::to_string);
 
         if !force_relocate && source_database.eq_ignore_ascii_case(target_database) {
             // In-place restore: keep the backup's own file paths.
-            run_vdi_read_stmt(&mut client, image, |set| {
+            run_vdi_read_stmt(&mut client, instance, image, |set| {
                 format!(
                     "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
                      WITH REPLACE, RECOVERY"
@@ -782,10 +824,10 @@ mod windows_impl {
 
         // Restoring under a new name: relocate each file so it does not collide
         // with the still-existing source database (otherwise error 1834).
-        let files = backup_filelist(&mut client, image.clone()).await?;
+        let files = backup_filelist(&mut client, instance.clone(), image.clone()).await?;
         let (data_dir, log_dir) = default_dirs(&mut client).await?;
         let moves = move_clause(&files, &data_dir, &log_dir, target_database);
-        run_vdi_read_stmt(&mut client, image, |set| {
+        run_vdi_read_stmt(&mut client, instance, image, |set| {
             format!(
                 "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
                  WITH REPLACE, RECOVERY{moves}"
@@ -817,6 +859,7 @@ mod windows_impl {
         }
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
+        let instance = super::instance_of(server).map(str::to_string);
         let new_name = force_relocate || !source_database.eq_ignore_ascii_case(target_database);
 
         // STOPAT must be a datetime in the server's local time; convert the UTC
@@ -835,7 +878,7 @@ mod windows_impl {
 
         // MOVE clauses (new name only), read from the full = the first image.
         let moves = if new_name {
-            let files = backup_filelist(&mut client, steps[0].1.clone()).await?;
+            let files = backup_filelist(&mut client, instance.clone(), steps[0].1.clone()).await?;
             let (data_dir, log_dir) = default_dirs(&mut client).await?;
             move_clause(&files, &data_dir, &log_dir, target_database)
         } else {
@@ -846,7 +889,7 @@ mod windows_impl {
             let target = target.clone();
             let moves = moves.clone();
             let stopat = stopat.clone();
-            run_vdi_read_stmt(&mut client, image, move |set| {
+            run_vdi_read_stmt(&mut client, instance.clone(), image, move |set| {
                 if i == 0 {
                     format!(
                         "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
@@ -877,6 +920,7 @@ mod windows_impl {
     /// statement from the device set name. Only one chunk is buffered at a time.
     async fn restore_one_streamed<F>(
         client: &mut SqlClient,
+        instance: Option<String>,
         pbs: &SessionParams,
         archive: &str,
         crypt: Option<&CryptConfig>,
@@ -892,7 +936,7 @@ mod windows_impl {
         let loop_name = set_name.clone();
         let device = tokio::task::spawn_blocking(move || {
             let mut source = StreamReader::new(rx);
-            run_device_session(&loop_name, ready_tx, |vds| {
+            run_device_session(&loop_name, instance.as_deref(), ready_tx, |vds| {
                 fill_device(vds, &loop_name, &mut source)
             })
         });
@@ -989,17 +1033,25 @@ mod windows_impl {
     ) -> anyhow::Result<()> {
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
+        let instance = super::instance_of(server).map(str::to_string);
         let moves = if !force_relocate && source_database.eq_ignore_ascii_case(target_database) {
             String::new()
         } else {
             moves_from_files(&mut client, files, target_database).await?
         };
-        restore_one_streamed(&mut client, pbs, archive, crypt.as_ref(), move |set| {
-            format!(
-                "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+        restore_one_streamed(
+            &mut client,
+            instance,
+            pbs,
+            archive,
+            crypt.as_ref(),
+            move |set| {
+                format!(
+                    "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
                  WITH REPLACE, RECOVERY{moves}"
-            )
-        })
+                )
+            },
+        )
         .await
     }
 
@@ -1022,6 +1074,7 @@ mod windows_impl {
         }
         let mut client = probe::connect(server, port, auth, password).await?;
         let target = target_database.replace(']', "]]");
+        let instance = super::instance_of(server).map(str::to_string);
         let new_name = force_relocate || !source_database.eq_ignore_ascii_case(target_database);
 
         // STOPAT must be a datetime in the server's local time.
@@ -1047,19 +1100,26 @@ mod windows_impl {
             let target = target.clone();
             let moves = moves.clone();
             let stopat = stopat.clone();
-            restore_one_streamed(&mut client, pbs, archive, crypt.as_ref(), move |set| {
-                if i == 0 {
-                    format!(
-                        "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+            restore_one_streamed(
+                &mut client,
+                instance.clone(),
+                pbs,
+                archive,
+                crypt.as_ref(),
+                move |set| {
+                    if i == 0 {
+                        format!(
+                            "RESTORE DATABASE [{target}] FROM VIRTUAL_DEVICE = '{set}' \
                          WITH REPLACE, NORECOVERY{moves}"
-                    )
-                } else {
-                    format!(
-                        "RESTORE LOG [{target}] FROM VIRTUAL_DEVICE = '{set}' \
+                        )
+                    } else {
+                        format!(
+                            "RESTORE LOG [{target}] FROM VIRTUAL_DEVICE = '{set}' \
                          WITH STOPAT = N'{stopat}', NORECOVERY"
-                    )
-                }
-            })
+                        )
+                    }
+                },
+            )
             .await?;
         }
 
@@ -1074,9 +1134,10 @@ mod windows_impl {
     /// Read the backup's file list via `RESTORE FILELISTONLY` over VDI.
     async fn backup_filelist(
         client: &mut SqlClient,
+        instance: Option<String>,
         image: Vec<u8>,
     ) -> anyhow::Result<Vec<BackupFile>> {
-        let results = run_vdi_read_stmt(client, image, |set| {
+        let results = run_vdi_read_stmt(client, instance, image, |set| {
             format!("RESTORE FILELISTONLY FROM VIRTUAL_DEVICE = '{set}'")
         })
         .await?;
@@ -1184,18 +1245,37 @@ mod windows_impl {
     /// issue the BACKUP/RESTORE statement), run `body`, then close.
     fn run_device_loop(
         set_name: &str,
+        instance: Option<&str>,
         sink: Sink,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         cancel: CancellationToken,
     ) -> anyhow::Result<u64> {
         let mut sink = sink;
-        run_device_session(set_name, ready, |vds| {
+        run_device_session(set_name, instance, ready, |vds| {
+            drain_device(vds, set_name, &mut sink, &cancel)
+        })
+    }
+
+    /// The relay agent's backup device session: create the set for `instance`,
+    /// signal `ready` (the proxy issues BACKUP only after this), and drain the
+    /// device into `tx` toward the data socket. Blocking; run on a COM thread.
+    pub fn relay_backup_device(
+        instance: Option<&str>,
+        set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<u64> {
+        let mut sink = Sink::Relay(tx);
+        let cancel = cancel.clone();
+        run_device_session(set_name, instance, ready, |vds| {
             drain_device(vds, set_name, &mut sink, &cancel)
         })
     }
 
     fn run_device_session<F>(
         set_name: &str,
+        instance: Option<&str>,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         body: F,
     ) -> anyhow::Result<u64>
@@ -1208,13 +1288,14 @@ mod windows_impl {
                 .ok()
                 .context("CoInitializeEx failed")?;
         }
-        let result = run_device_session_inner(set_name, ready, body);
+        let result = run_device_session_inner(set_name, instance, ready, body);
         unsafe { CoUninitialize() };
         result
     }
 
     fn run_device_session_inner<F>(
         set_name: &str,
+        instance: Option<&str>,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         body: F,
     ) -> anyhow::Result<u64>
@@ -1230,8 +1311,14 @@ mod windows_impl {
         config.device_count = 1;
 
         let name_w = wide(set_name);
-        // Default instance: NULL instance name (no machine prefix).
-        let create = unsafe { vds.CreateEx(PCWSTR::null(), PCWSTR(name_w.as_ptr()), &config) };
+        // A named instance must be passed to CreateEx (the device set lives in
+        // that instance's namespace); NULL means the default instance.
+        let instance_w = instance.map(wide);
+        let instance_ptr = instance_w
+            .as_ref()
+            .map(|w| PCWSTR(w.as_ptr()))
+            .unwrap_or_else(PCWSTR::null);
+        let create = unsafe { vds.CreateEx(instance_ptr, PCWSTR(name_w.as_ptr()), &config) };
         if let Err(e) = create.ok() {
             let _ = ready.send(Err(anyhow::anyhow!("VDI CreateEx failed: {e}")));
             return Err(anyhow::anyhow!("VDI CreateEx failed: {e}"));

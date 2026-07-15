@@ -31,20 +31,63 @@ pub struct AgentConfig {
 
 /// Runs the actual device sessions. Injectable so the relay logic is
 /// loopback-testable off Windows; the real implementation drives SQLVDI
-/// (vdi.rs) and lands with the Windows wiring.
+/// (vdi.rs, `relay_backup_device`).
 pub trait DeviceRunner: Send + Sync + 'static {
     /// Backup direction, blocking (called on a blocking thread): create the
-    /// VDI device set `set_name` on `instance` (None = default), drain its
-    /// writes into `tx` (use `blocking_send`; a closed channel means the proxy
-    /// stopped consuming), and return the byte total when the device closes
+    /// VDI device set `set_name` on `instance` (None = default), signal
+    /// `ready` once the set exists (the proxy must not issue BACKUP before a
+    /// device set it can attach to exists), then drain the device's writes
+    /// into `tx` (use `blocking_send`; a closed channel means the proxy
+    /// stopped consuming) and return the byte total when the device closes
     /// cleanly. Poll `cancel` and abort the device set when it trips.
     fn run_backup(
         &self,
         instance: Option<&str>,
         set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         tx: mpsc::Sender<Vec<u8>>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<u64>;
+}
+
+/// The real device runner: SQL Server VDI on the local machine.
+#[cfg(windows)]
+pub struct VdiDeviceRunner;
+
+#[cfg(windows)]
+impl DeviceRunner for VdiDeviceRunner {
+    fn run_backup(
+        &self,
+        instance: Option<&str>,
+        set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        tx: mpsc::Sender<Vec<u8>>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<u64> {
+        crate::sql::vdi::relay_backup_device(instance, set_name, ready, tx, cancel)
+    }
+}
+
+/// Off Windows there is no SQLVDI; an agent configured here can register but
+/// every session fails with a clear message (keeps dev builds honest).
+#[cfg(not(windows))]
+pub struct VdiDeviceRunner;
+
+#[cfg(not(windows))]
+impl DeviceRunner for VdiDeviceRunner {
+    fn run_backup(
+        &self,
+        _instance: Option<&str>,
+        _set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        _tx: mpsc::Sender<Vec<u8>>,
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<u64> {
+        let _ = ready.send(Err(anyhow::anyhow!(
+            "SQL VDI device sessions are only available on Windows"
+        )));
+        anyhow::bail!("SQL VDI device sessions are only available on Windows")
+    }
 }
 
 /// Delay between reconnect attempts to the proxy.
@@ -244,6 +287,24 @@ async fn run_backup_session(
     set_name: String,
     cancel: CancellationToken,
 ) -> anyhow::Result<u64> {
+    // Start the device first and wait for the set to exist: the proxy issues
+    // BACKUP as soon as our data connection arrives, and the statement fails
+    // if the named device set is not there to attach to. The runner is
+    // blocking (a COM thread on Windows); buffers flow through a bounded
+    // channel so SQL Server throttles to the network rate.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
+    let device = tokio::task::spawn_blocking({
+        let runner = runner.clone();
+        let set_name = set_name.clone();
+        let cancel = cancel.clone();
+        move || runner.run_backup(instance.as_deref(), &set_name, ready_tx, tx, &cancel)
+    });
+    ready_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("the device runner exited before signaling readiness"))?
+        .context("creating the VDI device set")?;
+
     let stream = dial(cfg).await.context("dialing the data connection")?;
     let (mut rd, mut wr) = tokio::io::split(stream);
     write_control(
@@ -254,16 +315,6 @@ async fn run_backup_session(
         },
     )
     .await?;
-
-    // The device runner is blocking (a COM thread on Windows); buffers flow
-    // through a bounded channel so SQL Server throttles to the network rate.
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
-    let device = tokio::task::spawn_blocking({
-        let runner = runner.clone();
-        let set_name = set_name.clone();
-        let cancel = cancel.clone();
-        move || runner.run_backup(instance.as_deref(), &set_name, tx, &cancel)
-    });
 
     let mut send_error: Option<std::io::Error> = None;
     while let Some(buf) = rx.recv().await {

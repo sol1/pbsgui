@@ -673,24 +673,51 @@ async fn backup_sql_to_pbs(
         // phase up front instead of sitting on the generic "starting...". Real
         // byte-progress takes over as soon as chunks start streaming.
         report_phase(events, job_id, format!("reading [{db}] from SQL Server...")).await;
-        let stats = match crate::sql::vdi::backup_database_to_pbs(
-            &conn.server,
-            conn.port,
-            &conn.auth,
-            password.as_deref(),
-            db,
-            &params,
-            &archive,
-            crypt.clone(),
-            compress,
-            total_estimate,
-            progress_reporter(events.clone(), job_id.to_string()),
-            cancel.clone(),
-            backup_type,
-            db_copy_only,
-        )
-        .await
-        {
+        // A relay-bound connection streams the VDI bytes from the thin agent on
+        // the SQL host and does the heavy work here; a local connection runs the
+        // device loop in-process. Same statements, gating, and PBS layout.
+        let backup_result = match &conn.relay_agent {
+            Some(agent) => {
+                crate::relay::backup::backup_database_to_pbs(
+                    agent,
+                    &conn.server,
+                    conn.port,
+                    &conn.auth,
+                    password.as_deref(),
+                    db,
+                    &params,
+                    &archive,
+                    crypt.clone(),
+                    compress,
+                    total_estimate,
+                    progress_reporter(events.clone(), job_id.to_string()),
+                    cancel.clone(),
+                    backup_type,
+                    db_copy_only,
+                )
+                .await
+            }
+            None => {
+                crate::sql::vdi::backup_database_to_pbs(
+                    &conn.server,
+                    conn.port,
+                    &conn.auth,
+                    password.as_deref(),
+                    db,
+                    &params,
+                    &archive,
+                    crypt.clone(),
+                    compress,
+                    total_estimate,
+                    progress_reporter(events.clone(), job_id.to_string()),
+                    cancel.clone(),
+                    backup_type,
+                    db_copy_only,
+                )
+                .await
+            }
+        };
+        let stats = match backup_result {
             Ok(stats) => stats,
             Err(e) => {
                 // This database failed; the others still run. A common cause for a

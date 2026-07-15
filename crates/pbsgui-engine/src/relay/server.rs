@@ -39,8 +39,10 @@ pub struct AgentAuth {
     pub token: String,
 }
 
-/// A connected agent, as shown to the UI.
+/// A connected agent, as shown to the UI (the GUI's relay-agents panel lands
+/// with the next increment; the registry itself is live already).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AgentStatus {
     pub name: String,
     pub host: String,
@@ -54,10 +56,11 @@ struct AgentConn {
     control: mpsc::Sender<ControlMsg>,
 }
 
-/// A commanded session waiting for its data connection.
+/// A commanded session waiting for its data connection (or for the agent to
+/// report that it could not start one).
 struct SessionSlot {
     expected_token: String,
-    deliver: oneshot::Sender<TlsStream>,
+    deliver: oneshot::Sender<Result<TlsStream, String>>,
 }
 
 struct Shared {
@@ -75,6 +78,21 @@ pub struct RelayServer {
     shared: Arc<Shared>,
 }
 
+/// The engine's relay server, when this install is configured as a proxy.
+/// Set once at startup; the SQL backup path resolves relay-bound connections
+/// through it.
+static GLOBAL: std::sync::OnceLock<RelayServer> = std::sync::OnceLock::new();
+
+/// Publish the running relay server for the backup path.
+pub fn set_global(server: RelayServer) {
+    let _ = GLOBAL.set(server);
+}
+
+/// The running relay server, if this install is a relay proxy.
+pub fn global() -> Option<&'static RelayServer> {
+    GLOBAL.get()
+}
+
 impl RelayServer {
     pub fn new(agents: Vec<AgentAuth>) -> Self {
         Self {
@@ -86,7 +104,8 @@ impl RelayServer {
         }
     }
 
-    /// The currently connected agents.
+    /// The currently connected agents (the GUI's relay-agents panel).
+    #[allow(dead_code)]
     pub fn agents(&self) -> Vec<AgentStatus> {
         self.shared
             .agents
@@ -176,7 +195,13 @@ impl RelayServer {
         }
 
         let stream = match tokio::time::timeout(DATA_CONN_TIMEOUT, arrival).await {
-            Ok(Ok(stream)) => stream,
+            Ok(Ok(Ok(stream))) => stream,
+            // The agent reported the session dead before opening a data
+            // connection (e.g. VDI device creation failed).
+            Ok(Ok(Err(error))) => {
+                self.shared.sessions.lock().unwrap().remove(&session_id);
+                anyhow::bail!("relay agent '{agent}' could not start the session: {error}");
+            }
             _ => {
                 self.shared.sessions.lock().unwrap().remove(&session_id);
                 anyhow::bail!(
@@ -309,7 +334,7 @@ async fn handle_conn(shared: Arc<Shared>, stream: TlsStream) -> anyhow::Result<(
             match slot {
                 Some(slot) if slot.expected_token == token => {
                     // Hand the socket to the waiting backup_stream call.
-                    let _ = slot.deliver.send(stream);
+                    let _ = slot.deliver.send(Ok(stream));
                     Ok(())
                 }
                 Some(_) => anyhow::bail!("data connection for session {session_id}: bad token"),
@@ -389,7 +414,7 @@ async fn serve_control(
         }
     });
 
-    let result = read_control_loop(&mut rd).await;
+    let result = read_control_loop(&shared, &mut rd).await;
 
     // Only deregister if the registry still points at this connection (a
     // reconnect may already have replaced the entry with a fresh one).
@@ -407,7 +432,7 @@ async fn serve_control(
 }
 
 /// Consume an agent's control frames (session outcomes, keepalive replies).
-async fn read_control_loop(rd: &mut ReadHalf<TlsStream>) -> anyhow::Result<()> {
+async fn read_control_loop(shared: &Shared, rd: &mut ReadHalf<TlsStream>) -> anyhow::Result<()> {
     loop {
         match read_frame(rd).await? {
             Some(Frame::Control(ControlMsg::SessionDone {
@@ -416,15 +441,19 @@ async fn read_control_loop(rd: &mut ReadHalf<TlsStream>) -> anyhow::Result<()> {
                 error,
                 bytes,
             })) => {
-                // Informational: the data stream's End frame is authoritative
-                // for truncation; this reports the device loop's own outcome.
+                // Normally informational (the data stream's End frame is
+                // authoritative for truncation), but a failure for a session
+                // still waiting on its data connection means that connection
+                // is never coming: fail the waiter now instead of letting it
+                // run into the timeout.
                 if ok {
                     tracing::debug!("relay session {session_id} finished: {bytes} bytes");
                 } else {
-                    tracing::warn!(
-                        "relay session {session_id} failed on the agent: {}",
-                        error.as_deref().unwrap_or("unknown error")
-                    );
+                    let message = error.unwrap_or_else(|| "unknown error".to_string());
+                    tracing::warn!("relay session {session_id} failed on the agent: {message}");
+                    if let Some(slot) = shared.sessions.lock().unwrap().remove(&session_id) {
+                        let _ = slot.deliver.send(Err(message));
+                    }
                 }
             }
             Some(Frame::Control(ControlMsg::Pong)) => {}
@@ -439,10 +468,12 @@ mod tests {
     use super::*;
     use crate::relay::agent::{run_agent, AgentConfig, DeviceRunner};
 
-    /// A fake device: emits a deterministic byte pattern, or fails mid-stream.
+    /// A fake device: emits a deterministic byte pattern, or fails mid-stream
+    /// or before the device set is even created.
     struct FakeDevice {
         chunks: usize,
         fail_after: Option<usize>,
+        fail_ready: bool,
     }
 
     impl DeviceRunner for FakeDevice {
@@ -450,9 +481,15 @@ mod tests {
             &self,
             _instance: Option<&str>,
             set_name: &str,
+            ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
             tx: mpsc::Sender<Vec<u8>>,
             _cancel: &CancellationToken,
         ) -> anyhow::Result<u64> {
+            if self.fail_ready {
+                let _ = ready.send(Err(anyhow::anyhow!("no such instance")));
+                anyhow::bail!("no such instance");
+            }
+            let _ = ready.send(Ok(()));
             let mut total = 0u64;
             for i in 0..self.chunks {
                 if self.fail_after == Some(i) {
@@ -527,6 +564,7 @@ mod tests {
         let device = Arc::new(FakeDevice {
             chunks: 40,
             fail_after: None,
+            fail_ready: false,
         });
         let (server, shutdown) = start_pair(auth, "tok", device).await;
         assert!(wait_for_agent(&server).await, "agent never registered");
@@ -556,6 +594,7 @@ mod tests {
         let device = Arc::new(FakeDevice {
             chunks: 10,
             fail_after: Some(4),
+            fail_ready: false,
         });
         let (server, shutdown) = start_pair(auth, "tok", device).await;
         assert!(wait_for_agent(&server).await, "agent never registered");
@@ -574,6 +613,33 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_device_that_cannot_start_fails_the_session_fast() {
+        let auth = vec![AgentAuth {
+            name: "a1".into(),
+            token: "tok".into(),
+        }];
+        let device = Arc::new(FakeDevice {
+            chunks: 0,
+            fail_after: None,
+            fail_ready: true,
+        });
+        let (server, shutdown) = start_pair(auth, "tok", device).await;
+        assert!(wait_for_agent(&server).await, "agent never registered");
+
+        // The agent reports SessionDone before any data connection exists;
+        // the waiter must fail promptly with the agent's error, not sit in
+        // the data-connection timeout.
+        let started = std::time::Instant::now();
+        let err = match server.backup_stream("a1", None, "set-4").await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected the session to fail"),
+        };
+        assert!(err.contains("no such instance"), "unexpected error: {err}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_wrong_token_is_refused() {
         let auth = vec![AgentAuth {
             name: "a1".into(),
@@ -582,6 +648,7 @@ mod tests {
         let device = Arc::new(FakeDevice {
             chunks: 1,
             fail_after: None,
+            fail_ready: false,
         });
         let (server, shutdown) = start_pair(auth, "WRONG", device).await;
         // The agent retries with backoff but must never appear registered.
