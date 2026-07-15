@@ -120,9 +120,12 @@
             </label>
             <label>Backup id (snapshot group)
               <input id="f-backup-id" type="text" placeholder="auto from name" />
-              <span class="help muted">Snapshots are grouped under this id. For Always On, give
-                every replica's job the same id (pbsgui defaults it to the Availability Group name)
-                so all nodes share one continuous backup chain.</span>
+              <span class="help muted">Snapshots are grouped under this id. A SQL job appends
+                each database name ("id-database", plus "id-database-log" for point-in-time log
+                backups) so every database keeps its own restore chain. For Always On, give
+                every replica's job the same id (pbsgui defaults it to the Availability Group
+                name) so all nodes share one continuous backup chain.</span>
+              <span id="group-preview" class="help"></span>
             </label>
             <label class="enc-toggle">
               <input id="f-compress" type="checkbox" checked />

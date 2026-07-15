@@ -40,7 +40,11 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
 
         Request::SaveJob { job } => {
             let id = job.id.clone();
-            let _ = responder.send(&saved_reply(id, store.save_job(job))).await;
+            // Refuse a job whose PBS snapshot groups would collide with its own
+            // or another job's (interleaved chains corrupt restore windows).
+            let result =
+                backup::validate_pbs_groups(&job, &store.list()).and_then(|()| store.save_job(job));
+            let _ = responder.send(&saved_reply(id, result)).await;
         }
 
         Request::DeleteJob { id } => {

@@ -42,6 +42,15 @@ function slug(s) {
   return out;
 }
 
+// The engine's PBS-safe slug for the database part of a snapshot group
+// (backup.rs sanitize): keep [a-z0-9._-] lowercased, everything else becomes _.
+// Distinct from slug(), which derives a backup id from a free-form job name.
+function sanitizeGroupPart(s) {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "_");
+}
+
 function escapeHtml(s) {
   return String(s).replace(
     /[&<>"]/g,
@@ -420,12 +429,53 @@ function renderSqlGuidance() {
       host.append(sys);
     }
   }
+  // Database selection and the plan (log groups or not) feed the group preview.
+  updateGroupPreview();
+}
+
+// Show the exact PBS snapshot groups this job will write, mirroring the
+// engine's naming (backup.rs sql_group_and_archive): files jobs write the
+// backup id itself; SQL jobs write id-database per database, plus
+// id-database-log when the point-in-time plan takes log backups. Duplicates
+// are flagged here because the engine refuses to save a colliding job.
+function updateGroupPreview() {
+  const host = el("group-preview");
+  if (!host) return;
+  const id = el("f-backup-id").value.trim() || slug(el("f-name").value);
+  if (el("f-dest-type").value !== "pbs" || !id) {
+    host.innerHTML = "";
+    return;
+  }
+  let groups;
+  if (el("f-source-type").value === "sql") {
+    const dbs = Array.from(el("sql-db-pick").querySelectorAll("input:checked")).map((c) => c.value);
+    if (!dbs.length) {
+      host.innerHTML = "";
+      return;
+    }
+    const logs = el("f-sql-plan").value === "point_in_time";
+    groups = dbs.flatMap((db) => {
+      const g = `${id}-${sanitizeGroupPart(db)}`;
+      return logs ? [g, `${g}-log`] : [g];
+    });
+  } else {
+    groups = [id];
+  }
+  const counts = new Map();
+  for (const g of groups) counts.set(g, (counts.get(g) || 0) + 1);
+  const dup = [...counts.entries()].find(([, n]) => n > 1);
+  host.innerHTML =
+    "Writes PBS groups: " + [...counts.keys()].map((g) => `<code>${escapeHtml(g)}</code>`).join(", ") +
+    (dup
+      ? `<div class="check-row check-fail">two databases would share the group '${escapeHtml(dup[0])}'; the save will be refused - change the backup id or deselect one</div>`
+      : "");
 }
 
 function updateDestType() {
   const folder = el("f-dest-type").value === "folder";
   el("dest-folder").classList.toggle("hidden", !folder);
   el("dest-pbs").classList.toggle("hidden", folder);
+  updateGroupPreview();
 }
 
 // --- Client-side encryption key management (per job, keyed by wizJobId) ---
@@ -2079,9 +2129,11 @@ window.addEventListener("DOMContentLoaded", () => {
   // Auto-fill the Backup id from the name until the user edits it directly.
   el("f-name").addEventListener("input", () => {
     if (!backupIdTouched) el("f-backup-id").value = slug(el("f-name").value);
+    updateGroupPreview();
   });
   el("f-backup-id").addEventListener("input", () => {
     backupIdTouched = true;
+    updateGroupPreview();
   });
   el("browse-job").onchange = onBrowseJobChange;
   el("load-snapshots").onclick = loadSnapshots;

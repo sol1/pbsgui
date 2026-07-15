@@ -874,6 +874,81 @@ pub(crate) fn sql_group_and_archive(
     (group, format!("{db}.didx"))
 }
 
+/// Every PBS snapshot group a job will write, with a human description of what
+/// lands there. A files job writes its backup id verbatim; a SQL job writes one
+/// group per database, plus a `-log` group per database when its plan takes log
+/// backups (only point-in-time does). Folder jobs write nothing to PBS.
+fn job_pbs_groups(job: &Job) -> Vec<(String, String)> {
+    let backup_id = match &job.destination {
+        JobDestination::Pbs { backup_id, .. } => backup_id,
+        JobDestination::Folder { .. } => return Vec::new(),
+    };
+    match &job.source {
+        JobSource::Files { .. } => vec![(backup_id.clone(), "the file backups".to_string())],
+        JobSource::Sql {
+            databases,
+            protection,
+            ..
+        } => {
+            let logs = matches!(protection, SqlProtection::PointInTime { .. });
+            let mut out = Vec::new();
+            for db in databases {
+                let (full, _) = sql_group_and_archive(backup_id, db, SqlBackupType::Full);
+                out.push((full, format!("full backups of [{db}]")));
+                if logs {
+                    let (log, _) = sql_group_and_archive(backup_id, db, SqlBackupType::Log);
+                    out.push((log, format!("log backups of [{db}]")));
+                }
+            }
+            out
+        }
+    }
+}
+
+/// Reject a job whose PBS snapshot groups collide, either internally or with
+/// another saved job on the same PBS server. Distinct databases can produce the
+/// same group because names are slugged (`My DB` and `My_DB` both become
+/// `my_db`) and because the `-log` suffix is a legal name tail (`[sales-log]`'s
+/// fulls would share a group with `[sales]`'s logs); interleaved chains would
+/// corrupt restore windows and stall detection, so refuse at save time.
+pub fn validate_pbs_groups(job: &Job, existing: &[Job]) -> anyhow::Result<()> {
+    let server_id = match &job.destination {
+        JobDestination::Pbs { server_id, .. } => server_id,
+        JobDestination::Folder { .. } => return Ok(()),
+    };
+    let groups = job_pbs_groups(job);
+
+    let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (group, what) in &groups {
+        if let Some(other) = seen.insert(group.as_str(), what.as_str()) {
+            anyhow::bail!(
+                "snapshot group collision inside this job: {what} and {other} would both \
+                 write the PBS group '{group}'; change the backup id or deselect one of them"
+            );
+        }
+    }
+
+    for other in existing.iter().filter(|o| o.id != job.id) {
+        match &other.destination {
+            JobDestination::Pbs {
+                server_id: other_server,
+                ..
+            } if other_server == server_id => {}
+            _ => continue,
+        }
+        for (ogroup, owhat) in job_pbs_groups(other) {
+            if let Some((group, what)) = groups.iter().find(|(g, _)| *g == ogroup) {
+                anyhow::bail!(
+                    "snapshot group collision: {what} would write the PBS group '{group}', \
+                     which job '{}' already uses for {owhat}; pick a different backup id",
+                    other.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// PBS-safe slug for snapshot groups and archive names.
 fn sanitize(value: &str) -> String {
     value
@@ -890,7 +965,73 @@ fn sanitize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_job, try_claim_run};
+    use super::{cancel_job, try_claim_run, validate_pbs_groups};
+    use pbsgui_ipc::{Job, JobDestination, JobSource, Schedule, SqlProtection};
+
+    fn sql_job(id: &str, backup_id: &str, databases: &[&str], logs: bool) -> Job {
+        let protection = if logs {
+            SqlProtection::PointInTime {
+                full: Schedule::Manual,
+                log_interval_minutes: 15,
+            }
+        } else {
+            SqlProtection::DailyRestorePoints {
+                schedule: Schedule::Manual,
+            }
+        };
+        Job {
+            id: id.into(),
+            name: format!("job {id}"),
+            source: JobSource::Sql {
+                connection_id: "c".into(),
+                databases: databases.iter().map(|s| s.to_string()).collect(),
+                protection,
+            },
+            destination: JobDestination::Pbs {
+                server_id: "s".into(),
+                backup_id: backup_id.into(),
+            },
+            schedule: Schedule::Manual,
+            last_run: None,
+            last_status: None,
+            encrypted: false,
+            compress: true,
+        }
+    }
+
+    #[test]
+    fn group_collisions_are_rejected() {
+        // Distinct database names that slug identically collide within one job.
+        let j = sql_job("a", "x", &["My DB", "My_DB"], false);
+        let err = validate_pbs_groups(&j, &[]).unwrap_err().to_string();
+        assert!(err.contains("'x-my_db'"), "unexpected message: {err}");
+
+        // A database literally named `<other>-log` collides with the other
+        // database's log group under a point-in-time plan.
+        let j = sql_job("a", "x", &["sales", "sales-log"], true);
+        let err = validate_pbs_groups(&j, &[]).unwrap_err().to_string();
+        assert!(err.contains("'x-sales-log'"), "unexpected message: {err}");
+        // Without log backups there is no log group, so no collision.
+        let j = sql_job("a", "x", &["sales", "sales-log"], false);
+        assert!(validate_pbs_groups(&j, &[]).is_ok());
+
+        // Two jobs on the same PBS server may not share a group; editing the
+        // same job (matching id) is not a collision with itself.
+        let a = sql_job("a", "x", &["sales"], false);
+        let b = sql_job("b", "x", &["sales"], false);
+        let err = validate_pbs_groups(&b, std::slice::from_ref(&a))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("job 'job a'"), "unexpected message: {err}");
+        assert!(validate_pbs_groups(&a, std::slice::from_ref(&a)).is_ok());
+
+        // A different PBS server is a different namespace entirely.
+        let mut c = sql_job("c", "x", &["sales"], false);
+        if let JobDestination::Pbs { server_id, .. } = &mut c.destination {
+            *server_id = "other".into();
+        }
+        assert!(validate_pbs_groups(&c, &[a]).is_ok());
+    }
 
     #[test]
     fn run_guard_claims_cancels_and_releases() {
