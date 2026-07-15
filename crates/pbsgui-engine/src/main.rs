@@ -20,6 +20,7 @@ mod jobstore;
 mod metrics;
 mod netdest;
 mod notify;
+mod relay;
 mod restore;
 mod scheduler;
 #[cfg(windows)]
