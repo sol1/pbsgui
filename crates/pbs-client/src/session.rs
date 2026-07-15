@@ -252,7 +252,11 @@ fn parse_fingerprint(fp: &str) -> Result<[u8; 32]> {
     Ok(arr)
 }
 
-pub(crate) fn tls_connector(fingerprint: &str) -> Result<TlsConnector> {
+/// A TLS connector that accepts exactly the certificate with the given SHA-256
+/// fingerprint (colon-separated hex, any case), bypassing CA validation - the
+/// PBS trust model. Public so the engine's relay agent pins its proxy the same
+/// way this client pins PBS.
+pub fn tls_connector(fingerprint: &str) -> Result<TlsConnector> {
     let provider = rustls::crypto::ring::default_provider();
     let algs = provider.signature_verification_algorithms;
     let verifier = PinnedVerifier {

@@ -51,6 +51,15 @@ tiberius = { version = "0.12", default-features = false, features = [
 ] }
 # Adapts a tokio TcpStream to the futures-io traits tiberius expects.
 tokio-util = { version = "0.7", features = ["compat"] }
+# SQL backup relay: TLS between the thin agent on the SQL host and the proxy.
+# Same rustls stack as pbs-client (the agent reuses its pinned connector); the
+# proxy's self-signed listener certificate is generated with rcgen (pure Rust).
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 
 [target.'cfg(windows)'.dependencies]
 # Secrets in the Windows Credential Manager.

@@ -9,3 +9,4 @@
 #![allow(dead_code)]
 
 pub mod proto;
+pub mod tls;
