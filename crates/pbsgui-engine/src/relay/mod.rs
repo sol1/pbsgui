@@ -8,5 +8,7 @@
 //! away with them.
 #![allow(dead_code)]
 
+pub mod agent;
 pub mod proto;
+pub mod server;
 pub mod tls;
