@@ -359,6 +359,7 @@ pub async fn restore_database_streamed(
     _password: Option<&str>,
     _source_database: &str,
     _target_database: &str,
+    _relay_agent: Option<&str>,
     _pbs: &SessionParams,
     _archive: &str,
     _crypt: Option<CryptConfig>,
@@ -379,6 +380,7 @@ pub async fn restore_chain_streamed(
     _password: Option<&str>,
     _source_database: &str,
     _target_database: &str,
+    _relay_agent: Option<&str>,
     _steps: Vec<(bool, SessionParams, String)>,
     _crypt: Option<CryptConfig>,
     _files: &[crate::sql::backupmeta::SqlBackupFile],
@@ -390,8 +392,8 @@ pub async fn restore_chain_streamed(
 
 #[cfg(windows)]
 pub use windows_impl::{
-    backup_database_to_file, backup_database_to_pbs, relay_backup_device, restore_chain,
-    restore_chain_streamed, restore_database_from_image, restore_database_streamed,
+    backup_database_to_file, backup_database_to_pbs, relay_backup_device, relay_restore_device,
+    restore_chain, restore_chain_streamed, restore_database_from_image, restore_database_streamed,
 };
 
 #[cfg(windows)]
@@ -918,9 +920,11 @@ mod windows_impl {
     /// in memory. A background task streams the archive into a bounded channel; the
     /// device thread serves the statement's reads from it. `make_sql` builds the
     /// statement from the device set name. Only one chunk is buffered at a time.
+    #[allow(clippy::too_many_arguments)]
     async fn restore_one_streamed<F>(
         client: &mut SqlClient,
         instance: Option<String>,
+        relay_agent: Option<&str>,
         pbs: &SessionParams,
         archive: &str,
         crypt: Option<&CryptConfig>,
@@ -930,22 +934,66 @@ mod windows_impl {
         F: FnOnce(&str) -> String,
     {
         let set_name = format!("pbsgui-{}", Uuid::new_v4());
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
 
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
-        let loop_name = set_name.clone();
-        let device = tokio::task::spawn_blocking(move || {
-            let mut source = StreamReader::new(rx);
-            run_device_session(&loop_name, instance.as_deref(), ready_tx, |vds| {
-                fill_device(vds, &loop_name, &mut source)
-            })
-        });
-        ready_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("VDI thread exited before signaling readiness"))??;
+        // The device that consumes the image is either local (this machine) or
+        // on the relay agent (the SQL host). Either way the caller pushes the
+        // PBS stream into `tx`; dropping it (when the download finishes) ends
+        // the stream. `device` is the local device loop's join (a no-op future
+        // for the relay path, whose device runs on the agent and whose outcome
+        // the RESTORE statement reflects).
+        // The device's completion future: the local device loop's join, or the
+        // relay writer's join (whose device runs on the agent).
+        type DeviceDone =
+            std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+        let (tx, device): (tokio::sync::mpsc::Sender<Vec<u8>>, DeviceDone) = match relay_agent {
+            None => {
+                let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+                let loop_name = set_name.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let mut source = StreamReader::new(rx);
+                    run_device_session(&loop_name, instance.as_deref(), ready_tx, |vds| {
+                        fill_device(vds, &loop_name, &mut source)
+                    })
+                });
+                ready_rx.await.map_err(|_| {
+                    anyhow::anyhow!("VDI thread exited before signaling readiness")
+                })??;
+                let fut = async move {
+                    match handle.await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(e)) => Err(e.context("the VDI device loop failed")),
+                        Err(e) => Err(anyhow::anyhow!("VDI thread panicked: {e}")),
+                    }
+                };
+                (tx, Box::pin(fut))
+            }
+            Some(agent) => {
+                let relay = crate::relay::server::global().ok_or_else(|| {
+                    anyhow::anyhow!("this machine has no relay listener configured")
+                })?;
+                // Returns once the agent's device set exists (it dials back only
+                // after CreateEx), so RESTORE below can attach to it.
+                let (tx, writer) = relay
+                    .restore_stream(agent, instance.clone(), &set_name)
+                    .await
+                    .map_err(|e| {
+                        e.context(format!(
+                            "starting the relay restore session on agent '{agent}'"
+                        ))
+                    })?;
+                let fut = async move {
+                    writer
+                        .await
+                        .map_err(|e| anyhow::anyhow!("relay restore writer panicked: {e}"))
+                };
+                (tx, Box::pin(fut))
+            }
+        };
 
-        // Background task: stream the archive from PBS into the channel. Dropping the
-        // sender at the end signals end of stream to the device.
+        // Background task: stream the archive from PBS into the channel. Dropping
+        // the sender at the end signals end of stream to the device (local or on
+        // the agent).
         let pbs = pbs.clone();
         let archive = archive.to_string();
         let crypt = crypt.cloned();
@@ -985,12 +1033,7 @@ mod windows_impl {
             Ok(Err(e)) => return Err(e.context("streaming the backup from PBS failed")),
             Err(e) => return Err(anyhow::anyhow!("PBS download task panicked: {e}")),
         }
-        match device_result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(e.context("the VDI device loop failed")),
-            Err(e) => return Err(anyhow::anyhow!("VDI thread panicked: {e}")),
-        }
-        Ok(())
+        device_result
     }
 
     /// MOVE clauses for a renamed restore, built from the file list captured at
@@ -1025,6 +1068,7 @@ mod windows_impl {
         password: Option<&str>,
         source_database: &str,
         target_database: &str,
+        relay_agent: Option<&str>,
         pbs: &SessionParams,
         archive: &str,
         crypt: Option<CryptConfig>,
@@ -1042,6 +1086,7 @@ mod windows_impl {
         restore_one_streamed(
             &mut client,
             instance,
+            relay_agent,
             pbs,
             archive,
             crypt.as_ref(),
@@ -1063,6 +1108,7 @@ mod windows_impl {
         password: Option<&str>,
         source_database: &str,
         target_database: &str,
+        relay_agent: Option<&str>,
         steps: Vec<(bool, SessionParams, String)>,
         crypt: Option<CryptConfig>,
         files: &[crate::sql::backupmeta::SqlBackupFile],
@@ -1103,6 +1149,7 @@ mod windows_impl {
             restore_one_streamed(
                 &mut client,
                 instance.clone(),
+                relay_agent,
                 pbs,
                 archive,
                 crypt.as_ref(),
@@ -1270,6 +1317,25 @@ mod windows_impl {
         let cancel = cancel.clone();
         run_device_session(set_name, instance, ready, |vds| {
             drain_device(vds, set_name, &mut sink, &cancel)
+        })
+    }
+
+    /// The relay agent's restore device session: create the set for `instance`,
+    /// signal `ready` (the proxy issues RESTORE only after this), and fill the
+    /// device from `rx` (the image bytes the proxy streams over the data
+    /// connection). Blocking; run on a COM thread. `cancel` is accepted for a
+    /// uniform runner signature but not polled: restore, like the local path,
+    /// is driven to completion by the RESTORE statement.
+    pub fn relay_restore_device(
+        instance: Option<&str>,
+        set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<u64> {
+        let mut source = StreamReader::new(rx);
+        run_device_session(set_name, instance, ready, |vds| {
+            fill_device(vds, set_name, &mut source)
         })
     }
 

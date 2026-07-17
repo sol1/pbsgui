@@ -106,8 +106,11 @@ CI on Windows and exercised manually.
   separate pbsgui "proxy" machine, which carries the chunking, compression,
   encryption, and PBS upload. This keeps the backup CPU off the database server
   (the proxy does the heavy work), so a fleet of SQL Servers can be backed up
-  without each one paying the deduplication cost. Backup streaming works today;
-  restore over the relay and the management UI are still being built.
+  without each one paying the deduplication cost. Both backup and restore
+  (including point-in-time) stream over the relay; agents are paired with the
+  `pbsgui-engine relay add-agent` / `relay join` commands, and a connection is
+  routed through an agent from the SQL Servers tab. Pending runtime validation
+  on two Windows machines.
 - **Differential SQL backups**, **log-chain re-base detection** (an external tool
   breaking the chain), and managing the PBS **retention** that bounds the
   point-in-time window.

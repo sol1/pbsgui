@@ -827,6 +827,7 @@ async fn run_restore_full(
             line: format!("restoring as [{target_database}] (overwrites it if it exists)"),
         })
         .await;
+    let relay_agent = ctx.conn.relay_agent.as_deref();
     if !relocate || !files.is_empty() {
         let _ = responder
             .send(&Reply::Log {
@@ -848,6 +849,7 @@ async fn run_restore_full(
             ctx.password.as_deref(),
             database,
             target_database,
+            relay_agent,
             &pbs,
             &archive,
             ctx.crypt.clone(),
@@ -855,6 +857,15 @@ async fn run_restore_full(
             cross_instance,
         )
         .await?;
+    } else if relay_agent.is_some() {
+        // The buffered fallback runs the VDI device locally, which a relay
+        // connection cannot do (the device must be on the SQL host). This only
+        // bites a pre-file-list snapshot restored to a new name or instance.
+        anyhow::bail!(
+            "this snapshot predates the stored file list, so a renamed or cross-instance \
+             restore over the relay is not possible; restore it under its original name, or \
+             run the restore from pbsgui installed on the SQL host"
+        );
     } else {
         let _ = responder
             .send(&Reply::Log {
@@ -928,6 +939,7 @@ async fn run_restore_pit(
         .map(|c| c.meta.files.clone())
         .unwrap_or_default();
 
+    let relay_agent = ctx.conn.relay_agent.as_deref();
     if !relocate || !full_files.is_empty() {
         let _ = responder
             .send(&Reply::Log {
@@ -958,6 +970,7 @@ async fn run_restore_pit(
             ctx.password.as_deref(),
             database,
             target_database,
+            relay_agent,
             steps,
             ctx.crypt.clone(),
             &full_files,
@@ -965,6 +978,12 @@ async fn run_restore_pit(
             cross_instance,
         )
         .await?;
+    } else if relay_agent.is_some() {
+        anyhow::bail!(
+            "this chain predates the stored file list, so a renamed or cross-instance \
+             point-in-time restore over the relay is not possible; restore it under its \
+             original name, or run the restore from pbsgui installed on the SQL host"
+        );
     } else {
         let _ = responder
             .send(&Reply::Log {

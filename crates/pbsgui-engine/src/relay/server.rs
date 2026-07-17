@@ -157,6 +157,66 @@ impl RelayServer {
         instance: Option<String>,
         set_name: &str,
     ) -> anyhow::Result<RelayRead> {
+        let start = |session_id: String| ControlMsg::StartBackup {
+            session_id,
+            instance,
+            set_name: set_name.to_string(),
+        };
+        let stream = self.open_session(agent, start).await?;
+
+        // Pump frames into a bounded channel (network backpressure) and keep
+        // the verdict on a separate channel, exactly like the local VDI path.
+        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+        tokio::spawn(pump_data(stream, data_tx, done_tx));
+        Ok(RelayRead {
+            rx: data_rx,
+            done: done_rx,
+            buf: Vec::new(),
+            pos: 0,
+            verdict: None,
+        })
+    }
+
+    /// Start a restore device session on `agent`. Returns a sender to push the
+    /// backup image (streamed from PBS) toward the agent's device, and a handle
+    /// for the socket writer. Drop the sender when the whole image is pushed:
+    /// that ends the stream (the writer sends the End frame), and the agent's
+    /// device sees end of input. The caller issues RESTORE over TDS; await the
+    /// handle after dropping the sender to flush the final frames.
+    ///
+    /// Only the Windows restore path (and the loopback test) drives this; off
+    /// Windows the non-test build never reaches it.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub async fn restore_stream(
+        &self,
+        agent: &str,
+        instance: Option<String>,
+        set_name: &str,
+    ) -> anyhow::Result<(mpsc::Sender<Vec<u8>>, tokio::task::JoinHandle<()>)> {
+        let start = |session_id: String| ControlMsg::StartRestore {
+            session_id,
+            instance,
+            set_name: set_name.to_string(),
+        };
+        let stream = self.open_session(agent, start).await?;
+
+        // The proxy is the producer here (reverse of backup): push image bytes
+        // as Data frames, then End when the sender drops. A bounded channel
+        // gives the PBS download network backpressure.
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
+        let writer = tokio::spawn(push_data(stream, rx));
+        Ok((tx, writer))
+    }
+
+    /// Command a device session on `agent` and wait for the matching data
+    /// connection the agent dials back. Shared by backup and restore; only the
+    /// command (`make_start`) and the direction of the data connection differ.
+    async fn open_session(
+        &self,
+        agent: &str,
+        make_start: impl FnOnce(String) -> ControlMsg,
+    ) -> anyhow::Result<TlsStream> {
         let control = {
             let agents = self.shared.agents.lock().unwrap();
             agents
@@ -181,18 +241,13 @@ impl RelayServer {
             },
         );
 
-        let start = ControlMsg::StartBackup {
-            session_id: session_id.clone(),
-            instance,
-            set_name: set_name.to_string(),
-        };
-        if control.send(start).await.is_err() {
+        if control.send(make_start(session_id.clone())).await.is_err() {
             self.shared.sessions.lock().unwrap().remove(&session_id);
             anyhow::bail!("relay agent '{agent}' disconnected");
         }
 
-        let stream = match tokio::time::timeout(DATA_CONN_TIMEOUT, arrival).await {
-            Ok(Ok(Ok(stream))) => stream,
+        match tokio::time::timeout(DATA_CONN_TIMEOUT, arrival).await {
+            Ok(Ok(Ok(stream))) => Ok(stream),
             // The agent reported the session dead before opening a data
             // connection (e.g. VDI device creation failed).
             Ok(Ok(Err(error))) => {
@@ -206,20 +261,7 @@ impl RelayServer {
                     DATA_CONN_TIMEOUT.as_secs()
                 );
             }
-        };
-
-        // Pump frames into a bounded channel (network backpressure) and keep
-        // the verdict on a separate channel, exactly like the local VDI path.
-        let (data_tx, data_rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
-        tokio::spawn(pump_data(stream, data_tx, done_tx));
-        Ok(RelayRead {
-            rx: data_rx,
-            done: done_rx,
-            buf: Vec::new(),
-            pos: 0,
-            verdict: None,
-        })
+        }
     }
 }
 
@@ -263,6 +305,38 @@ async fn pump_data(
             }
         }
     }
+}
+
+/// Write a restore session's data connection: send each image chunk from `rx`
+/// as a Data frame, then an `End { ok: true }` once the producer drops `rx`
+/// (the whole image was pushed). A send error means the agent went away; the
+/// RESTORE statement then reports the real failure.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn push_data(stream: TlsStream, mut rx: mpsc::Receiver<Vec<u8>>) {
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    while let Some(chunk) = rx.recv().await {
+        if super::proto::write_data(&mut wr, &chunk).await.is_err() {
+            return;
+        }
+    }
+    // Producer finished: tell the agent the image is complete.
+    let _ = super::proto::write_control(
+        &mut wr,
+        &ControlMsg::End {
+            ok: true,
+            error: None,
+        },
+    )
+    .await;
+    // Drain until the agent closes, so the End frame flushes before FIN (the
+    // agent never writes on a restore data connection past its Hello). The
+    // frame writer already flushed the End frame.
+    use tokio::io::AsyncReadExt;
+    let mut sink = [0u8; 256];
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        while matches!(rd.read(&mut sink).await, Ok(n) if n > 0) {}
+    })
+    .await;
 }
 
 /// Blocking reader over a relay data stream, for the PBS uploader. End of
@@ -465,12 +539,25 @@ mod tests {
     use super::*;
     use crate::relay::agent::{run_agent, AgentConfig, DeviceRunner};
 
-    /// A fake device: emits a deterministic byte pattern, or fails mid-stream
-    /// or before the device set is even created.
+    /// A fake device: emits a deterministic byte pattern for backup, or fails
+    /// mid-stream or before the device set is created; for restore it drains the
+    /// image bytes into `restored` so a test can check what arrived.
     struct FakeDevice {
         chunks: usize,
         fail_after: Option<usize>,
         fail_ready: bool,
+        restored: std::sync::Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl FakeDevice {
+        fn backup(chunks: usize) -> Self {
+            Self {
+                chunks,
+                fail_after: None,
+                fail_ready: false,
+                restored: Default::default(),
+            }
+        }
     }
 
     impl DeviceRunner for FakeDevice {
@@ -503,6 +590,23 @@ mod tests {
                 set_name.starts_with("set-"),
                 "unexpected set name {set_name}"
             );
+            Ok(total)
+        }
+
+        fn run_restore(
+            &self,
+            _instance: Option<&str>,
+            _set_name: &str,
+            ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+            mut rx: mpsc::Receiver<Vec<u8>>,
+            _cancel: &CancellationToken,
+        ) -> anyhow::Result<u64> {
+            let _ = ready.send(Ok(()));
+            let mut total = 0u64;
+            while let Some(buf) = rx.blocking_recv() {
+                total += buf.len() as u64;
+                self.restored.lock().unwrap().extend_from_slice(&buf);
+            }
             Ok(total)
         }
     }
@@ -558,11 +662,7 @@ mod tests {
             name: "a1".into(),
             token: "tok".into(),
         }];
-        let device = Arc::new(FakeDevice {
-            chunks: 40,
-            fail_after: None,
-            fail_ready: false,
-        });
+        let device = Arc::new(FakeDevice::backup(40));
         let (server, shutdown) = start_pair(auth, "tok", device).await;
         assert!(wait_for_agent(&server).await, "agent never registered");
 
@@ -589,9 +689,8 @@ mod tests {
             token: "tok".into(),
         }];
         let device = Arc::new(FakeDevice {
-            chunks: 10,
             fail_after: Some(4),
-            fail_ready: false,
+            ..FakeDevice::backup(10)
         });
         let (server, shutdown) = start_pair(auth, "tok", device).await;
         assert!(wait_for_agent(&server).await, "agent never registered");
@@ -616,9 +715,8 @@ mod tests {
             token: "tok".into(),
         }];
         let device = Arc::new(FakeDevice {
-            chunks: 0,
-            fail_after: None,
             fail_ready: true,
+            ..FakeDevice::backup(0)
         });
         let (server, shutdown) = start_pair(auth, "tok", device).await;
         assert!(wait_for_agent(&server).await, "agent never registered");
@@ -642,17 +740,44 @@ mod tests {
             name: "a1".into(),
             token: "tok".into(),
         }];
-        let device = Arc::new(FakeDevice {
-            chunks: 1,
-            fail_after: None,
-            fail_ready: false,
-        });
+        let device = Arc::new(FakeDevice::backup(1));
         let (server, shutdown) = start_pair(auth, "WRONG", device).await;
         // The agent retries with backoff but must never appear registered.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(server.agents().is_empty());
         // And a session against an unconnected agent fails fast.
         assert!(server.backup_stream("a1", None, "set-3").await.is_err());
+        shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_stream_delivers_the_image_to_the_agent() {
+        let auth = vec![AgentAuth {
+            name: "a1".into(),
+            token: "tok".into(),
+        }];
+        let device = Arc::new(FakeDevice::backup(0));
+        let restored = device.restored.clone();
+        let (server, shutdown) = start_pair(auth, "tok", device).await;
+        assert!(wait_for_agent(&server).await, "agent never registered");
+
+        // Push an image toward the agent's (fake) restore device, then finish.
+        let (tx, writer) = server.restore_stream("a1", None, "set-r").await.unwrap();
+        let image: Vec<u8> = (0..50_000u32).map(|i| (i % 256) as u8).collect();
+        for part in image.chunks(4096) {
+            tx.send(part.to_vec()).await.unwrap();
+        }
+        drop(tx); // end of image: the writer sends End, the device sees EOF
+        writer.await.unwrap();
+
+        // The device received exactly the bytes pushed, in order.
+        for _ in 0..100 {
+            if restored.lock().unwrap().len() == image.len() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(*restored.lock().unwrap(), image);
         shutdown.cancel();
     }
 }

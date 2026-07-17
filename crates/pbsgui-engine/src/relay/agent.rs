@@ -48,6 +48,19 @@ pub trait DeviceRunner: Send + Sync + 'static {
         tx: mpsc::Sender<Vec<u8>>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<u64>;
+
+    /// Restore direction, blocking: create the VDI device set `set_name` on
+    /// `instance`, signal `ready`, then fill the device from `rx` (the image
+    /// bytes the proxy streams over the data connection; a closed channel is
+    /// end of stream) and return the byte total. The proxy issues RESTORE.
+    fn run_restore(
+        &self,
+        instance: Option<&str>,
+        set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        rx: mpsc::Receiver<Vec<u8>>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<u64>;
 }
 
 /// The real device runner: SQL Server VDI on the local machine.
@@ -66,6 +79,17 @@ impl DeviceRunner for VdiDeviceRunner {
     ) -> anyhow::Result<u64> {
         crate::sql::vdi::relay_backup_device(instance, set_name, ready, tx, cancel)
     }
+
+    fn run_restore(
+        &self,
+        instance: Option<&str>,
+        set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        rx: mpsc::Receiver<Vec<u8>>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<u64> {
+        crate::sql::vdi::relay_restore_device(instance, set_name, ready, rx, cancel)
+    }
 }
 
 /// Off Windows there is no SQLVDI; an agent configured here can register but
@@ -81,6 +105,20 @@ impl DeviceRunner for VdiDeviceRunner {
         _set_name: &str,
         ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
         _tx: mpsc::Sender<Vec<u8>>,
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<u64> {
+        let _ = ready.send(Err(anyhow::anyhow!(
+            "SQL VDI device sessions are only available on Windows"
+        )));
+        anyhow::bail!("SQL VDI device sessions are only available on Windows")
+    }
+
+    fn run_restore(
+        &self,
+        _instance: Option<&str>,
+        _set_name: &str,
+        ready: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+        _rx: mpsc::Receiver<Vec<u8>>,
         _cancel: &CancellationToken,
     ) -> anyhow::Result<u64> {
         let _ = ready.send(Err(anyhow::anyhow!(
@@ -208,50 +246,32 @@ async fn connect_and_serve(
                     instance,
                     set_name,
                 } => {
-                    let cancel = CancellationToken::new();
-                    sessions
-                        .lock()
-                        .unwrap()
-                        .insert(session_id.clone(), cancel.clone());
-                    let cfg = cfg.clone();
-                    let runner = runner.clone();
-                    let ctl_tx = ctl_tx.clone();
-                    let sessions = sessions.clone();
-                    tokio::spawn(async move {
-                        let result = run_backup_session(
-                            &cfg,
-                            runner,
-                            &session_id,
-                            instance,
-                            set_name,
-                            cancel,
-                        )
-                        .await;
-                        sessions.lock().unwrap().remove(&session_id);
-                        let (ok, error, bytes) = match result {
-                            Ok(bytes) => (true, None, bytes),
-                            Err(e) => (false, Some(format!("{e:#}")), 0),
-                        };
-                        let _ = ctl_tx
-                            .send(ControlMsg::SessionDone {
-                                session_id,
-                                ok,
-                                error,
-                                bytes,
-                            })
-                            .await;
-                    });
+                    spawn_session(
+                        cfg,
+                        &runner,
+                        &ctl_tx,
+                        &sessions,
+                        session_id,
+                        Direction::Backup,
+                        instance,
+                        set_name,
+                    );
                 }
-                ControlMsg::StartRestore { session_id, .. } => {
-                    // Lands with the restore wiring (build order step 4).
-                    let _ = ctl_tx
-                        .send(ControlMsg::SessionDone {
-                            session_id,
-                            ok: false,
-                            error: Some("restore over the relay is not implemented yet".into()),
-                            bytes: 0,
-                        })
-                        .await;
+                ControlMsg::StartRestore {
+                    session_id,
+                    instance,
+                    set_name,
+                } => {
+                    spawn_session(
+                        cfg,
+                        &runner,
+                        &ctl_tx,
+                        &sessions,
+                        session_id,
+                        Direction::Restore,
+                        instance,
+                        set_name,
+                    );
                 }
                 ControlMsg::Cancel { session_id } => {
                     if let Some(c) = sessions.lock().unwrap().get(&session_id) {
@@ -274,6 +294,61 @@ async fn connect_and_serve(
     }
     writer.abort();
     result
+}
+
+/// Which way the bytes flow for a device session.
+#[derive(Clone, Copy)]
+enum Direction {
+    Backup,
+    Restore,
+}
+
+/// Spawn a device session (backup or restore) and report its outcome as
+/// `SessionDone`. Registers the session's cancel token for `Cancel` routing and
+/// clears it when done.
+#[allow(clippy::too_many_arguments)]
+fn spawn_session(
+    cfg: &AgentConfig,
+    runner: &Arc<dyn DeviceRunner>,
+    ctl_tx: &mpsc::Sender<ControlMsg>,
+    sessions: &Arc<Mutex<HashMap<String, CancellationToken>>>,
+    session_id: String,
+    direction: Direction,
+    instance: Option<String>,
+    set_name: String,
+) {
+    let cancel = CancellationToken::new();
+    sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), cancel.clone());
+    let cfg = cfg.clone();
+    let runner = runner.clone();
+    let ctl_tx = ctl_tx.clone();
+    let sessions = sessions.clone();
+    tokio::spawn(async move {
+        let result = match direction {
+            Direction::Backup => {
+                run_backup_session(&cfg, runner, &session_id, instance, set_name, cancel).await
+            }
+            Direction::Restore => {
+                run_restore_session(&cfg, runner, &session_id, instance, set_name, cancel).await
+            }
+        };
+        sessions.lock().unwrap().remove(&session_id);
+        let (ok, error, bytes) = match result {
+            Ok(bytes) => (true, None, bytes),
+            Err(e) => (false, Some(format!("{e:#}")), 0),
+        };
+        let _ = ctl_tx
+            .send(ControlMsg::SessionDone {
+                session_id,
+                ok,
+                error,
+                bytes,
+            })
+            .await;
+    });
 }
 
 /// One backup device session: dial the data connection, bind it with Hello,
@@ -360,6 +435,85 @@ async fn run_backup_session(
         return Err(anyhow::Error::new(e).context("sending backup data to the proxy"));
     }
     device_result
+}
+
+/// One restore device session: create the device, dial the data connection, and
+/// feed the image bytes the proxy streams into the device until the proxy's End
+/// frame. Returns the device loop's byte count. The proxy issues RESTORE.
+async fn run_restore_session(
+    cfg: &AgentConfig,
+    runner: Arc<dyn DeviceRunner>,
+    session_id: &str,
+    instance: Option<String>,
+    set_name: String,
+    cancel: CancellationToken,
+) -> anyhow::Result<u64> {
+    // Create the device set first (as for backup): the proxy issues RESTORE as
+    // soon as the data connection arrives, and it needs the set to attach to.
+    // The device pulls image bytes from `dev_rx`, which this task fills from the
+    // data connection.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+    let (dev_tx, dev_rx) = mpsc::channel::<Vec<u8>>(DATA_QUEUE);
+    let device = tokio::task::spawn_blocking({
+        let runner = runner.clone();
+        let set_name = set_name.clone();
+        let cancel = cancel.clone();
+        move || runner.run_restore(instance.as_deref(), &set_name, ready_tx, dev_rx, &cancel)
+    });
+    ready_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("the device runner exited before signaling readiness"))?
+        .context("creating the VDI device set")?;
+
+    let stream = dial(cfg).await.context("dialing the data connection")?;
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    write_control(
+        &mut wr,
+        &ControlMsg::Hello {
+            session_id: session_id.to_string(),
+            token: cfg.token.clone(),
+        },
+    )
+    .await?;
+
+    // Read image bytes from the proxy and feed the device until End (or the
+    // connection breaks). A closed `dev_tx` is end of stream to the device.
+    let mut stream_ok = false;
+    loop {
+        match read_frame(&mut rd).await {
+            Ok(Some(Frame::Data(bytes))) => {
+                if dev_tx.send(bytes).await.is_err() {
+                    // The device stopped reading (RESTORE finished or failed).
+                    break;
+                }
+            }
+            Ok(Some(Frame::Control(ControlMsg::End { ok, .. }))) => {
+                stream_ok = ok;
+                break;
+            }
+            Ok(Some(_)) | Ok(None) | Err(_) => break, // truncated
+        }
+    }
+    drop(dev_tx); // end of stream to the device
+
+    let device_result = device
+        .await
+        .map_err(|e| anyhow::anyhow!("device thread panicked: {e}"))?;
+
+    // Orderly teardown mirrors the backup path (avoid an RST dropping frames).
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _ = wr.shutdown().await;
+    let mut sink = [0u8; 1024];
+    let drain = async { while matches!(rd.read(&mut sink).await, Ok(n) if n > 0) {} };
+    let _ = tokio::time::timeout(Duration::from_secs(10), drain).await;
+
+    // A device error is the real failure; otherwise a stream that ended without
+    // a clean End means the proxy's download broke (RESTORE will have failed).
+    let bytes = device_result?;
+    if !stream_ok {
+        anyhow::bail!("the restore image stream from the proxy did not complete");
+    }
+    Ok(bytes)
 }
 
 fn hostname() -> String {
