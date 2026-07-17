@@ -246,6 +246,14 @@
         </div>
         <h2>Saved connections</h2>
         <div id="sql-conns"><div class="muted">No saved connections yet.</div></div>
+        <h2>Relay agents</h2>
+        <p class="help muted">For a remote SQL Server, run a thin pbsgui agent on the database
+          host that streams its backup to this machine (the proxy), which does the
+          compression, encryption, and upload so the database server keeps its CPU. Set one up
+          with <code>pbsgui-engine relay add-agent &lt;name&gt;</code> here, run the printed
+          <code>relay join</code> command on the SQL host, then use the "Relay" button on a
+          saved connection to route it through that agent.</p>
+        <div id="relay-agents"><div class="muted">This machine is not configured as a relay proxy.</div></div>
         <h2>Discovered instances</h2>
         <div id="sql-list">
           <div class="muted">Click Discover to find SQL Server instances on this machine.</div>

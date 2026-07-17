@@ -223,6 +223,29 @@ pub fn cli_join(proxy: &str, fingerprint: &str, name: &str, token: &str) -> anyh
     Ok(())
 }
 
+/// The relay agents configured on this machine (proxy role), each flagged with
+/// whether it is currently connected. Empty when this install is not a proxy.
+/// Merges the configured list (relay-server.json) with the live registry so the
+/// GUI can show a configured-but-offline agent, not only connected ones.
+pub fn agent_infos() -> Vec<pbsgui_ipc::RelayAgentInfo> {
+    let configured = load_server_file().map(|f| f.agents).unwrap_or_default();
+    let connected = super::server::global()
+        .map(|s| s.agents())
+        .unwrap_or_default();
+    configured
+        .into_iter()
+        .map(|name| {
+            let live = connected.iter().find(|a| a.name == name);
+            pbsgui_ipc::RelayAgentInfo {
+                connected: live.is_some(),
+                host: live.map(|a| a.host.clone()),
+                version: live.map(|a| a.version.clone()),
+                name,
+            }
+        })
+        .collect()
+}
+
 /// CLI `relay show`: print this install's relay roles.
 pub fn cli_show() -> anyhow::Result<()> {
     match load_server_file() {

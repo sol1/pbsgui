@@ -1610,6 +1610,7 @@ async function saveSqlConnection(inst) {
         port: inst.port ?? null,
         auth: { kind: "integrated" },
         failover_cluster: fci,
+        relay_agent: null,
       },
       secret: null,
     });
@@ -1647,13 +1648,38 @@ async function loadSqlConnections() {
     const main = document.createElement("div");
     main.className = "job-main";
     const fci = conn.failover_cluster ? ' <span class="badge">FCI</span>' : "";
+    const relay = conn.relay_agent
+      ? ` <span class="badge">via relay ${escapeHtml(conn.relay_agent)}</span>`
+      : "";
     main.innerHTML =
-      `<div class="job-name">${escapeHtml(conn.name)}${fci}</div>` +
+      `<div class="job-name">${escapeHtml(conn.name)}${fci}${relay}</div>` +
       `<div class="job-meta">${escapeHtml(conn.server)} <span class="dot-sep"></span> ` +
       `${escapeHtml(authLabel[conn.auth.kind] || conn.auth.kind)}</div>`;
     const actions = document.createElement("div");
     actions.className = "job-actions";
     actions.append(
+      // Bind the connection's VDI byte stream to a relay agent on the SQL
+      // host (this machine then acts as the proxy and carries the backup
+      // CPU). Empty input unbinds; T-SQL always goes direct.
+      mkbtn("Relay", "", async () => {
+        const current = conn.relay_agent || "";
+        const answer = prompt(
+          `Relay agent for "${conn.name}" (the name from 'pbsgui-engine relay add-agent' ` +
+            "on this machine; leave empty for a local instance with no relay):",
+          current
+        );
+        if (answer === null) return;
+        const relay_agent = answer.trim() || null;
+        try {
+          await invoke("save_sql_connection", {
+            connection: { ...conn, relay_agent },
+            secret: null,
+          });
+        } catch (err) {
+          alert("save failed: " + err);
+        }
+        loadSqlConnections();
+      }),
       mkbtn("Delete", "", async () => {
         if (!confirm(`Delete connection "${conn.name}"?`)) return;
         try {
@@ -1666,6 +1692,45 @@ async function loadSqlConnections() {
     );
     row.append(icon, main, actions);
     list.append(row);
+  }
+}
+
+// Show the relay agents configured on this machine (the proxy role) and
+// whether each is connected right now. Empty unless this install is a proxy.
+async function loadRelayAgents() {
+  const host = el("relay-agents");
+  if (!host) return;
+  let agents = [];
+  try {
+    agents = await invoke("list_relay_agents");
+  } catch (err) {
+    /* engine offline */
+  }
+  host.innerHTML = "";
+  if (!agents.length) {
+    host.innerHTML =
+      '<div class="muted">This machine is not configured as a relay proxy. ' +
+      "Run <code>pbsgui-engine relay add-agent &lt;name&gt;</code> to add one.</div>";
+    return;
+  }
+  for (const a of agents) {
+    const row = document.createElement("div");
+    row.className = "job-row";
+    const icon = document.createElement("div");
+    icon.className = "row-avatar avatar-sql";
+    icon.textContent = a.connected ? "ON" : "--";
+    const main = document.createElement("div");
+    main.className = "job-main";
+    const status = a.connected
+      ? `<span class="badge">connected</span> ${escapeHtml(a.host || "")}${
+          a.version ? ` <span class="dot-sep"></span> ${escapeHtml(a.version)}` : ""
+        }`
+      : '<span class="muted">offline (agent not connected)</span>';
+    main.innerHTML =
+      `<div class="job-name">${escapeHtml(a.name)}</div>` +
+      `<div class="job-meta">${status}</div>`;
+    row.append(icon, main);
+    host.append(row);
   }
 }
 
@@ -2075,6 +2140,7 @@ window.addEventListener("DOMContentLoaded", () => {
   el("tab-sql").onclick = () => {
     showView("sql");
     loadSqlConnections();
+    loadRelayAgents();
   };
   el("tab-pbs").onclick = () => {
     showView("pbs");

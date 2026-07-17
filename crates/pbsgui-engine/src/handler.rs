@@ -348,6 +348,14 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             };
             let _ = responder.send(&reply).await;
         }
+
+        Request::ListRelayAgents => {
+            let _ = responder
+                .send(&Reply::RelayAgents {
+                    agents: crate::relay::setup::agent_infos(),
+                })
+                .await;
+        }
     }
 }
 

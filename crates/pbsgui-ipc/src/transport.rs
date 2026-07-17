@@ -26,7 +26,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 /// The `-v<N>` suffix is the IPC protocol version: bump it on any incompatible
 /// change to [`crate::protocol`]. A new GUI then uses a new pipe name, so it can
 /// never silently connect to a leftover engine speaking the old protocol.
-pub const DEFAULT_SOCKET: &str = "pbsgui-engine-v9";
+pub const DEFAULT_SOCKET: &str = "pbsgui-engine-v10";
 
 /// A reply type that can carry a transport-level error (an unparseable request on
 /// the server, or an unparseable reply on the client), so the generic transport

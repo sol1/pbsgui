@@ -39,10 +39,8 @@ pub struct AgentAuth {
     pub token: String,
 }
 
-/// A connected agent, as shown to the UI (the GUI's relay-agents panel lands
-/// with the next increment; the registry itself is live already).
+/// A connected agent, as reported to the GUI's relay-agents panel.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AgentStatus {
     pub name: String,
     pub host: String,
@@ -105,7 +103,6 @@ impl RelayServer {
     }
 
     /// The currently connected agents (the GUI's relay-agents panel).
-    #[allow(dead_code)]
     pub fn agents(&self) -> Vec<AgentStatus> {
         self.shared
             .agents

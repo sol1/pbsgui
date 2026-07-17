@@ -185,6 +185,9 @@ async fn demo_handler(request: Request, mut responder: Responder) {
         Request::SaveMetrics { settings } => {
             let _ = responder.send(&Reply::Metrics { settings }).await;
         }
+        Request::ListRelayAgents => {
+            let _ = responder.send(&Reply::RelayAgents { agents: vec![] }).await;
+        }
     }
 }
 

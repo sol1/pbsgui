@@ -101,6 +101,13 @@ CI on Windows and exercised manually.
 
 ## In progress
 
+- **Remote SQL backup via a relay proxy**: a thin agent on the SQL Server host
+  runs the VDI device and streams the raw backup bytes over pinned TLS to a
+  separate pbsgui "proxy" machine, which carries the chunking, compression,
+  encryption, and PBS upload. This keeps the backup CPU off the database server
+  (the proxy does the heavy work), so a fleet of SQL Servers can be backed up
+  without each one paying the deduplication cost. Backup streaming works today;
+  restore over the relay and the management UI are still being built.
 - **Differential SQL backups**, **log-chain re-base detection** (an external tool
   breaking the chain), and managing the PBS **retention** that bounds the
   point-in-time window.

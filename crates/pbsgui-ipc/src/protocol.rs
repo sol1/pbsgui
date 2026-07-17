@@ -316,6 +316,20 @@ pub struct RunningJob {
     pub message: String,
 }
 
+/// A relay agent as the proxy sees it: configured on this machine, and whether
+/// it is currently connected (with the host and build it reported when it did).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayAgentInfo {
+    /// The agent's name (as configured with `relay add-agent`).
+    pub name: String,
+    /// Whether a control connection from this agent is live right now.
+    pub connected: bool,
+    /// The host name the agent reported (only while connected).
+    pub host: Option<String>,
+    /// The agent's build string (only while connected).
+    pub version: Option<String>,
+}
+
 /// A file inside a snapshot's archive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -707,6 +721,11 @@ pub enum Request {
     GetMetrics,
     /// Save the metrics settings and (re)start or stop the exporter accordingly.
     SaveMetrics { settings: MetricsSettings },
+
+    /// List the relay agents configured on this machine (the proxy role) and
+    /// whether each is currently connected. Empty when this install is not a
+    /// relay proxy.
+    ListRelayAgents,
 }
 
 /// A message from the engine to the GUI.
@@ -749,6 +768,8 @@ pub enum Reply {
     },
     /// Reply to [`Request::GetMetrics`] / [`Request::SaveMetrics`].
     Metrics { settings: MetricsSettings },
+    /// Reply to [`Request::ListRelayAgents`].
+    RelayAgents { agents: Vec<RelayAgentInfo> },
     /// Reply to [`Request::ListRunning`].
     Running { jobs: Vec<RunningJob> },
     /// A job run was accepted; progress follows.
@@ -782,6 +803,8 @@ impl Reply {
                 | Reply::PbsServers { .. }
                 | Reply::EncryptionKey { .. }
                 | Reply::Notifications { .. }
+                | Reply::Metrics { .. }
+                | Reply::RelayAgents { .. }
                 | Reply::Running { .. }
                 | Reply::Finished { .. }
                 | Reply::Error { .. }

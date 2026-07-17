@@ -12,10 +12,10 @@ pub mod transport;
 pub use protocol::{
     CheckStatus, DestCredentials, EmailSecurity, EmailSettings, EncryptionKeyInfo, FileInfo, Job,
     JobDestination, JobSource, MetricsMode, MetricsSettings, NotificationSettings, NotifyChannel,
-    PbsServer, Reply, Request, RunningJob, Schedule, SnapshotInfo, SqlAuth, SqlAuthMode,
-    SqlBackupType, SqlCheck, SqlConnection, SqlDatabase, SqlDiscoverySource, SqlFullPoint,
-    SqlInstance, SqlProbe, SqlProtection, SqlRestorePoint, SqlRestoreWindow, SqlTopology,
-    WebhookSettings,
+    PbsServer, RelayAgentInfo, Reply, Request, RunningJob, Schedule, SnapshotInfo, SqlAuth,
+    SqlAuthMode, SqlBackupType, SqlCheck, SqlConnection, SqlDatabase, SqlDiscoverySource,
+    SqlFullPoint, SqlInstance, SqlProbe, SqlProtection, SqlRestorePoint, SqlRestoreWindow,
+    SqlTopology, WebhookSettings,
 };
 pub use transport::{
     send_request, send_request_typed, serve, serve_typed, socket_name, ErrorReply, Responder,

@@ -9,8 +9,9 @@
 
 use pbsgui_ipc::{
     DestCredentials, EncryptionKeyInfo, FileInfo, Job, MetricsSettings, NotificationSettings,
-    NotifyChannel, PbsServer, Reply, Request, RunningJob, SnapshotInfo, SqlAuth, SqlCheck,
-    SqlConnection, SqlInstance, SqlProbe, SqlRestorePoint, SqlRestoreWindow, DEFAULT_SOCKET,
+    NotifyChannel, PbsServer, RelayAgentInfo, Reply, Request, RunningJob, SnapshotInfo, SqlAuth,
+    SqlCheck, SqlConnection, SqlInstance, SqlProbe, SqlRestorePoint, SqlRestoreWindow,
+    DEFAULT_SOCKET,
 };
 use tauri::ipc::Channel;
 
@@ -207,6 +208,23 @@ async fn list_sql_connections() -> Result<Vec<SqlConnection>, String> {
             _ => None,
         })
         .ok_or_else(|| "engine did not return SQL connections".to_string())
+}
+
+/// List relay agents configured on this machine (the proxy role) with their
+/// live connection status. Empty when this install is not a relay proxy.
+#[tauri::command]
+async fn list_relay_agents() -> Result<Vec<RelayAgentInfo>, String> {
+    let replies = request_all(Request::ListRelayAgents).await?;
+    if let Some(err) = first_error(&replies) {
+        return Err(err);
+    }
+    replies
+        .into_iter()
+        .find_map(|r| match r {
+            Reply::RelayAgents { agents } => Some(agents),
+            _ => None,
+        })
+        .ok_or_else(|| "engine did not return relay agents".to_string())
 }
 
 /// Create or update a SQL connection; `secret` is stored only when present.
@@ -734,6 +752,7 @@ pub fn run() {
         list_sql_connections,
         save_sql_connection,
         delete_sql_connection,
+        list_relay_agents,
         list_pbs_servers,
         save_pbs_server,
         delete_pbs_server,
