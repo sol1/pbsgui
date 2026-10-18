@@ -3,10 +3,10 @@ name: Release
 # Build the Windows installer and publish a GitHub Release when a version tag is
 # pushed (for example `v0.0.1`). The tag drives the version stamped into the app.
 #
-# Code signing is OPTIONAL and self-enabling: when the DigiCert KeyLocker secrets
-# are configured the inner engine exe, the app exe, and the installer are signed;
-# otherwise the build proceeds unsigned, so releases keep working before the
-# certificate is provisioned. To enable signing, set:
+# Code signing uses DigiCert KeyLocker. The inner engine exe, the app exe, and the
+# installer are signed. Releases from sol1/pbsgui must be signed, so a missing
+# secret fails the build instead of publishing unsigned installers. Forks without
+# the secrets still build, unsigned. Signing needs:
 #   secrets: SM_API_KEY, SM_CLIENT_CERT_FILE_B64, SM_CLIENT_CERT_PASSWORD
 #   vars:    SM_HOST, SM_CODE_SIGNING_CERT_SHA1_HASH
 on:
@@ -45,6 +45,9 @@ jobs:
           if [ -n "$SM_API_KEY" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
             echo "Code signing: ENABLED (DigiCert secrets present)."
+          elif [ "$GITHUB_REPOSITORY" = "sol1/pbsgui" ]; then
+            echo "::error::DigiCert secrets are not set; refusing to publish an unsigned release."
+            exit 1
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "Code signing: disabled (DigiCert secrets not set); building unsigned."
@@ -71,8 +74,9 @@ jobs:
           "$ssm" | Out-File $env:GITHUB_PATH -Append -Encoding utf8
           # Validate the credentials up front: a clear failure here beats a cryptic
           # signtool error later. Diagnostic only, so a healthcheck quirk cannot
-          # block an otherwise-good key.
-          & "$ssm\smctl.exe" healthcheck
+          # block an otherwise-good key. smctl prints part of the API key and the
+          # client cert password, which GitHub does not mask, so drop those lines.
+          & "$ssm\smctl.exe" healthcheck 2>&1 | Where-Object { $_ -notmatch 'API key:|password' } | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { Write-Warning "smctl healthcheck reported a problem ($LASTEXITCODE); continuing to certsync." }
           # Sync the signing cert into the Windows store and register the KSP, so
           # signtool /sha1 <thumbprint> can sign through the cloud-held key.
