@@ -28,6 +28,9 @@ CI on Windows and exercised manually.
   service reachability and connects to the service rather than spawning it.
 - **Tray and window behavior.** A system-tray icon with Show/Quit; closing or
   minimizing the window hides it to the tray while the service keeps running.
+- **Code signing.** Release builds sign the engine, the app, and both installers
+  with Sol1's DigiCert certificate (cloud-held key, signed in CI), and the release
+  fails if a published installer is not signed. Signed from v0.3.0-rc.5.
 - **Build versioning.** Builds are stamped with a version and short commit id,
   shown in the GUI and printed by the engine.
 - **SQL Server discovery.** Enumerate local instances from the registry (instance
@@ -123,7 +126,6 @@ CI on Windows and exercised manually.
   per-job routing, a durable retry queue, and daily digests (email and a
   Slack-compatible webhook already work).
 - **VSS-based filesystem backup** for consistent snapshots of open files.
-- **Code signing** of the installer and binaries (currently deferred).
 
 ## Known limitations and notes
 

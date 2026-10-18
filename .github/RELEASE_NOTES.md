@@ -37,7 +37,6 @@ Please try this build in a non-production environment and report what you find.
   list) under a new name or into a different instance is not supported over the
   relay; restore it under its original name, or run the restore from pbsgui installed
   directly on the SQL host.
-- The installer is unsigned, so Windows SmartScreen warns on first run.
 
 Installers are attached below. See the
 [README](https://github.com/sol1/pbsgui#install) for which one to choose, plus

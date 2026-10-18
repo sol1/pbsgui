@@ -53,8 +53,9 @@ Do this once per instance.
    - `pbsgui_<ver>_x64-setup.exe` bundles WebView2 and installs offline. Use it on
      air-gapped hosts.
    - `pbsgui_<ver>_x64-setup-online.exe` downloads WebView2 at install if missing.
-2. Run it. The installer is unsigned, so SmartScreen may warn. Choose
-   **More info**, then **Run anyway**.
+2. Run it. The installer and binaries are code-signed by Sol1 Pty Ltd (from
+   v0.3.0-rc.5). Releases before that are unsigned, so SmartScreen may warn on
+   them. Choose **More info**, then **Run anyway**.
 3. The installer registers and starts the `pbsgui-engine` service (LocalSystem) and
    opens the app.
 

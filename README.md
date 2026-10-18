@@ -72,7 +72,8 @@ pick one:
   install time if it is missing. Use this when the machine has internet.
 
 1. Download and run one of the installers.
-2. The installer is unsigned, so Windows SmartScreen may warn: choose
+2. The installer and binaries are code-signed by Sol1 Pty Ltd (from v0.3.0-rc.5).
+   Older releases are unsigned, so SmartScreen may warn on those: choose
    **More info -> Run anyway**.
 3. The installer registers and starts the `pbsgui-engine` background service and
    opens the app. Add a PBS server and (optionally) a SQL Server connection, then
