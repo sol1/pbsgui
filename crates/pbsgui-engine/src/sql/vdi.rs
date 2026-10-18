@@ -33,11 +33,13 @@ use crate::sql::probe::SqlClient;
 /// The instance name inside a `HOST` / `HOST\INSTANCE` connection target, for
 /// the VDI device set (`CreateEx` needs the instance name; `None` = default
 /// instance). The BACKUP/RESTORE statement runs over TDS and does not need it.
+/// `HOST\MSSQLSERVER` is the default instance spelled out, which VDI wants as
+/// NULL, so it maps to `None` too.
 pub(crate) fn instance_of(server: &str) -> Option<&str> {
     server
         .split_once('\\')
-        .map(|(_, instance)| instance)
-        .filter(|i| !i.is_empty())
+        .map(|(_, instance)| instance.trim())
+        .filter(|i| !i.is_empty() && !i.eq_ignore_ascii_case("MSSQLSERVER"))
 }
 
 /// Build the `BACKUP` statement (see [`backup_statement`]) and run it over an
@@ -1535,9 +1537,19 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
-    use super::{backup_statement, ChannelReader};
+    use super::{backup_statement, instance_of, ChannelReader};
     use pbsgui_ipc::SqlBackupType;
     use std::io::Read;
+
+    #[test]
+    fn instance_of_maps_default_instance_to_none() {
+        assert_eq!(instance_of("sqlhost"), None);
+        assert_eq!(instance_of("sqlhost\\"), None);
+        assert_eq!(instance_of("sqlhost\\MSSQLSERVER"), None);
+        assert_eq!(instance_of("sqlhost\\mssqlserver"), None);
+        assert_eq!(instance_of("sqlhost\\SQLEXPRESS"), Some("SQLEXPRESS"));
+        assert_eq!(instance_of(".\\Prod01"), Some("Prod01"));
+    }
 
     #[test]
     fn backup_statement_full_log_and_escaping() {
