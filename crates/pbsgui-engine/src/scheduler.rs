@@ -83,7 +83,7 @@ async fn run_due(store: &Arc<JobStore>, job: Job, kind: SqlRun) {
     }
 
     let status = match handle.await {
-        Ok(Ok(_)) => "ok".to_string(),
+        Ok(Ok(report)) => report.status(),
         Ok(Err(e)) => e.to_string(),
         Err(e) => format!("task failed: {e}"),
     };

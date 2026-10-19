@@ -90,7 +90,8 @@ pub struct JobOutcome<'a> {
     /// Databases backed up (empty for a file job).
     pub databases: &'a [String],
     pub success: bool,
-    /// "ok", "no-change", or "error".
+    /// "ok", "warning" (succeeded, but something was skipped), "no-change", or
+    /// "error".
     pub status: &'a str,
     pub message: &'a str,
     pub stats: Option<&'a BackupStats>,
@@ -199,6 +200,7 @@ SQL Server is reachable."
 fn status_badge(o: &JobOutcome<'_>) -> (&'static str, &'static str) {
     match o.status {
         "ok" => ("\u{2705}", "OK"),                       // green tick
+        "warning" => ("\u{26a0}\u{fe0f}", "WARNINGS"),    // warning
         "no-change" => ("\u{26a0}\u{fe0f}", "NO CHANGE"), // warning
         "error" => ("\u{274c}", "FAILED"),                // cross
         "stalled" => ("\u{26a0}\u{fe0f}", "STALLED"),     // warning

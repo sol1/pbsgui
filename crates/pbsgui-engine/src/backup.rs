@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use pbs_client::session::{backup_dynamic_file_with_progress, BackupStats, SessionParams};
+use pbs_client::session::{backup_dynamic_reader, BackupStats, SessionParams};
 use pbs_client::{BackupProgress, CryptConfig, Repository};
 use pbsgui_ipc::{
     FileInfo, Job, JobDestination, JobSource, Reply, RunningJob, SqlAuth, SqlBackupType,
@@ -232,8 +232,38 @@ pub fn cancel_job(job_id: &str) -> bool {
     }
 }
 
+/// How a run that did not fail ended: its summary, and whether it finished
+/// with warnings (skipped files, no VSS snapshot) that deserve a look.
+pub struct RunReport {
+    pub message: String,
+    pub warning: bool,
+}
+
+impl RunReport {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            warning: false,
+        }
+    }
+
+    /// The job's recorded status: `ok`, or `warning: <summary>` (the GUI shows
+    /// the summary for a warning, and any other text as a failure).
+    pub fn status(&self) -> String {
+        if self.warning {
+            format!("warning: {}", self.message)
+        } else {
+            "ok".to_string()
+        }
+    }
+}
+
+/// A finished backup: its summary, the stats if anything was written, and
+/// whether it had warnings.
+type Outcome = (String, Option<BackupStats>, bool);
+
 /// Run a job (manual trigger: SQL jobs take a full). See [`run_job_kind`].
-pub async fn run_job(job: &Job, events: Sender<Reply>) -> anyhow::Result<String> {
+pub async fn run_job(job: &Job, events: Sender<Reply>) -> anyhow::Result<RunReport> {
     run_job_kind(job, SqlRun::Full, events).await
 }
 
@@ -243,7 +273,7 @@ pub async fn run_job_kind(
     job: &Job,
     sql_run: SqlRun,
     events: Sender<Reply>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<RunReport> {
     // One run per job at a time: skip (don't fail) if a run is already in flight,
     // so a manual trigger during a scheduled run cannot collide on the PBS group.
     // Held for the whole run; released when `_guard` drops.
@@ -255,7 +285,7 @@ pub async fn run_job_kind(
                     line: "a run for this job is already in progress; skipping".to_string(),
                 })
                 .await;
-            return Ok("skipped: a run is already in progress".to_string());
+            return Ok(RunReport::plain("skipped: a run is already in progress"));
         }
     };
     let started = std::time::Instant::now();
@@ -295,7 +325,7 @@ pub async fn run_job_kind(
             started.elapsed().as_secs_f64(),
             None,
         );
-        return Ok("cancelled".to_string());
+        return Ok(RunReport::plain("cancelled"));
     }
 
     // A successful SQL backup anchors/advances the point-in-time chain timers, so
@@ -318,26 +348,26 @@ pub async fn run_job_kind(
     // Feed the metrics exporter: a backup with stats is a success, a stats-less Ok
     // is a skip (no change, or not the preferred replica), an Err is a failure.
     let result = match &outcome {
-        Ok((_, Some(_))) => metrics::RunResult::Success,
-        Ok((_, None)) => metrics::RunResult::Skipped,
+        Ok((_, Some(_), _)) => metrics::RunResult::Success,
+        Ok((_, None, _)) => metrics::RunResult::Skipped,
         Err(_) => metrics::RunResult::Failure,
     };
-    let stats = outcome.as_ref().ok().and_then(|(_, s)| s.as_ref());
+    let stats = outcome.as_ref().ok().and_then(|(_, s, _)| s.as_ref());
     metrics::record_run(&job.id, result, started.elapsed().as_secs_f64(), stats);
 
-    outcome.map(|(message, _)| message)
+    outcome.map(|(message, _, warning)| RunReport { message, warning })
 }
 
 /// Fire notifications for a finished job (best-effort; never affects the result).
-async fn notify_outcome(
-    job: &Job,
-    sql_run: SqlRun,
-    outcome: &anyhow::Result<(String, Option<BackupStats>)>,
-) {
+async fn notify_outcome(job: &Job, sql_run: SqlRun, outcome: &anyhow::Result<Outcome>) {
     let (success, status, message, stats) = match outcome {
-        Ok((message, stats)) => (
+        Ok((message, stats, warning)) => (
             true,
-            if stats.is_some() { "ok" } else { "no-change" },
+            match (stats.is_some(), warning) {
+                (_, true) => "warning",
+                (true, false) => "ok",
+                (false, false) => "no-change",
+            },
             message.clone(),
             stats.as_ref(),
         ),
@@ -371,7 +401,7 @@ async fn run_inner(
     sql_run: SqlRun,
     events: &Sender<Reply>,
     cancel: &CancellationToken,
-) -> anyhow::Result<(String, Option<BackupStats>)> {
+) -> anyhow::Result<Outcome> {
     // Change detection (files source only): skip if nothing changed.
     let fingerprint = match &job.source {
         JobSource::Files {
@@ -388,11 +418,15 @@ async fn run_inner(
                     line: "no source changes since last run; skipping backup".to_string(),
                 })
                 .await;
-            return Ok(("no changes since last run; skipped".to_string(), None));
+            return Ok((
+                "no changes since last run; skipped".to_string(),
+                None,
+                false,
+            ));
         }
     }
 
-    let (summary, stats) = do_backup(job, sql_run, events, cancel).await?;
+    let (summary, stats, warning) = do_backup(job, sql_run, events, cancel).await?;
 
     // Record the fingerprint only after a successful backup.
     if let Some(fp) = &fingerprint {
@@ -404,7 +438,7 @@ async fn run_inner(
             line: summary.clone(),
         })
         .await;
-    Ok((summary, stats))
+    Ok((summary, stats, warning))
 }
 
 async fn do_backup(
@@ -412,7 +446,7 @@ async fn do_backup(
     sql_run: SqlRun,
     events: &Sender<Reply>,
     cancel: &CancellationToken,
-) -> anyhow::Result<(String, Option<BackupStats>)> {
+) -> anyhow::Result<Outcome> {
     match (&job.source, &job.destination) {
         (
             JobSource::Files {
@@ -424,17 +458,24 @@ async fn do_backup(
             },
         ) => {
             let crypt = enckey::for_job(job)?;
-            let stats =
+            let (stats, report) =
                 backup_files_to_pbs(job, sources, excludes, server_id, backup_id, crypt, events)
                     .await?;
-            let summary = format!(
+            let mut summary = format!(
                 "backed up {}: {} chunks, {} uploaded, {} reused",
                 human_bytes(stats.bytes),
                 stats.chunks,
                 stats.uploaded,
                 stats.reused
             );
-            Ok((summary, Some(stats)))
+            if !report.skipped.is_empty() {
+                let _ = write!(summary, "; {}", skipped_summary(&report.skipped));
+            }
+            if !report.warnings.is_empty() {
+                let _ = write!(summary, "; {} warning(s)", report.warnings.len());
+            }
+            let warn = !report.skipped.is_empty() || !report.warnings.is_empty();
+            Ok((summary, Some(stats), warn))
         }
         (
             JobSource::Sql {
@@ -463,6 +504,7 @@ async fn do_backup(
                 cancel,
             )
             .await
+            .map(|(m, st)| (m, st, false))
         }
         (
             JobSource::Sql {
@@ -471,12 +513,18 @@ async fn do_backup(
                 ..
             },
             JobDestination::Folder { path },
-        ) => backup_sql_to_folder(connection_id, databases, path, events).await,
+        ) => backup_sql_to_folder(connection_id, databases, path, events)
+            .await
+            .map(|(m, st)| (m, st, false)),
         (JobSource::Files { .. }, JobDestination::Folder { .. }) => {
             anyhow::bail!("backing up files to a folder is not supported yet")
         }
     }
 }
+
+/// The most skipped files listed one by one in a run's log; the rest are
+/// counted.
+const MAX_SKIPPED_LOGGED: usize = 100;
 
 #[allow(clippy::too_many_arguments)]
 async fn backup_files_to_pbs(
@@ -487,7 +535,7 @@ async fn backup_files_to_pbs(
     backup_id: &str,
     crypt: Option<CryptConfig>,
     events: &Sender<Reply>,
-) -> anyhow::Result<BackupStats> {
+) -> anyhow::Result<(BackupStats, archive::ArchiveReport)> {
     if sources.is_empty() {
         anyhow::bail!("job has no sources");
     }
@@ -496,55 +544,222 @@ async fn backup_files_to_pbs(
             line: format!("archiving {} source(s)", sources.len()),
         })
         .await;
-    // Building the tar can take a while for large sources; reflect that in the
-    // status instead of leaving it on the generic "starting...".
+    report_phase(
+        events,
+        &job.id,
+        format!("scanning {} source(s)...", sources.len()),
+    )
+    .await;
+    // A size estimate for progress; the archive itself streams to PBS, so its
+    // final size is not known up front.
+    let (scan_sources, scan_excludes) = (sources.to_vec(), excludes.to_vec());
+    let total =
+        tokio::task::spawn_blocking(move || archive::estimate_size(&scan_sources, &scan_excludes))
+            .await
+            .unwrap_or(0);
+
+    let params = pbs_session_params(server_id, backup_id, "host", unix_now())?;
+    let (reader, catalog_rx, archiver) = start_archiver(sources, excludes, events.clone());
     report_phase(
         events,
         &job.id,
         format!("archiving {} source(s)...", sources.len()),
     )
     .await;
-
-    // Archive the sources to a temp tar (blocking work off the async runtime).
-    let tmp = std::env::temp_dir().join(format!("pbsgui-{}-{}.tar", job.id, unix_now()));
-    let sources = sources.to_vec();
-    let excludes = excludes.to_vec();
-    let tmp_path = tmp.clone();
-    let entries =
-        tokio::task::spawn_blocking(move || archive::build_tar(&sources, &excludes, &tmp_path))
-            .await
-            .map_err(|e| anyhow::anyhow!("archive task failed: {e}"))??;
-
-    let catalog_files: Vec<FileInfo> = entries
-        .into_iter()
-        .map(|(path, size)| FileInfo { path, size })
-        .collect();
-    let catalog = serde_json::to_vec(&catalog_files)
-        .map(|json| ("catalog.json.blob".to_string(), json))
-        .ok();
-
-    let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
-    let _ = events
-        .send(Reply::Log {
-            line: format!("archive is {size} bytes; uploading to PBS (deduplicating)"),
-        })
-        .await;
-
-    let params = pbs_session_params(server_id, backup_id, "host", unix_now())?;
-    let result = backup_dynamic_file_with_progress(
+    let upload = backup_dynamic_reader(
         &params,
         ARCHIVE_NAME,
-        &tmp,
         true,
         job.compress,
-        catalog,
+        reader,
+        total,
+        Some(catalog_rx),
         crypt,
         progress_reporter(events.clone(), job.id.clone()),
     )
     .await;
+    let archived = archiver
+        .await
+        .map_err(|e| anyhow::anyhow!("archive task failed: {e}"))?;
 
-    let _ = std::fs::remove_file(&tmp);
-    Ok(result?)
+    match (archived, upload) {
+        (Ok(report), Ok(stats)) => {
+            log_report(&report, events);
+            Ok((stats, report))
+        }
+        // The upload stopped first (a PBS error), so the archiver's write
+        // failed with a broken pipe: the upload error is the cause.
+        (Err(a), Err(u)) if is_broken_pipe(&a) => Err(u.into()),
+        (Err(a), _) => Err(a.context("archiving the sources failed")),
+        (Ok(_), Err(u)) => Err(u.into()),
+    }
+}
+
+/// The archive's join handle: the report, or why archiving failed.
+type Archiver = tokio::task::JoinHandle<anyhow::Result<archive::ArchiveReport>>;
+
+/// Start archiving `sources` on a blocking thread (inside a VSS snapshot on
+/// Windows), streaming the tar through a bounded channel: no temp file. The
+/// archiver sends the catalog, then its verdict; the returned reader turns a
+/// failed or missing verdict into an error so a partial archive never commits.
+fn start_archiver(
+    sources: &[String],
+    excludes: &[String],
+    events: Sender<Reply>,
+) -> (
+    crate::sql::vdi::ChannelReader,
+    tokio::sync::oneshot::Receiver<(String, Vec<u8>)>,
+    Archiver,
+) {
+    let (data_tx, data_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<bool>();
+    let (catalog_tx, catalog_rx) = tokio::sync::oneshot::channel::<(String, Vec<u8>)>();
+    let (sources, excludes) = (sources.to_vec(), excludes.to_vec());
+    let archiver = tokio::task::spawn_blocking(move || {
+        let log = |line: String| {
+            let _ = events.blocking_send(Reply::Log { line });
+        };
+        let writer = archive::ChannelWriter::new(data_tx);
+        let result = archive_sources(&sources, &excludes, writer, &log);
+        if let Ok(report) = &result {
+            let catalog: Vec<FileInfo> = report
+                .entries
+                .iter()
+                .map(|(path, size)| FileInfo {
+                    path: path.clone(),
+                    size: *size,
+                })
+                .collect();
+            if let Ok(json) = serde_json::to_vec(&catalog) {
+                let _ = catalog_tx.send(("catalog.json.blob".to_string(), json));
+            }
+        }
+        let _ = done_tx.send(result.is_ok());
+        result
+    });
+    let reader = crate::sql::vdi::ChannelReader::with_failure(
+        data_rx,
+        done_rx,
+        "building the file archive failed; refusing to upload a partial archive",
+    );
+    (reader, catalog_rx, archiver)
+}
+
+/// The most skipped files named in a run's summary (its status and
+/// notifications); the full list is in the run log.
+const MAX_SKIPPED_NAMED: usize = 3;
+
+/// "skipped N file(s) that could not be read: PATH (REASON); ...", naming the
+/// first few so a scheduled run's status says which files without the log.
+fn skipped_summary(skipped: &[archive::Skipped]) -> String {
+    let named: Vec<String> = skipped
+        .iter()
+        .take(MAX_SKIPPED_NAMED)
+        .map(|s| format!("{} ({})", s.path, s.reason))
+        .collect();
+    let more = skipped.len().saturating_sub(MAX_SKIPPED_NAMED);
+    let mut out = format!(
+        "skipped {} file(s) that could not be read: {}",
+        skipped.len(),
+        named.join("; ")
+    );
+    if more > 0 {
+        let _ = write!(out, "; and {more} more (see the run log)");
+    }
+    out
+}
+
+/// Log a finished archive's warnings and skipped files to the run.
+fn log_report(report: &archive::ArchiveReport, events: &Sender<Reply>) {
+    for w in &report.warnings {
+        let _ = events.try_send(Reply::Log {
+            line: format!("warning: {w}"),
+        });
+    }
+    for s in report.skipped.iter().take(MAX_SKIPPED_LOGGED) {
+        let _ = events.try_send(Reply::Log {
+            line: format!("skipped {}: {}", s.path, s.reason),
+        });
+    }
+    if report.skipped.len() > MAX_SKIPPED_LOGGED {
+        let _ = events.try_send(Reply::Log {
+            line: format!(
+                "... and {} more skipped",
+                report.skipped.len() - MAX_SKIPPED_LOGGED
+            ),
+        });
+    }
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
+/// Archive the sources to `out`, reading local volumes from a VSS snapshot so
+/// open and locked files are captured consistently. If the snapshot cannot be
+/// made, fall back to live reads (locked files are then skipped) and say so.
+#[cfg(windows)]
+fn archive_sources(
+    sources: &[String],
+    excludes: &[String],
+    out: archive::ChannelWriter,
+    log: &dyn Fn(String),
+) -> anyhow::Result<archive::ArchiveReport> {
+    use std::path::Path;
+    pbsgui_vss::with_com(|| {
+        // Network shares cannot be snapshotted here; they are read live.
+        let local: Vec<&Path> = sources
+            .iter()
+            .map(Path::new)
+            .filter(|p| {
+                let s = p.to_string_lossy();
+                !s.starts_with(r"\\") || s.starts_with(r"\\?\")
+            })
+            .collect();
+        let mut warnings = Vec::new();
+        let snapshot = if local.is_empty() {
+            None
+        } else {
+            log("creating a VSS snapshot of the source volumes".to_string());
+            match pbsgui_vss::VolumeSnapshot::create(&local) {
+                Ok(snap) => {
+                    warnings.extend(snap.warnings.iter().cloned());
+                    Some(snap)
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "could not create a VSS snapshot, reading files live, so locked files \
+                         are skipped: {e:#}"
+                    ));
+                    None
+                }
+            }
+        };
+        let map = |p: &Path| snapshot.as_ref().and_then(|s| s.map(p));
+        let result = archive::write_tar(sources, excludes, &map, out);
+        if let Some(snap) = snapshot {
+            if let Err(e) = snap.complete() {
+                warnings.push(format!("finishing the VSS snapshot: {e:#}"));
+            }
+        }
+        result.map(|mut report| {
+            report.warnings.splice(0..0, warnings);
+            report
+        })
+    })
+}
+
+#[cfg(not(windows))]
+fn archive_sources(
+    sources: &[String],
+    excludes: &[String],
+    out: archive::ChannelWriter,
+    _log: &dyn Fn(String),
+) -> anyhow::Result<archive::ArchiveReport> {
+    archive::write_tar(sources, excludes, &|_| None, out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1024,6 +1239,64 @@ mod tests {
             encrypted: false,
             compress: true,
         }
+    }
+
+    #[test]
+    fn skipped_summary_names_the_first_few() {
+        let sk = |p: &str| crate::archive::Skipped {
+            path: p.into(),
+            reason: "in use".into(),
+        };
+        assert_eq!(
+            super::skipped_summary(&[sk("a")]),
+            "skipped 1 file(s) that could not be read: a (in use)"
+        );
+        let many: Vec<_> = ["a", "b", "c", "d", "e"].into_iter().map(sk).collect();
+        assert_eq!(
+            super::skipped_summary(&many),
+            "skipped 5 file(s) that could not be read: a (in use); b (in use); c (in use); \
+             and 2 more (see the run log)"
+        );
+    }
+
+    #[tokio::test]
+    async fn archiver_streams_the_tar_then_the_catalog() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("pbsgui-archiver-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("data");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), vec![7u8; 3 << 20]).unwrap();
+        std::fs::write(src.join("b.txt"), b"bee").unwrap();
+        let sources = vec![src.to_string_lossy().into_owned()];
+        let missing = dir.join("missing").to_string_lossy().into_owned();
+        let sources = [sources, vec![missing]].concat();
+
+        let (events, mut rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let (mut reader, catalog_rx, archiver) = super::start_archiver(&sources, &[], events);
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            reader.read_to_end(&mut out).map(|_| out)
+        })
+        .await
+        .unwrap()
+        .expect("a clean end of stream");
+        let report = archiver.await.unwrap().unwrap();
+
+        let mut names: Vec<String> = tar::Archive::new(&bytes[..])
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["data/a.txt", "data/b.txt"]);
+        assert_eq!(report.skipped.len(), 1, "the missing source is reported");
+        let (name, json) = catalog_rx.await.expect("catalog sent");
+        assert_eq!(name, "catalog.json.blob");
+        let catalog: Vec<pbsgui_ipc::FileInfo> = serde_json::from_slice(&json).unwrap();
+        assert_eq!(catalog.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

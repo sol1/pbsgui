@@ -1794,16 +1794,17 @@ async fn run_job(store: Arc<JobStore>, id: String, mut responder: Responder) {
         }
     }
 
-    let (success, message) = match run.await {
-        Ok(Ok(summary)) => (true, summary),
+    let (success, message, status) = match run.await {
+        Ok(Ok(report)) => (true, report.message.clone(), report.status()),
         // `{:#}` includes the full error chain (the SQL Server message lives there).
-        Ok(Err(e)) => (false, format!("{e:#}")),
-        Err(e) => (false, format!("job task failed: {e}")),
-    };
-    let status = if success {
-        "ok".to_string()
-    } else {
-        message.clone()
+        Ok(Err(e)) => {
+            let m = format!("{e:#}");
+            (false, m.clone(), m)
+        }
+        Err(e) => {
+            let m = format!("job task failed: {e}");
+            (false, m.clone(), m)
+        }
     };
     let _ = store.record_run(&id, unix_now(), status);
     // Refresh the metrics textfile (no-op unless textfile mode is on).

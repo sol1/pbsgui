@@ -2653,6 +2653,7 @@ dependencies = [
  "pbs-client",
  "pbsgui-core",
  "pbsgui-ipc",
+ "pbsgui-vss",
  "rcgen",
  "reqwest 0.12.28",
  "serde",

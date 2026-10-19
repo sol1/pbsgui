@@ -143,6 +143,11 @@ pub(crate) async fn run_engine(store: Arc<JobStore>, socket: &str) -> anyhow::Re
     let scheduler_store = store.clone();
     tokio::spawn(async move { scheduler::run(scheduler_store).await });
 
+    // VSS writers call back into the requester over COM, which needs the
+    // process-wide security level set before any other COM use (SQL VDI).
+    #[cfg(windows)]
+    pbsgui_vss::init_process_security();
+
     // Start the metrics exporter if it is configured (off by default).
     metrics::apply(store.clone());
 

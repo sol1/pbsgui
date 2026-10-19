@@ -225,16 +225,33 @@ pub(crate) struct ChannelReader {
     /// The `BACKUP` verdict, cached once the data channel closes so repeated reads
     /// past the end stay consistent.
     verdict: Option<bool>,
+    /// The error text for a stream that ended without a success verdict.
+    failure: &'static str,
 }
 
 impl ChannelReader {
     pub(crate) fn new(rx: Receiver<Vec<u8>>, done: Receiver<bool>) -> Self {
+        Self::with_failure(
+            rx,
+            done,
+            "the SQL Server BACKUP did not complete; refusing to upload a truncated backup",
+        )
+    }
+
+    /// Like [`Self::new`], for another producer (the file archiver), with the
+    /// error text reported when its stream ends without a success verdict.
+    pub(crate) fn with_failure(
+        rx: Receiver<Vec<u8>>,
+        done: Receiver<bool>,
+        failure: &'static str,
+    ) -> Self {
         Self {
             rx,
             done,
             buf: Vec::new(),
             pos: 0,
             verdict: None,
+            failure,
         }
     }
 }
@@ -267,8 +284,7 @@ impl Read for ChannelReader {
                     }
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
-                        "the SQL Server BACKUP did not complete; refusing to upload a \
-                         truncated backup",
+                        self.failure,
                     ));
                 }
             }
