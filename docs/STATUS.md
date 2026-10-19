@@ -13,7 +13,8 @@ CI on Windows and exercised manually.
   have been validated against a live PBS, including a deduplicated re-run that
   reused all chunks.
 - **File and folder backup jobs.** Create, edit, delete, and run jobs; manual,
-  interval, and daily schedules; glob excludes; deterministic archiving for
+  interval, daily, weekly (any set of days), and monthly schedules, which catch up
+  a run missed while the engine was down; glob excludes; deterministic archiving for
   reliable dedup. Local sources are read from a VSS snapshot (a copy backup, so
   writers such as SQL Server do not record a backup), so open and locked files
   are captured. The archive streams straight to PBS with no temp file. Files that

@@ -44,6 +44,8 @@ Record build + date, and pass/fail per row.
 - [ ] A file the service cannot read, or a OneDrive cloud-only file: the run finishes with
       **warnings**, the job card names the file, and the rest is backed up.
 - [ ] No temp archive appears in `C:\Windows\Temp` during a large file backup.
+- [ ] Weekly schedule on today's weekday a few minutes ahead: it runs at that time, not
+      before, and the job card shows the days (for example "weekdays 22:00").
 - [ ] A SQL Server data folder in a file job: msdb records the VSS backup as copy-only
       (`is_copy_only = 1` in `msdb.dbo.backupset`), so the SQL job's chain is untouched.
 
