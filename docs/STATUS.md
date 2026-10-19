@@ -17,9 +17,9 @@ CI on Windows and exercised manually.
   reliable dedup. Local sources are read from a VSS snapshot (a copy backup, so
   writers such as SQL Server do not record a backup), so open and locked files
   are captured. The archive streams straight to PBS with no temp file. Files that
-  cannot be read (permission denied, OneDrive cloud-only placeholders, sources on
-  volumes VSS cannot snapshot that are locked) are skipped; the run then finishes
-  with warnings that name the skipped files.
+  cannot be read (permission denied, OneDrive cloud-only placeholders, or locked
+  files on a volume VSS cannot snapshot) are skipped; the run then finishes with
+  warnings that name the skipped files.
 - **Secure settings.** Job configuration is stored as JSON in a config directory
   restricted (by ACL) to SYSTEM and administrators; the stores are tamper-evident
   (HMAC-signed with a key in the Windows Credential Manager). The PBS API token
