@@ -171,7 +171,7 @@ async function loadJobs() {
   renderJobsSummary(jobs);
   for (const job of jobs) {
     const cls = jobStatusClass(job);
-    const chip = cls === "ok" ? "ok" : cls === "fail" ? "failed" : "never run";
+    const chip = { ok: "ok", warn: "warnings", fail: "failed" }[cls] || "never run";
     const card = document.createElement("div");
     card.className = "job-card status-" + cls;
     const failed = cls === "fail";
@@ -186,7 +186,13 @@ async function loadJobs() {
       "</div>" +
       `<div class="job-meta">${escapeHtml(sourceSummary(job))} <span class="arrow">&rarr;</span> ` +
       `${escapeHtml(destSummary(job))} <span class="dot-sep"></span> last backup ${escapeHtml(relativeTime(job.last_run))}</div>` +
-      (failed ? `<div class="job-error">${escapeHtml(job.last_status)}</div>` : "") +
+      (failed
+        ? `<div class="job-error" title="${escapeHtml(job.last_status)}">${escapeHtml(job.last_status)}</div>`
+        : "") +
+      (cls === "warn"
+        ? `<div class="job-warning" title="${escapeHtml(job.last_status.slice(WARNING_PREFIX.length))}">` +
+          `${escapeHtml(job.last_status.slice(WARNING_PREFIX.length))}</div>`
+        : "") +
       '<div class="job-running hidden"><div class="mini-track">' +
       '<div class="mini-bar"></div></div><span class="mini-msg"></span></div>' +
       "</div>" +
@@ -219,14 +225,22 @@ async function loadJobs() {
   updateCardProgress();
 }
 
-// Healthy / failed / never-run, from the last recorded outcome ("ok" or an error).
+// The engine records a run that succeeded with skipped files or other
+// warnings as "warning: <summary>".
+const WARNING_PREFIX = "warning: ";
+
+// Healthy / warnings / failed / never-run, from the last recorded outcome
+// ("ok", "warning: ...", or an error).
 function jobStatusClass(job) {
   if (!job.last_run) return "never";
-  return job.last_status === "ok" ? "ok" : "fail";
+  if (job.last_status === "ok") return "ok";
+  if (job.last_status?.startsWith(WARNING_PREFIX)) return "warn";
+  return "fail";
 }
 
 function renderJobsSummary(jobs) {
   const ok = jobs.filter((j) => jobStatusClass(j) === "ok").length;
+  const warn = jobs.filter((j) => jobStatusClass(j) === "warn").length;
   const fail = jobs.filter((j) => jobStatusClass(j) === "fail").length;
   const never = jobs.filter((j) => jobStatusClass(j) === "never").length;
   const enc = jobs.filter((j) => j.encrypted).length;
@@ -235,6 +249,7 @@ function renderJobsSummary(jobs) {
   el("jobs-summary").innerHTML =
     tile(jobs.length, "jobs", "all") +
     tile(ok, "healthy", "ok") +
+    tile(warn, "warnings", "warn") +
     tile(fail, "failed", "fail") +
     tile(never, "never run", "idle") +
     tile(enc, "encrypted", "enc");
