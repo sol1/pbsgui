@@ -11,6 +11,9 @@ use crate::config::config_dir;
 pub struct JobStore {
     path: PathBuf,
     jobs: Mutex<Vec<Job>>,
+    /// Set when the file exists but could not be loaded: the store is then
+    /// read-only so the file survives for recovery.
+    load_error: Option<String>,
 }
 
 impl JobStore {
@@ -21,10 +24,25 @@ impl JobStore {
 
     /// Load the store from a specific path.
     pub fn with_path(path: PathBuf) -> Self {
-        let jobs = load_jobs(&path);
+        let (jobs, load_error) = crate::signed::load_list(&path);
         Self {
             path,
             jobs: Mutex::new(jobs),
+            load_error,
+        }
+    }
+
+    /// Why the store file could not be loaded, if it could not.
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    /// Fail if the store is read-only (its file could not be loaded). The
+    /// mutators check this first so a refused change never reaches memory.
+    fn ensure_writable(&self) -> anyhow::Result<()> {
+        match &self.load_error {
+            Some(e) => anyhow::bail!("{e}"),
+            None => Ok(()),
         }
     }
 
@@ -43,6 +61,7 @@ impl JobStore {
 
     /// Insert or replace a job (matched by id), then persist.
     pub fn save_job(&self, job: Job) -> anyhow::Result<()> {
+        self.ensure_writable()?;
         {
             let mut jobs = self.jobs.lock().unwrap();
             match jobs.iter_mut().find(|j| j.id == job.id) {
@@ -55,12 +74,14 @@ impl JobStore {
 
     /// Remove a job by id, then persist.
     pub fn delete(&self, id: &str) -> anyhow::Result<()> {
+        self.ensure_writable()?;
         self.jobs.lock().unwrap().retain(|j| j.id != id);
         self.persist()
     }
 
     /// Record the outcome of a run, then persist.
     pub fn record_run(&self, id: &str, time: i64, status: String) -> anyhow::Result<()> {
+        self.ensure_writable()?;
         {
             let mut jobs = self.jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
@@ -72,6 +93,7 @@ impl JobStore {
     }
 
     fn persist(&self) -> anyhow::Result<()> {
+        self.ensure_writable()?;
         // Hold the lock across the snapshot and the write so two concurrent
         // persists cannot reorder: without this a slower writer could land an
         // older state on disk after a newer one (a lost update). The mutators
@@ -79,23 +101,6 @@ impl JobStore {
         let jobs = self.jobs.lock().unwrap();
         let data = crate::signed::serialize(&*jobs)?;
         crate::signed::write_atomic(&self.path, &data)
-    }
-}
-
-/// Read and verify the job store. A missing file is an empty store; a present but
-/// unreadable or signature-failing file is refused (logged, started empty) rather
-/// than silently discarded, so corruption or tampering is visible.
-fn load_jobs(path: &std::path::Path) -> Vec<Job> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(_) => return Vec::new(),
-    };
-    match crate::signed::deserialize::<Vec<Job>>(&bytes) {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            tracing::error!("refusing to load jobs from {}: {e}", path.display());
-            Vec::new()
-        }
     }
 }
 
@@ -147,6 +152,29 @@ mod tests {
         store2.delete("a").unwrap();
         assert_eq!(store2.list().len(), 1);
         assert!(store2.get("a").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unverifiable_store_is_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("pbsgui-jobstore-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("jobs.json");
+        // A signed envelope whose MAC does not match, as seen by a service
+        // account with a different signing key.
+        let original = br#"{"mac":"AAAA","data":"[]"}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let store = JobStore::with_path(path.clone());
+        assert!(store.list().is_empty());
+        let err = store.load_error().expect("load error recorded").to_string();
+        assert!(err.contains("will not change this file"), "{err}");
+        assert!(store.save_job(job("a")).is_err());
+        assert!(store.record_run("a", 1, "ok".into()).is_err());
+        assert!(store.delete("a").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

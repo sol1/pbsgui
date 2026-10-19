@@ -11,9 +11,15 @@
 //! defense in depth and detects corruption or any write that bypasses the ACL.
 //! For a smooth upgrade, a legacy unsigned file (a bare JSON value, as written
 //! before signing existed) is still accepted and re-signed on the next write.
+//!
+//! A store that fails to load must never be overwritten: the usual cause is the
+//! service running as a different Windows account, whose credential store has no
+//! signing key (so a new one is made and the old files no longer verify), and the
+//! fix is to switch the account back. Callers keep such a store read-only and
+//! report [`refused_message`].
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use base64::engine::general_purpose::STANDARD;
@@ -29,6 +35,10 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Credential-store key for the per-machine store-signing secret.
 const HMAC_KEY_NAME: &str = "store-hmac";
+
+/// Set when this process found no signing key and generated one, which (with
+/// existing signed stores) points at a changed service account.
+static KEY_CREATED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Deserialize)]
 struct Envelope {
@@ -56,6 +66,7 @@ fn signing_key() -> anyhow::Result<Vec<u8>> {
         None => {
             let key = pbs_client::random_key()?;
             secrets::set(HMAC_KEY_NAME, &STANDARD.encode(key))?;
+            KEY_CREATED.store(true, Ordering::Relaxed);
             key.to_vec()
         }
     };
@@ -94,6 +105,61 @@ pub fn deserialize<T: DeserializeOwned>(bytes: &[u8]) -> anyhow::Result<T> {
         return Ok(serde_json::from_str(&env.data)?);
     }
     Ok(serde_json::from_slice(bytes)?)
+}
+
+/// Load a signed list store. A missing file is an empty store. A file that
+/// exists but cannot be read or verified yields an empty list plus the refusal
+/// message (logged here); the caller must then keep the store read-only so the
+/// file on disk survives for recovery.
+pub fn load_list<T: DeserializeOwned>(path: &Path) -> (Vec<T>, Option<String>) {
+    let result = match std::fs::read(path) {
+        Ok(bytes) => deserialize::<Vec<T>>(&bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), None),
+        Err(e) => Err(e.into()),
+    };
+    match result {
+        Ok(items) => (items, None),
+        Err(e) => {
+            let msg = refused_message(path, &e);
+            tracing::error!("{msg}");
+            (Vec::new(), Some(msg))
+        }
+    }
+}
+
+/// Explain why the store at `path` was refused at load (`err` from
+/// [`deserialize`] or the read), for the log and the GUI. Names the likely
+/// cause when this account had no signing key, and says how to recover.
+pub fn refused_message(path: &Path, err: &anyhow::Error) -> String {
+    let mut msg = format!(
+        "could not load {}: {err:#}. pbsgui will not change this file until the problem is fixed.",
+        path.display()
+    );
+    if KEY_CREATED.load(Ordering::Relaxed) {
+        msg.push_str(&format!(
+            " This Windows account ({}) had no pbsgui signing key, which usually means the \
+             pbsgui-engine service now runs as a different account from the one that saved \
+             the configuration. Set the service to log on as Local System again and restart \
+             it to get the configuration back.",
+            account_name()
+        ));
+    }
+    msg.push_str(
+        " To discard the file and start empty instead, move it out of the folder and restart \
+         the service.",
+    );
+    msg
+}
+
+/// The account this process runs as, best effort, for messages.
+fn account_name() -> String {
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    match std::env::var("USERDOMAIN") {
+        Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+        _ => user,
+    }
 }
 
 /// Write `bytes` to `path` atomically: a uniquely-named temp file in the same
@@ -162,6 +228,37 @@ mod tests {
         let legacy = serde_json::to_vec_pretty(&sample()).unwrap();
         let back: Vec<Item> = deserialize(&legacy).unwrap();
         assert_eq!(back, sample());
+    }
+
+    #[test]
+    fn load_list_refuses_unverifiable_files() {
+        let dir = std::env::temp_dir().join(format!("pbsgui-loadlist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Missing file: an empty store, no error.
+        let (items, err) = load_list::<Item>(&dir.join("missing.json"));
+        assert!(items.is_empty() && err.is_none());
+
+        // A good file loads.
+        let good = dir.join("good.json");
+        write_atomic(&good, &serialize(&sample()).unwrap()).unwrap();
+        let (items, err) = load_list::<Item>(&good);
+        assert_eq!(items, sample());
+        assert!(err.is_none());
+
+        // A bad signature is refused with a recovery hint.
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, br#"{"mac":"AAAA","data":"[]"}"#).unwrap();
+        let (items, err) = load_list::<Item>(&bad);
+        assert!(items.is_empty());
+        let err = err.expect("refused");
+        assert!(
+            err.contains("bad.json") && err.contains("move it out"),
+            "{err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

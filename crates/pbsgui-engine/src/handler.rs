@@ -35,7 +35,13 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
         }
 
         Request::ListJobs => {
-            let _ = responder.send(&Reply::Jobs { jobs: store.list() }).await;
+            let reply = match store.load_error() {
+                Some(e) => Reply::Error {
+                    message: e.to_string(),
+                },
+                None => Reply::Jobs { jobs: store.list() },
+            };
+            let _ = responder.send(&reply).await;
         }
 
         Request::SaveJob { job } => {
@@ -213,12 +219,21 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
         }
 
         Request::ListSqlConnections => {
-            let connections = connstore::sql_connections().list();
-            let _ = responder.send(&Reply::SqlConnections { connections }).await;
+            let store = connstore::sql_connections();
+            let reply = match store.load_error() {
+                Some(e) => Reply::Error {
+                    message: e.to_string(),
+                },
+                None => Reply::SqlConnections {
+                    connections: store.list(),
+                },
+            };
+            let _ = responder.send(&reply).await;
         }
         Request::SaveSqlConnection { connection, secret } => {
             let id = connection.id.clone();
             let result = (|| -> anyhow::Result<()> {
+                connstore::sql_connections().ensure_writable()?;
                 if let Some(secret) = secret {
                     secrets::set(&connstore::sql_secret_key(&id), &secret)?;
                 }
@@ -227,19 +242,29 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             let _ = responder.send(&saved_reply(id, result)).await;
         }
         Request::DeleteSqlConnection { id } => {
-            let _ = secrets::delete(&connstore::sql_secret_key(&id));
-            let _ = responder
-                .send(&deleted_reply(connstore::sql_connections().delete(&id)))
-                .await;
+            let result = connstore::sql_connections().delete(&id);
+            if result.is_ok() {
+                let _ = secrets::delete(&connstore::sql_secret_key(&id));
+            }
+            let _ = responder.send(&deleted_reply(result)).await;
         }
 
         Request::ListPbsServers => {
-            let servers = connstore::pbs_servers().list();
-            let _ = responder.send(&Reply::PbsServers { servers }).await;
+            let store = connstore::pbs_servers();
+            let reply = match store.load_error() {
+                Some(e) => Reply::Error {
+                    message: e.to_string(),
+                },
+                None => Reply::PbsServers {
+                    servers: store.list(),
+                },
+            };
+            let _ = responder.send(&reply).await;
         }
         Request::SavePbsServer { server, secret } => {
             let id = server.id.clone();
             let result = (|| -> anyhow::Result<()> {
+                connstore::pbs_servers().ensure_writable()?;
                 if let Some(secret) = secret {
                     secrets::set(&connstore::pbs_secret_key(&id), &secret)?;
                 }
@@ -248,10 +273,11 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             let _ = responder.send(&saved_reply(id, result)).await;
         }
         Request::DeletePbsServer { id } => {
-            let _ = secrets::delete(&connstore::pbs_secret_key(&id));
-            let _ = responder
-                .send(&deleted_reply(connstore::pbs_servers().delete(&id)))
-                .await;
+            let result = connstore::pbs_servers().delete(&id);
+            if result.is_ok() {
+                let _ = secrets::delete(&connstore::pbs_secret_key(&id));
+            }
+            let _ = responder.send(&deleted_reply(result)).await;
         }
         Request::TestPbsServer { server, secret } => {
             let (success, message) = match test_pbs_server(server, secret).await {

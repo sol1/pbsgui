@@ -1622,12 +1622,15 @@ async function saveSqlConnection(inst) {
 
 async function loadSqlConnections() {
   let conns = [];
+  const list = el("sql-conns");
   try {
     conns = await invoke("list_sql_connections");
   } catch (err) {
-    /* engine offline */
+    // Offline engine, or a store the engine refused to load (it then keeps
+    // the file read-only and explains how to recover).
+    list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+    return;
   }
-  const list = el("sql-conns");
   list.innerHTML = "";
   if (!conns.length) {
     list.innerHTML = '<div class="muted">No saved connections yet.</div>';
@@ -1805,12 +1808,15 @@ async function testPbsForm() {
 
 async function loadPbsServers() {
   let servers = [];
+  const list = el("pbs-list");
   try {
     servers = await invoke("list_pbs_servers");
   } catch (err) {
-    /* engine offline */
+    // Offline engine, or a store the engine refused to load (it then keeps
+    // the file read-only and explains how to recover).
+    list.innerHTML = `<div class="placeholder">error: ${escapeHtml(err)}</div>`;
+    return;
   }
-  const list = el("pbs-list");
   list.innerHTML = "";
   if (!servers.length) {
     list.innerHTML = '<div class="placeholder">No PBS servers yet. Add one above.</div>';

@@ -32,23 +32,32 @@ impl HasId for PbsServer {
 pub struct JsonStore<T> {
     path: PathBuf,
     items: Mutex<Vec<T>>,
+    /// Set when the file exists but could not be loaded: the store is then
+    /// read-only so the file survives for recovery.
+    load_error: Option<String>,
 }
 
 impl<T: Clone + Serialize + DeserializeOwned + HasId> JsonStore<T> {
     pub fn with_path(path: PathBuf) -> Self {
-        // A missing file is an empty store; a present but unreadable or
-        // signature-failing file is refused (logged, started empty) rather than
-        // silently discarded.
-        let items = match std::fs::read(&path) {
-            Ok(bytes) => crate::signed::deserialize::<Vec<T>>(&bytes).unwrap_or_else(|e| {
-                tracing::error!("refusing to load {}: {e}", path.display());
-                Vec::new()
-            }),
-            Err(_) => Vec::new(),
-        };
+        let (items, load_error) = crate::signed::load_list(&path);
         Self {
             path,
             items: Mutex::new(items),
+            load_error,
+        }
+    }
+
+    /// Why the store file could not be loaded, if it could not.
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    /// Fail if the store is read-only (its file could not be loaded). Check
+    /// this before side effects such as storing a secret for a new item.
+    pub fn ensure_writable(&self) -> anyhow::Result<()> {
+        match &self.load_error {
+            Some(e) => anyhow::bail!("{e}"),
+            None => Ok(()),
         }
     }
 
@@ -67,6 +76,7 @@ impl<T: Clone + Serialize + DeserializeOwned + HasId> JsonStore<T> {
 
     /// Insert or replace (matched by id), then persist.
     pub fn save(&self, item: T) -> anyhow::Result<()> {
+        self.ensure_writable()?;
         {
             let mut items = self.items.lock().unwrap();
             match items.iter_mut().find(|i| i.id() == item.id()) {
@@ -79,11 +89,13 @@ impl<T: Clone + Serialize + DeserializeOwned + HasId> JsonStore<T> {
 
     /// Remove by id, then persist.
     pub fn delete(&self, id: &str) -> anyhow::Result<()> {
+        self.ensure_writable()?;
         self.items.lock().unwrap().retain(|i| i.id() != id);
         self.persist()
     }
 
     fn persist(&self) -> anyhow::Result<()> {
+        self.ensure_writable()?;
         // Hold the lock across the snapshot and the write so two concurrent
         // persists cannot reorder: without this a slower writer could land an
         // older state on disk after a newer one (a lost update). The mutators
