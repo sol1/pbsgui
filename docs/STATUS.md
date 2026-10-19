@@ -45,7 +45,10 @@ CI on Windows and exercised manually.
   identity, and `sysadmin`-role checks, each with a copyable fix hint.
 - **Saved connections.** SQL Server connections and PBS servers are first-class
   saved entities (managed in their own tabs); jobs reference them by id and carry
-  no secrets. SQL passwords and PBS token secrets live in the credential store. A
+  no secrets. A SQL connection authenticates as the service account, a Windows
+  account (`DOMAIN\user`, NTLM), or a SQL login, and is added, edited, and tested
+  in the SQL Servers tab. SQL passwords and PBS token secrets live in the
+  credential store. A
   PBS server is validated (reachability, the pinned TLS fingerprint, that the token
   authenticates, and that it holds `Datastore.Backup`) from one
   `/access/permissions` call; its indicator turns green only once it checks out,
@@ -121,7 +124,7 @@ CI on Windows and exercised manually.
 
 ## Planned
 
-- **Additional authentication**: explicit Windows accounts and Azure AD / Entra.
+- **Additional authentication**: Azure AD / Entra.
 - **More notifications**: Microsoft Teams cards, a heartbeat / dead-man's-switch,
   per-job routing, a durable retry queue, and daily digests (email and a
   Slack-compatible webhook already work).

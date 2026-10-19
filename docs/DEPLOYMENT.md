@@ -43,8 +43,11 @@ Do this once per instance.
    ALTER SERVER ROLE sysadmin ADD MEMBER [NT AUTHORITY\SYSTEM];
    ```
 
-   To use a SQL login or an explicit Windows account instead, save it as the
-   connection's credentials in the GUI. That login needs `sysadmin` too.
+   To use a SQL login or a Windows account instead, use **Add connection** (or
+   **Edit** on a saved one) in the SQL Servers tab and pick it under
+   Authentication. A Windows account is entered as `DOMAIN\user` and signs in with
+   NTLM. That login needs `sysadmin` too. **Test** runs the readiness checks with
+   those credentials.
 
 ## 3. Install pbsgui
 
@@ -62,9 +65,10 @@ Do this once per instance.
 Leave the service running as LocalSystem. Its configuration is signed with a key
 held by the service account, so a service running as another account cannot read
 it. pbsgui then shows an error and leaves the files alone; switch the account back
-to recover. For Windows authentication to a SQL Server on another machine, the
-service connects as the computer account (`DOMAIN\HOSTNAME$`). Add that as a SQL
-Server login with `sysadmin` instead of changing the service account.
+to recover. For Windows authentication to a SQL Server on another machine, either
+give the connection a Windows account, or add the computer account
+(`DOMAIN\HOSTNAME$`), which the service connects as, as a SQL Server login with
+`sysadmin`. Do not change the service account.
 
 The service runs scheduled jobs whether or not the GUI is open. The GUI requests
 admin rights at launch (a UAC prompt) so it can reach the engine's control socket.
