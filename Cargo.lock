@@ -2613,6 +2613,7 @@ dependencies = [
  "pbs-client",
  "pbsgui-core",
  "pbsgui-ipc",
+ "pbsgui-vss",
  "serde",
  "serde_json",
  "tar",
@@ -2620,7 +2621,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows 0.58.0",
- "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -2684,6 +2684,15 @@ dependencies = [
  "tokio",
  "tracing",
  "widestring",
+]
+
+[[package]]
+name = "pbsgui-vss"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "windows 0.58.0",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
