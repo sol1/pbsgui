@@ -59,6 +59,13 @@ Do this once per instance.
 3. The installer registers and starts the `pbsgui-engine` service (LocalSystem) and
    opens the app.
 
+Leave the service running as LocalSystem. Its configuration is signed with a key
+held by the service account, so a service running as another account cannot read
+it. pbsgui then shows an error and leaves the files alone; switch the account back
+to recover. For Windows authentication to a SQL Server on another machine, the
+service connects as the computer account (`DOMAIN\HOSTNAME$`). Add that as a SQL
+Server login with `sysadmin` instead of changing the service account.
+
 The service runs scheduled jobs whether or not the GUI is open. The GUI requests
 admin rights at launch (a UAC prompt) so it can reach the engine's control socket.
 
@@ -85,6 +92,11 @@ no link between the pbsgui instances. An Always On database is backed up only on
 preferred backup replica. A Failover Cluster Instance is skipped on whichever node
 is not active. Give each replica's job the same backup id. It defaults to the
 Availability Group name, so all nodes write one continuous chain.
+
+Use the same PBS API token on every replica or node. PBS makes the token that first
+writes a snapshot group its owner, and refuses backups into that group from any
+other token. With a different token per node, the first backup after a failover
+fails.
 
 ## Upgrades
 
