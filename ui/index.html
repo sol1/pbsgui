@@ -229,12 +229,14 @@
         <div class="section-head">
           <h1>SQL Servers</h1>
           <span class="spacer"></span>
+          <button id="add-sql-conn" type="button">Add connection</button>
           <button id="discover-sql" class="primary" type="button">Discover</button>
         </div>
         <p class="help muted">Finds SQL Server instances installed on this machine, then use
           Probe to read each instance's version, topology (standalone, failover cluster, or
           Always On), and databases. Probe connects as the backup service identity (Windows
-          integrated auth); a remote instance needs a saved connection with a SQL login.</p>
+          integrated auth). To use a Windows account or a SQL login instead, or to reach a
+          remote instance, add or edit a saved connection.</p>
         <div class="browse-pick">
           <label class="enc-toggle">
             <input id="sql-search-network" type="checkbox" />
@@ -244,6 +246,48 @@
             <input id="sql-targets" type="text" placeholder="e.g. 192.168.1.0/24, dbhost2" />
           </label>
         </div>
+        <form id="sqlc-form" class="hidden" autocomplete="off">
+          <h2 id="sqlc-title">Add a SQL connection</h2>
+          <label>Name
+            <input id="sqlc-name" type="text" required placeholder="Production SQL" />
+          </label>
+          <label>Server
+            <input id="sqlc-server" type="text" required placeholder="HOST or HOST\INSTANCE" />
+          </label>
+          <label>Port (optional)
+            <input id="sqlc-port" type="number" min="1" max="65535" placeholder="1433" />
+            <span class="help muted">Leave empty for 1433. A named instance usually listens on its
+              own port, shown by Discover.</span>
+          </label>
+          <label>Authentication
+            <select id="sqlc-auth">
+              <option value="integrated">Service account (Windows, as the pbsgui service)</option>
+              <option value="windows_account">Windows account</option>
+              <option value="sql_login">SQL Server login</option>
+            </select>
+            <span id="sqlc-auth-help" class="help muted"></span>
+          </label>
+          <div id="sqlc-creds" class="hidden">
+            <label>Username
+              <input id="sqlc-user" type="text" />
+            </label>
+            <label>Password
+              <input id="sqlc-pass" type="password" />
+              <span id="sqlc-pass-note" class="muted"></span>
+            </label>
+          </div>
+          <label class="enc-toggle">
+            <input id="sqlc-fci" type="checkbox" />
+            <span>Failover Cluster Instance (skip the backup, instead of failing, on a node where
+              it is not running)</span>
+          </label>
+          <div class="actions">
+            <button type="submit" class="primary">Save connection</button>
+            <button id="sqlc-test" type="button">Test</button>
+            <button id="sqlc-cancel" type="button">Cancel</button>
+          </div>
+          <div id="sqlc-checks"></div>
+        </form>
         <h2>Saved connections</h2>
         <div id="sql-conns"><div class="muted">No saved connections yet.</div></div>
         <h2>Relay agents</h2>

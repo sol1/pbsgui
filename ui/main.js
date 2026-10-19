@@ -586,6 +586,7 @@ async function loadDatabasesForConn() {
       port: conn.port ?? null,
       auth: conn.auth,
       password: null,
+      connectionId: conn.id,
     });
     sqlDbModels = {};
     sqlDbAg = {};
@@ -1595,29 +1596,156 @@ function renderSqlDatabases(databases) {
 
 // --- Saved SQL connections ---------------------------------------------
 
-async function saveSqlConnection(inst) {
-  const name = prompt("Name for this SQL connection:", inst.server);
-  if (!name) return;
+// The saved connection being edited, or null when adding a new one.
+let editingSqlConn = null;
+
+const sqlAuthHelp = {
+  integrated:
+    "Connects as the pbsgui service account. As LocalSystem, a remote SQL Server sees the " +
+    "computer account (DOMAIN\\HOSTNAME$), so give that a login with sysadmin.",
+  windows_account:
+    "Connects as this domain account (DOMAIN\\user) using NTLM. The account needs a SQL " +
+    "Server login with sysadmin. The pbsgui service stays on LocalSystem.",
+  sql_login: "A SQL Server login (the instance must allow mixed-mode authentication).",
+};
+
+function needsPassword(kind) {
+  return kind === "windows_account" || kind === "sql_login";
+}
+
+// Open the connection form, either to edit a saved connection or to add one
+// (optionally prefilled from a discovered instance).
+function openSqlConnForm(conn, prefill) {
+  editingSqlConn = conn || null;
+  const src = conn || prefill || {};
+  el("sqlc-title").textContent = conn ? `Edit "${conn.name}"` : "Add a SQL connection";
+  el("sqlc-name").value = src.name || src.server || "";
+  el("sqlc-server").value = src.server || "";
+  el("sqlc-port").value = src.port ?? "";
+  el("sqlc-auth").value = conn ? conn.auth.kind : "integrated";
+  el("sqlc-user").value = conn?.auth.username || "";
+  el("sqlc-pass").value = "";
+  el("sqlc-fci").checked = !!(conn ? conn.failover_cluster : prefill?.fci);
+  el("sqlc-checks").innerHTML = "";
+  updateSqlAuthFields();
+  el("sqlc-form").classList.remove("hidden");
+  el("sqlc-form").scrollIntoView({ behavior: "smooth", block: "start" });
+  el("sqlc-name").focus();
+}
+
+function closeSqlConnForm() {
+  editingSqlConn = null;
+  el("sqlc-form").classList.add("hidden");
+  el("sqlc-pass").value = "";
+}
+
+// A password is already stored when editing a connection that used a
+// password-based login; leaving the field empty then keeps it.
+function sqlPasswordStored() {
+  return !!editingSqlConn && needsPassword(editingSqlConn.auth.kind);
+}
+
+function updateSqlAuthFields() {
+  const kind = el("sqlc-auth").value;
+  el("sqlc-auth-help").textContent = sqlAuthHelp[kind] || "";
+  el("sqlc-creds").classList.toggle("hidden", !needsPassword(kind));
+  el("sqlc-user").placeholder = kind === "windows_account" ? "DOMAIN\\user" : "login name";
+  el("sqlc-pass-note").textContent = sqlPasswordStored()
+    ? "Leave empty to keep the saved password."
+    : "";
+}
+
+// Read the form into { connection, secret }, or throw a message to show.
+function gatherSqlConnForm() {
+  const name = el("sqlc-name").value.trim();
+  const server = el("sqlc-server").value.trim();
+  if (!name || !server) throw "Enter a name and a server.";
+  const portText = el("sqlc-port").value.trim();
+  const port = portText ? parseInt(portText, 10) : null;
+  if (portText && !(port >= 1 && port <= 65535)) throw "The port must be between 1 and 65535.";
+  const kind = el("sqlc-auth").value;
+  let auth = { kind };
+  let secret = null;
+  if (needsPassword(kind)) {
+    const username = el("sqlc-user").value.trim();
+    if (!username) throw "Enter a username.";
+    auth = { kind, username };
+    secret = el("sqlc-pass").value || null;
+    if (!secret && !sqlPasswordStored()) throw "Enter a password.";
+  }
+  const connection = {
+    id: editingSqlConn?.id || crypto.randomUUID(),
+    name,
+    server,
+    port,
+    auth,
+    failover_cluster: el("sqlc-fci").checked,
+    relay_agent: editingSqlConn?.relay_agent ?? null,
+  };
+  return { connection, secret };
+}
+
+async function testSqlConnForm() {
+  let form;
   try {
-    // A Failover Cluster Instance runs on one node at a time; mark it so a backup
-    // that cannot reach it locally is skipped (not failed) on the passive nodes.
-    const fci = inst.probe?.topology?.topology === "failover_cluster_instance";
-    await invoke("save_sql_connection", {
-      connection: {
-        id: crypto.randomUUID(),
-        name,
-        server: inst.server,
-        port: inst.port ?? null,
-        auth: { kind: "integrated" },
-        failover_cluster: fci,
-        relay_agent: null,
-      },
-      secret: null,
+    form = gatherSqlConnForm();
+  } catch (msg) {
+    el("sqlc-checks").innerHTML = `<div class="check-row check-fail">${escapeHtml(msg)}</div>`;
+    return;
+  }
+  const btn = el("sqlc-test");
+  btn.disabled = true;
+  el("sqlc-checks").innerHTML = loadingHtml("testing...");
+  try {
+    const checks = await invoke("check_sql", {
+      server: form.connection.server,
+      port: form.connection.port,
+      auth: form.connection.auth,
+      password: form.secret,
+      // With no new password, test with the one saved for this connection.
+      connectionId: form.secret ? null : editingSqlConn?.id || null,
     });
-    loadSqlConnections();
+    el("sqlc-checks").innerHTML = checks.map(renderCheck).join("");
+  } catch (err) {
+    el("sqlc-checks").innerHTML = renderCheck({
+      name: "Test",
+      status: "fail",
+      detail: String(err),
+      hint: null,
+    });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function submitSqlConnForm(ev) {
+  ev.preventDefault();
+  let form;
+  try {
+    form = gatherSqlConnForm();
+  } catch (msg) {
+    alert(msg);
+    return;
+  }
+  try {
+    await invoke("save_sql_connection", form);
   } catch (err) {
     alert("save failed: " + err);
+    return;
   }
+  closeSqlConnForm();
+  loadSqlConnections();
+}
+
+// "Save connection" on a discovered instance: open the form prefilled. A
+// Failover Cluster Instance runs on one node at a time; mark it so a backup
+// that cannot reach it locally is skipped (not failed) on the passive nodes.
+function saveSqlConnection(inst) {
+  openSqlConnForm(null, {
+    server: inst.server,
+    port: inst.port ?? null,
+    fci: inst.probe?.topology?.topology === "failover_cluster_instance",
+  });
 }
 
 async function loadSqlConnections() {
@@ -1637,7 +1765,7 @@ async function loadSqlConnections() {
     return;
   }
   const authLabel = {
-    integrated: "Windows integrated",
+    integrated: "Service account",
     sql_login: "SQL login",
     windows_account: "Windows account",
     azure_ad: "Azure AD",
@@ -1657,10 +1785,12 @@ async function loadSqlConnections() {
     main.innerHTML =
       `<div class="job-name">${escapeHtml(conn.name)}${fci}${relay}</div>` +
       `<div class="job-meta">${escapeHtml(conn.server)} <span class="dot-sep"></span> ` +
-      `${escapeHtml(authLabel[conn.auth.kind] || conn.auth.kind)}</div>`;
+      `${escapeHtml(authLabel[conn.auth.kind] || conn.auth.kind)}` +
+      `${conn.auth.username ? " " + escapeHtml(conn.auth.username) : ""}</div>`;
     const actions = document.createElement("div");
     actions.className = "job-actions";
     actions.append(
+      mkbtn("Edit", "", () => openSqlConnForm(conn)),
       // Bind the connection's VDI byte stream to a relay agent on the SQL
       // host (this machine then acts as the proxy and carries the backup
       // CPU). Empty input unbinds; T-SQL always goes direct.
@@ -2158,6 +2288,11 @@ window.addEventListener("DOMContentLoaded", () => {
     loadMetrics();
   };
   el("discover-sql").onclick = discoverSql;
+  el("add-sql-conn").onclick = () => openSqlConnForm(null, null);
+  el("sqlc-form").onsubmit = submitSqlConnForm;
+  el("sqlc-auth").onchange = updateSqlAuthFields;
+  el("sqlc-test").onclick = testSqlConnForm;
+  el("sqlc-cancel").onclick = closeSqlConnForm;
   el("pbs-form").addEventListener("submit", savePbsServer);
   el("pbs-test").onclick = testPbsForm;
   el("pbs-clear").onclick = resetPbsForm;
