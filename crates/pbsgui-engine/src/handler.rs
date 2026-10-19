@@ -141,14 +141,22 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             port,
             auth,
             password,
+            connection_id,
         } => {
-            let reply =
-                match crate::sql::probe::probe(&server, port, &auth, password.as_deref()).await {
-                    Ok(probe) => Reply::SqlProbe { probe },
-                    Err(e) => Reply::Error {
-                        message: e.to_string(),
-                    },
-                };
+            let reply = match sql_password(password, connection_id.as_deref()) {
+                Ok(password) => {
+                    match crate::sql::probe::probe(&server, port, &auth, password.as_deref()).await
+                    {
+                        Ok(probe) => Reply::SqlProbe { probe },
+                        Err(e) => Reply::Error {
+                            message: format!("{e:#}"),
+                        },
+                    }
+                }
+                Err(e) => Reply::Error {
+                    message: format!("{e:#}"),
+                },
+            };
             let _ = responder.send(&reply).await;
         }
 
@@ -157,9 +165,18 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             port,
             auth,
             password,
+            connection_id,
         } => {
-            let checks = crate::sql::check::check(&server, port, &auth, password.as_deref()).await;
-            let _ = responder.send(&Reply::SqlChecks { checks }).await;
+            let reply = match sql_password(password, connection_id.as_deref()) {
+                Ok(password) => Reply::SqlChecks {
+                    checks: crate::sql::check::check(&server, port, &auth, password.as_deref())
+                        .await,
+                },
+                Err(e) => Reply::Error {
+                    message: format!("{e:#}"),
+                },
+            };
+            let _ = responder.send(&reply).await;
         }
 
         Request::ListSqlSnapshots { job_id, database } => {
@@ -392,6 +409,19 @@ fn enc_key_reply(result: anyhow::Result<pbsgui_ipc::EncryptionKeyInfo>) -> Reply
         Err(e) => Reply::Error {
             message: e.to_string(),
         },
+    }
+}
+
+/// The password for a probe or check: the one supplied, else the stored one of
+/// the saved connection `connection_id` (if any).
+fn sql_password(
+    password: Option<String>,
+    connection_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    match (password, connection_id) {
+        (Some(p), _) => Ok(Some(p)),
+        (None, Some(id)) => secrets::get(&connstore::sql_secret_key(id)),
+        (None, None) => Ok(None),
     }
 }
 

@@ -598,7 +598,9 @@ pub enum Request {
     },
     /// Connect to one instance and report its version, topology, and databases.
     /// `password` is required for SQL and explicit-Windows logins; `Integrated`
-    /// uses the engine's service identity and needs none.
+    /// uses the engine's service identity and needs none. When `password` is
+    /// absent and `connection_id` names a saved connection, its stored password
+    /// is used, so the GUI never has to hold it.
     ProbeSql {
         server: String,
         #[serde(default)]
@@ -606,9 +608,12 @@ pub enum Request {
         auth: SqlAuth,
         #[serde(default)]
         password: Option<String>,
+        #[serde(default)]
+        connection_id: Option<String>,
     },
     /// Run readiness checks against an instance (connectivity, login identity,
     /// and the sysadmin role VDI requires), returning a hint for each failure.
+    /// `password` and `connection_id` work as for [`Request::ProbeSql`].
     CheckSql {
         server: String,
         #[serde(default)]
@@ -616,6 +621,8 @@ pub enum Request {
         auth: SqlAuth,
         #[serde(default)]
         password: Option<String>,
+        #[serde(default)]
+        connection_id: Option<String>,
     },
     /// List the PBS snapshots for one database of a SQL backup job, by date/time.
     ListSqlSnapshots { job_id: String, database: String },

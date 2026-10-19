@@ -29,8 +29,10 @@ pub async fn check(
                 &format!("{e:#}"),
                 "Make sure the SQL Server service is running and TCP/IP is enabled in SQL \
                  Server Configuration Manager (Protocols > TCP/IP), then restart the service. \
-                 If the error mentions 'login failed', the backup service account needs a SQL \
-                 Server login on this instance.",
+                 If the error mentions 'login failed', the account this connection uses needs \
+                 a SQL Server login on this instance. For a remote instance with the service \
+                 account, that is the computer account (DOMAIN\\HOSTNAME$); otherwise edit the \
+                 connection to use a Windows account or a SQL login.",
             ));
             return checks;
         }

@@ -435,12 +435,14 @@ async fn probe_sql(
     port: Option<u16>,
     auth: SqlAuth,
     password: Option<String>,
+    connection_id: Option<String>,
 ) -> Result<SqlProbe, String> {
     let replies = request_all(Request::ProbeSql {
         server,
         port,
         auth,
         password,
+        connection_id,
     })
     .await?;
     if let Some(err) = first_error(&replies) {
@@ -552,12 +554,14 @@ async fn check_sql(
     port: Option<u16>,
     auth: SqlAuth,
     password: Option<String>,
+    connection_id: Option<String>,
 ) -> Result<Vec<SqlCheck>, String> {
     let replies = request_all(Request::CheckSql {
         server,
         port,
         auth,
         password,
+        connection_id,
     })
     .await?;
     if let Some(err) = first_error(&replies) {
