@@ -14,7 +14,12 @@ CI on Windows and exercised manually.
   reused all chunks.
 - **File and folder backup jobs.** Create, edit, delete, and run jobs; manual,
   interval, and daily schedules; glob excludes; deterministic archiving for
-  reliable dedup.
+  reliable dedup. Local sources are read from a VSS snapshot (a copy backup, so
+  writers such as SQL Server do not record a backup), so open and locked files
+  are captured. The archive streams straight to PBS with no temp file. Files that
+  cannot be read (permission denied, OneDrive cloud-only placeholders, sources on
+  volumes VSS cannot snapshot that are locked) are skipped; the run then finishes
+  with warnings that name the skipped files.
 - **Secure settings.** Job configuration is stored as JSON in a config directory
   restricted (by ACL) to SYSTEM and administrators; the stores are tamper-evident
   (HMAC-signed with a key in the Windows Credential Manager). The PBS API token
@@ -128,7 +133,6 @@ CI on Windows and exercised manually.
 - **More notifications**: Microsoft Teams cards, a heartbeat / dead-man's-switch,
   per-job routing, a durable retry queue, and daily digests (email and a
   Slack-compatible webhook already work).
-- **VSS-based filesystem backup** for consistent snapshots of open files.
 
 ## Known limitations and notes
 

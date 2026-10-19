@@ -39,6 +39,13 @@ Record build + date, and pass/fail per row.
 - [ ] Files job to PBS: run, then Browse -> snapshot -> Restore all to a folder; files match.
 - [ ] Restore selected files only.
 - [ ] Change detection: re-run with nothing changed -> "no changes; skipped".
+- [ ] Back up `C:\Users` while signed in: the log shows the VSS snapshot, the run succeeds,
+      and `NTUSER.DAT` is in the snapshot (it is locked on the live volume).
+- [ ] A file the service cannot read, or a OneDrive cloud-only file: the run finishes with
+      **warnings**, the job card names the file, and the rest is backed up.
+- [ ] No temp archive appears in `C:\Windows\Temp` during a large file backup.
+- [ ] A SQL Server data folder in a file job: msdb records the VSS backup as copy-only
+      (`is_copy_only = 1` in `msdb.dbo.backupset`), so the SQL job's chain is untouched.
 
 ### SQL - daily restore points (full only)
 

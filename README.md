@@ -32,8 +32,10 @@ a moment in time.
   machine, so the database server keeps its cores. See
   [docs/RELAY.md](docs/RELAY.md).
 - **File and folder backup** with content-defined chunking and incremental
-  deduplication, so repeat backups are fast and small. Browse snapshots and restore
-  in full or by selected files.
+  deduplication, so repeat backups are fast and small. Files are read from a VSS
+  snapshot, so open and locked files (such as user profiles) are backed up, and
+  anything that still cannot be read is skipped and reported, not fatal. Browse
+  snapshots and restore in full or by selected files.
 - **Compression and encryption.** zstd compression before upload (on by default,
   never inflates incompressible data) and optional client-side AES-256-GCM, byte
   compatible with the PBS scheme; keys live in the Windows Credential Manager and
