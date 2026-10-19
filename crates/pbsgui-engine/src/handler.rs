@@ -48,8 +48,9 @@ pub async fn handle(store: Arc<JobStore>, request: Request, mut responder: Respo
             let id = job.id.clone();
             // Refuse a job whose PBS snapshot groups would collide with its own
             // or another job's (interleaved chains corrupt restore windows).
-            let result =
-                backup::validate_pbs_groups(&job, &store.list()).and_then(|()| store.save_job(job));
+            let result = crate::scheduler::validate_job(&job)
+                .and_then(|()| backup::validate_pbs_groups(&job, &store.list()))
+                .and_then(|()| store.save_job(job));
             let _ = responder.send(&saved_reply(id, result)).await;
         }
 

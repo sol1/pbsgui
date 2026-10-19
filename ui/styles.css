@@ -1113,6 +1113,38 @@ button.running {
   flex: 1;
 }
 
+/* Weekday checkboxes for a weekly schedule. */
+.field-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.weekday-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.weekday-pick label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.weekday-pick input {
+  width: auto;
+  margin: 0;
+}
+
 /* Client-side encryption panel (job wizard, Destination step) */
 .enc-panel {
   margin-top: 12px;

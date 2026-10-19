@@ -83,12 +83,96 @@ function formatBytes(n) {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+// Weekdays in display order (Monday first) with the engine's numbering
+// (0 = Sunday .. 6 = Saturday).
+const WEEKDAYS = [
+  [1, "Mon"],
+  [2, "Tue"],
+  [3, "Wed"],
+  [4, "Thu"],
+  [5, "Fri"],
+  [6, "Sat"],
+  [0, "Sun"],
+];
+
+function hhmm(hour, minute) {
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function weekdaysSummary(days) {
+  const set = new Set(days);
+  const key = [...set].sort().join(",");
+  if (key === "0,1,2,3,4,5,6") return "daily";
+  if (key === "1,2,3,4,5") return "weekdays";
+  if (key === "0,6") return "weekends";
+  return WEEKDAYS.filter(([d]) => set.has(d))
+    .map(([, name]) => name)
+    .join(", ");
+}
+
 function scheduleSummary(s) {
   if (!s) return "";
   if (s.kind === "interval") return `every ${s.minutes} min`;
-  if (s.kind === "daily")
-    return `daily ${String(s.hour).padStart(2, "0")}:${String(s.minute).padStart(2, "0")}`;
+  if (s.kind === "daily") return `daily ${hhmm(s.hour, s.minute)}`;
+  if (s.kind === "weekly") return `${weekdaysSummary(s.days)} ${hhmm(s.hour, s.minute)}`;
+  if (s.kind === "monthly") return `monthly day ${s.day} ${hhmm(s.hour, s.minute)}`;
   return "manual";
+}
+
+// The weekday checkboxes inside container `id` (built once).
+function renderWeekdayPicker(id) {
+  const host = el(id);
+  if (host.childElementCount) return;
+  for (const [day, name] of WEEKDAYS) {
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = String(day);
+    const span = document.createElement("span");
+    span.textContent = name;
+    label.append(cb, span);
+    host.append(label);
+  }
+}
+
+function setWeekdays(id, days) {
+  renderWeekdayPicker(id);
+  const set = new Set(days);
+  for (const cb of el(id).querySelectorAll("input")) cb.checked = set.has(Number(cb.value));
+}
+
+function getWeekdays(id) {
+  return Array.from(el(id).querySelectorAll("input:checked"))
+    .map((cb) => Number(cb.value))
+    .sort((a, b) => a - b);
+}
+
+// Read a daily / weekly / monthly schedule from its fields. Throws a message
+// for the user when the fields cannot make a schedule.
+function readTimedSchedule(kind, timeId, daysId, mdayId) {
+  const [hour, minute] = el(timeId)
+    .value.split(":")
+    .map((x) => parseInt(x, 10) || 0);
+  if (kind === "weekly") {
+    const days = getWeekdays(daysId);
+    if (!days.length) throw "Pick at least one day for the weekly schedule.";
+    return { kind, days, hour, minute };
+  }
+  if (kind === "monthly") {
+    const day = parseInt(el(mdayId).value, 10);
+    if (!(day >= 1 && day <= 31)) throw "The day of the month must be between 1 and 31.";
+    return { kind, day, hour, minute };
+  }
+  return { kind: "daily", hour, minute };
+}
+
+// Fill the time, weekday, and month-day fields from a schedule, with defaults
+// (02:00, Sunday, the 1st) for the parts it does not set.
+function fillTimedSchedule(s, timeId, daysId, mdayId) {
+  const timed = s && ["daily", "weekly", "monthly"].includes(s.kind);
+  el(timeId).value = timed ? hhmm(s.hour, s.minute) : "02:00";
+  setWeekdays(daysId, s?.kind === "weekly" ? s.days : [0]);
+  el(mdayId).value = s?.kind === "monthly" ? s.day : 1;
 }
 
 // Short labels for the one-line job summary; fuller labels for the dashboard badge.
@@ -347,7 +431,9 @@ function renderSources(list) {
 function updateScheduleFields() {
   const k = el("f-schedule-kind").value;
   el("interval-fields").classList.toggle("hidden", k !== "interval");
-  el("daily-fields").classList.toggle("hidden", k !== "daily");
+  el("weekly-fields").classList.toggle("hidden", k !== "weekly");
+  el("monthly-fields").classList.toggle("hidden", k !== "monthly");
+  el("daily-fields").classList.toggle("hidden", !["daily", "weekly", "monthly"].includes(k));
 }
 
 const WIZ_STEPS = ["source", "dest", "schedule"];
@@ -389,7 +475,10 @@ function updateSqlPlan() {
   const plan = el("f-sql-plan").value;
   el("f-sql-plan-help").textContent = SQL_PLAN_HELP[plan] || "";
   el("f-sql-log-row").classList.toggle("hidden", plan !== "point_in_time");
-  el("f-sql-full-time-row").classList.toggle("hidden", el("f-sql-full-kind").value !== "daily");
+  const full = el("f-sql-full-kind").value;
+  el("f-sql-full-time-row").classList.toggle("hidden", full === "manual");
+  el("f-sql-weekdays-row").classList.toggle("hidden", full !== "weekly");
+  el("f-sql-mday-row").classList.toggle("hidden", full !== "monthly");
   renderSqlGuidance();
 }
 
@@ -682,11 +771,10 @@ async function openEditor(job) {
   const plan = protection.plan || "point_in_time";
   el("f-sql-plan").value = plan;
   const sched = plan === "point_in_time" ? protection.full : protection.schedule;
-  el("f-sql-full-kind").value = sched && sched.kind === "manual" ? "manual" : "daily";
-  el("f-sql-full-time").value =
-    sched && sched.kind === "daily"
-      ? `${String(sched.hour).padStart(2, "0")}:${String(sched.minute).padStart(2, "0")}`
-      : "02:00";
+  el("f-sql-full-kind").value = ["manual", "weekly", "monthly"].includes(sched?.kind)
+    ? sched.kind
+    : "daily";
+  fillTimedSchedule(sched, "f-sql-full-time", "f-sql-weekdays", "f-sql-mday");
   el("f-sql-log-interval").value =
     plan === "point_in_time" && protection.log_interval_minutes ? protection.log_interval_minutes : 15;
   updateSqlPlan();
@@ -708,10 +796,7 @@ async function openEditor(job) {
   const s = job?.schedule || { kind: "manual" };
   el("f-schedule-kind").value = s.kind;
   el("f-interval").value = s.kind === "interval" ? s.minutes : 60;
-  el("f-daily-time").value =
-    s.kind === "daily"
-      ? `${String(s.hour).padStart(2, "0")}:${String(s.minute).padStart(2, "0")}`
-      : "02:00";
+  fillTimedSchedule(s, "f-daily-time", "f-weekdays", "f-mday");
   updateScheduleFields();
   showWizStep(0);
   showView("editor");
@@ -722,17 +807,16 @@ function gatherSchedule() {
   if (k === "interval") {
     return { kind: "interval", minutes: parseInt(el("f-interval").value, 10) || 30 };
   }
-  if (k === "daily") {
-    const [h, m] = el("f-daily-time").value.split(":").map((x) => parseInt(x, 10) || 0);
-    return { kind: "daily", hour: h, minute: m };
+  if (["daily", "weekly", "monthly"].includes(k)) {
+    return readTimedSchedule(k, "f-daily-time", "f-weekdays", "f-mday");
   }
   return { kind: "manual" };
 }
 
 function gatherSqlSchedule() {
-  if (el("f-sql-full-kind").value === "manual") return { kind: "manual" };
-  const [h, m] = el("f-sql-full-time").value.split(":").map((x) => parseInt(x, 10) || 0);
-  return { kind: "daily", hour: h, minute: m };
+  const k = el("f-sql-full-kind").value;
+  if (k === "manual") return { kind: "manual" };
+  return readTimedSchedule(k, "f-sql-full-time", "f-sql-weekdays", "f-sql-mday");
 }
 
 function gatherSqlProtection() {
@@ -796,7 +880,12 @@ function gatherJob() {
 }
 
 async function saveJob() {
-  const job = gatherJob();
+  let job;
+  try {
+    job = gatherJob();
+  } catch (msg) {
+    return alert(msg);
+  }
   if (!job.name) return alert("Name is required");
   if (job.source.type === "files" && !job.source.sources.length) {
     return alert("Add at least one source");

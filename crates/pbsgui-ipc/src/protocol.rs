@@ -141,6 +141,11 @@ pub enum Schedule {
     Interval { minutes: u32 },
     /// Every day at the given local time.
     Daily { hour: u8, minute: u8 },
+    /// Every week on `days` (0 = Sunday .. 6 = Saturday) at the given local time.
+    Weekly { days: Vec<u8>, hour: u8, minute: u8 },
+    /// Every month on `day` (1-31) at the given local time. A day past the end
+    /// of a shorter month runs on that month's last day.
+    Monthly { day: u8, hour: u8, minute: u8 },
 }
 
 /// A persisted backup job. References saved connections by id; carries no
@@ -816,5 +821,36 @@ impl Reply {
                 | Reply::Finished { .. }
                 | Reply::Error { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Schedule;
+
+    /// The GUI builds these objects by hand, so pin the wire format.
+    #[test]
+    fn timed_schedules_match_the_gui_json() {
+        let weekly: Schedule =
+            serde_json::from_str(r#"{"kind":"weekly","days":[1,2,3,4,5],"hour":22,"minute":0}"#)
+                .unwrap();
+        assert_eq!(
+            weekly,
+            Schedule::Weekly {
+                days: vec![1, 2, 3, 4, 5],
+                hour: 22,
+                minute: 0
+            }
+        );
+        let monthly: Schedule =
+            serde_json::from_str(r#"{"kind":"monthly","day":31,"hour":2,"minute":0}"#).unwrap();
+        assert_eq!(
+            monthly,
+            Schedule::Monthly {
+                day: 31,
+                hour: 2,
+                minute: 0
+            }
+        );
     }
 }

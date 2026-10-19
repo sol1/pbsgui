@@ -90,6 +90,8 @@
               <label>Backup schedule
                 <select id="f-sql-full-kind">
                   <option value="daily">Daily at a time</option>
+                  <option value="weekly">Weekly on chosen days</option>
+                  <option value="monthly">Monthly on a day</option>
                   <option value="manual">Manual (run on demand)</option>
                 </select>
               </label>
@@ -97,6 +99,15 @@
                 <input id="f-sql-full-time" type="time" value="02:00" />
               </label>
             </div>
+            <div id="f-sql-weekdays-row" class="hidden">
+              <span class="field-label">On</span>
+              <div id="f-sql-weekdays" class="weekday-pick"></div>
+            </div>
+            <label id="f-sql-mday-row" class="hidden">Day of the month
+              <input id="f-sql-mday" type="number" min="1" max="31" value="1" />
+              <span class="help muted">A day past the end of a month (such as 31) runs on that
+                  month's last day.</span>
+            </label>
             <label id="f-sql-log-row">Back up the transaction log every (minutes)
               <input id="f-sql-log-interval" type="number" min="1" value="15" />
             </label>
@@ -170,11 +181,24 @@
                 <option value="manual">Manual (on demand)</option>
                 <option value="interval">Every N minutes</option>
                 <option value="daily">Daily at a time</option>
+                <option value="weekly">Weekly on chosen days</option>
+                <option value="monthly">Monthly on a day</option>
               </select>
             </label>
             <div id="interval-fields" class="hidden">
               <label>Every (minutes)
                 <input id="f-interval" type="number" min="1" value="60" />
+              </label>
+            </div>
+            <div id="weekly-fields" class="hidden">
+              <span class="field-label">On</span>
+              <div id="f-weekdays" class="weekday-pick"></div>
+            </div>
+            <div id="monthly-fields" class="hidden">
+              <label>Day of the month
+                <input id="f-mday" type="number" min="1" max="31" value="1" />
+                <span class="help muted">A day past the end of a month (such as 31) runs on that
+                  month's last day.</span>
               </label>
             </div>
             <div id="daily-fields" class="hidden">
