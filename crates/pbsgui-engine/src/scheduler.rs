@@ -112,25 +112,30 @@ fn sql_due_kind(job_id: &str, protection: &SqlProtection, now: i64) -> Option<Sq
             log_interval_minutes,
         } => {
             // Full cadence is gated on the last full ATTEMPT (so a failed full is
-            // not instantly due again), but logs require a SUCCESSFUL anchoring
-            // full and run off the success timers.
+            // not instantly due again).
             if schedule_due(full, sqlsched::last_full_attempt(job_id), now) {
                 return Some(SqlRun::Full);
             }
-            let last_full = sqlsched::last_full(job_id);
-            last_full?; // logs require an anchoring full first
-            let interval = (*log_interval_minutes as i64).max(1) * 60;
-            let baseline = sqlsched::last_log_attempt(job_id).or(last_full);
-            match baseline {
-                Some(b) if now - b >= interval => Some(SqlRun::Log),
-                _ => None,
-            }
+            // Logs do not wait for a full on this machine: each log run checks
+            // the chain in SQL Server and takes a full where one is needed (see
+            // sql::plan). Waiting would leave a new install, or an Always On
+            // replica whose fulls run elsewhere, without log backups until its
+            // first scheduled full, while the log grows.
+            let baseline = sqlsched::last_log_attempt(job_id).or(sqlsched::last_full(job_id));
+            log_due(baseline, *log_interval_minutes, now).then_some(SqlRun::Log)
         }
         SqlProtection::DailyRestorePoints { schedule }
         | SqlProtection::SecondaryCopy { schedule } => {
             schedule_due(schedule, sqlsched::last_full_attempt(job_id), now).then_some(SqlRun::Full)
         }
     }
+}
+
+/// Whether a log backup is due: never run (or nothing to measure from) means
+/// now, otherwise once the interval has passed since `baseline`.
+fn log_due(baseline: Option<i64>, interval_minutes: u32, now: i64) -> bool {
+    let interval = i64::from(interval_minutes.max(1)) * 60;
+    baseline.is_none_or(|b| now - b >= interval)
 }
 
 /// Whether a schedule is due, given the last run time.
@@ -397,6 +402,15 @@ mod tests {
         assert!(validate(&monthly(0)).is_err());
         assert!(validate(&monthly(32)).is_err());
         assert!(validate(&monthly(31)).is_ok());
+    }
+
+    #[test]
+    fn logs_do_not_wait_for_a_local_full() {
+        // Nothing recorded on this machine: a log run is due straight away (it
+        // takes a full itself if the chain needs one).
+        assert!(log_due(None, 15, 1_000_000));
+        assert!(!log_due(Some(1_000_000 - 10 * 60), 15, 1_000_000));
+        assert!(log_due(Some(1_000_000 - 15 * 60), 15, 1_000_000));
     }
 
     #[test]
