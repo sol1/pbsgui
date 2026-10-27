@@ -522,7 +522,11 @@ function renderSqlGuidance() {
         : "";
       const ag = document.createElement("div");
       ag.className = "check-row check-warn";
-      ag.textContent = `${name} is in an Always On group. Install pbsgui on each replica; it backs up automatically on whichever replica SQL Server prefers (a copy-only full on a secondary), with no connection between the pbsgui instances.${grp}`;
+      const where =
+        plan === "point_in_time"
+          ? "full backups run on the primary and log backups on the replica SQL Server prefers for backups (the group's backup preference)"
+          : "it backs up on the replica SQL Server prefers for backups (a copy-only full on a secondary)";
+      ag.textContent = `${name} is in an Always On group. Install pbsgui on every replica with this same job and the same PBS server and token; ${where}. The pbsgui instances need no connection to each other.${grp}`;
       host.append(ag);
     }
 
