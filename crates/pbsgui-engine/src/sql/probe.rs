@@ -177,56 +177,55 @@ pub(crate) async fn connect(
         .context("SQL Server login failed")
 }
 
-/// Whether (and how) this replica should back up a database in an Always On group.
-pub(crate) struct BackupDecision {
-    /// This replica should run the backup (the preferred replica, or standalone).
-    pub back_up: bool,
-    /// This is a readable AG secondary, where SQL Server only permits copy-only
-    /// full backups, so a full here must be forced copy-only.
-    pub secondary: bool,
-    /// The database is in SIMPLE recovery, so a transaction-log backup is not
-    /// possible (SQL Server rejects `BACKUP LOG`); its log is auto-managed.
-    pub simple_recovery: bool,
-}
-
-/// Decide whether this replica should run scheduled backups for `database`:
-/// always for a standalone database, and for an Always On database only when this
-/// replica is the preferred backup replica.
+/// What [`crate::sql::plan::decide`] needs to know about `database` here: its
+/// availability group role, whether this is the preferred backup replica, its
+/// recovery model, and whether a log backup can extend the chain.
 ///
-/// This is how pbsgui coordinates AG backups across nodes WITHOUT any
-/// pbsgui-to-pbsgui connection: install the engine on every replica, and SQL
-/// Server itself answers "should I back up?" consistently cluster-wide via
-/// `sys.fn_hadr_backup_is_preferred_replica`. Exactly one node proceeds, and on
-/// failover the new preferred node takes over automatically. No extra ports. When
-/// the preferred replica is a secondary (the default "prefer secondary"), a full
-/// must be copy-only.
-pub(crate) async fn backup_decision(
+/// The role comes from `sys.dm_hadr_availability_replica_states` (not
+/// readability), so a non-readable secondary is still a secondary. This is how
+/// pbsgui coordinates replicas WITHOUT any pbsgui-to-pbsgui connection: every
+/// replica runs the same job and SQL Server answers consistently cluster-wide.
+pub(crate) async fn db_state(
     client: &mut SqlClient,
     database: &str,
-) -> anyhow::Result<BackupDecision> {
+) -> anyhow::Result<crate::sql::plan::DbState> {
+    use crate::sql::plan::{DbState, Role};
     let db = database.replace('\'', "''");
     let query = format!(
         "SELECT \
+           CAST(CASE WHEN d.replica_id IS NULL THEN 0 ELSE 1 END AS int) AS in_ag, \
            CAST(CASE \
              WHEN d.replica_id IS NULL THEN 1 \
              WHEN sys.fn_hadr_backup_is_preferred_replica(d.name) = 1 THEN 1 \
-             ELSE 0 END AS int) AS go, \
-           CAST(CASE \
-             WHEN d.replica_id IS NOT NULL \
-               AND DATABASEPROPERTYEX(d.name, 'Updateability') = 'READ_ONLY' THEN 1 \
-             ELSE 0 END AS int) AS secondary, \
-           CAST(CASE WHEN d.recovery_model_desc = 'SIMPLE' THEN 1 ELSE 0 END AS int) AS simple \
-         FROM sys.databases d WHERE d.name = N'{db}'"
+             ELSE 0 END AS int) AS preferred, \
+           rs.role_desc AS role, \
+           CAST(CASE WHEN d.recovery_model_desc = 'SIMPLE' THEN 1 ELSE 0 END AS int) AS simple, \
+           CAST(CASE WHEN drs.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS int) AS log_chain \
+         FROM sys.databases d \
+         LEFT JOIN sys.dm_hadr_availability_replica_states rs \
+           ON rs.replica_id = d.replica_id AND rs.is_local = 1 \
+         LEFT JOIN sys.database_recovery_status drs ON drs.database_id = d.database_id \
+         WHERE d.name = N'{db}'"
     );
-    let row = client.simple_query(query).await?.into_row().await?;
-    let go = row.as_ref().and_then(|r| r.get::<i32, _>(0));
-    let secondary = row.as_ref().and_then(|r| r.get::<i32, _>(1)) == Some(1);
-    let simple_recovery = row.as_ref().and_then(|r| r.get::<i32, _>(2)) == Some(1);
-    Ok(BackupDecision {
+    let row = client
+        .simple_query(query)
+        .await?
+        .into_row()
+        .await?
+        .with_context(|| format!("database [{database}] not found on this instance"))?;
+    let in_ag = row.get::<i32, _>("in_ag") == Some(1);
+    let role = match (in_ag, row.get::<&str, _>("role")) {
+        (false, _) => Role::Standalone,
+        (true, Some(r)) if r.eq_ignore_ascii_case("PRIMARY") => Role::Primary,
+        // SECONDARY, RESOLVING, or no local replica row: never act as primary.
+        (true, _) => Role::Secondary,
+    };
+    Ok(DbState {
+        role,
         // Proceed unless SQL explicitly says this is not the preferred replica.
-        back_up: go != Some(0),
-        secondary,
-        simple_recovery,
+        preferred: row.get::<i32, _>("preferred") != Some(0),
+        simple_recovery: row.get::<i32, _>("simple") == Some(1),
+        log_chain: row.get::<i32, _>("log_chain") == Some(1),
     })
 }
 
@@ -293,4 +292,91 @@ fn string_at(row: &Row, idx: usize) -> String {
 /// Read an integer column, treating NULL as 0.
 fn int_at(row: &Row, idx: usize) -> i32 {
     row.get::<i32, _>(idx).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::sql::plan::{is_no_chain_error, Role};
+    use pbsgui_ipc::SqlAuth;
+
+    /// Against a live SQL Server (for example the `mcr.microsoft.com/mssql/server`
+    /// container): `PBSGUI_TEST_SQL=host:port` and `PBSGUI_TEST_SQL_SA=<sa password>`.
+    /// Walks a database through the states the Always On rules depend on.
+    #[tokio::test]
+    #[ignore = "needs a live SQL Server"]
+    async fn db_state_tracks_the_log_chain() {
+        let target = std::env::var("PBSGUI_TEST_SQL").expect("PBSGUI_TEST_SQL");
+        let password = std::env::var("PBSGUI_TEST_SQL_SA").expect("PBSGUI_TEST_SQL_SA");
+        let (host, port) = target.split_once(':').unwrap();
+        let auth = SqlAuth::SqlLogin {
+            username: "sa".into(),
+        };
+        let mut c = super::connect(host, Some(port.parse().unwrap()), &auth, Some(&password))
+            .await
+            .unwrap();
+        for sql in [
+            "IF DB_ID('pbsgui_chain') IS NOT NULL DROP DATABASE pbsgui_chain",
+            "CREATE DATABASE pbsgui_chain",
+            "ALTER DATABASE pbsgui_chain SET RECOVERY FULL",
+        ] {
+            c.simple_query(sql)
+                .await
+                .unwrap()
+                .into_results()
+                .await
+                .unwrap();
+        }
+
+        let s = super::db_state(&mut c, "pbsgui_chain").await.unwrap();
+        assert_eq!(s.role, Role::Standalone);
+        assert!(s.preferred && !s.simple_recovery);
+        assert!(!s.log_chain, "a new FULL database has no chain");
+
+        // The log backup pbsgui would have issued fails with 4214, and the
+        // client's error text is recognised.
+        let err = match c
+            .simple_query("BACKUP LOG pbsgui_chain TO DISK = 'NUL'")
+            .await
+        {
+            Ok(stream) => stream.into_results().await.err(),
+            Err(e) => Some(e),
+        }
+        .expect("BACKUP LOG must fail without a full");
+        assert!(is_no_chain_error(&format!("{err:#}")), "{err:#}");
+
+        // A copy-only full does not start the chain; a normal full does.
+        c.simple_query("BACKUP DATABASE pbsgui_chain TO DISK = 'NUL' WITH COPY_ONLY")
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
+        assert!(
+            !super::db_state(&mut c, "pbsgui_chain")
+                .await
+                .unwrap()
+                .log_chain
+        );
+        c.simple_query("BACKUP DATABASE pbsgui_chain TO DISK = 'NUL'")
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
+        assert!(
+            super::db_state(&mut c, "pbsgui_chain")
+                .await
+                .unwrap()
+                .log_chain
+        );
+
+        // A missing database is an error (reported per database), not a panic.
+        assert!(super::db_state(&mut c, "pbsgui_no_such_db").await.is_err());
+        c.simple_query("DROP DATABASE pbsgui_chain")
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
+    }
 }

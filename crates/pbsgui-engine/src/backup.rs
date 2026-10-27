@@ -122,17 +122,14 @@ pub enum SqlRun {
     Log,
 }
 
-/// Map a protection plan and the run trigger to the concrete SQL backup type and
-/// copy-only flag. Only point-in-time alternates full/log; the others are always
-/// full (non-copy-only for primary plans, copy-only for the secondary copy).
-fn sql_backup_spec(protection: &SqlProtection, run: SqlRun) -> (SqlBackupType, bool) {
+/// The protection plan as the per-database rules see it (see
+/// [`crate::sql::plan::decide`]).
+fn plan_kind(protection: &SqlProtection) -> crate::sql::plan::PlanKind {
+    use crate::sql::plan::PlanKind;
     match protection {
-        SqlProtection::PointInTime { .. } => match run {
-            SqlRun::Log => (SqlBackupType::Log, false),
-            SqlRun::Full => (SqlBackupType::Full, false),
-        },
-        SqlProtection::DailyRestorePoints { .. } => (SqlBackupType::Full, false),
-        SqlProtection::SecondaryCopy { .. } => (SqlBackupType::Full, true),
+        SqlProtection::PointInTime { .. } => PlanKind::PointInTime,
+        SqlProtection::DailyRestorePoints { .. } => PlanKind::RestorePoints,
+        SqlProtection::SecondaryCopy { .. } => PlanKind::SecondaryCopy,
     }
 }
 
@@ -489,12 +486,11 @@ async fn do_backup(
             },
         ) => {
             let crypt = enckey::for_job(job)?;
-            let (backup_type, copy_only) = sql_backup_spec(protection, sql_run);
             backup_sql_to_pbs(
                 connection_id,
                 databases,
-                backup_type,
-                copy_only,
+                plan_kind(protection),
+                sql_run,
                 server_id,
                 backup_id,
                 crypt,
@@ -504,7 +500,6 @@ async fn do_backup(
                 cancel,
             )
             .await
-            .map(|(m, st)| (m, st, false))
         }
         (
             JobSource::Sql {
@@ -766,8 +761,8 @@ fn archive_sources(
 async fn backup_sql_to_pbs(
     connection_id: &str,
     databases: &[String],
-    backup_type: SqlBackupType,
-    copy_only: bool,
+    plan: crate::sql::plan::PlanKind,
+    run: SqlRun,
     server_id: &str,
     backup_id: &str,
     crypt: Option<CryptConfig>,
@@ -775,7 +770,8 @@ async fn backup_sql_to_pbs(
     job_id: &str,
     events: &Sender<Reply>,
     cancel: &CancellationToken,
-) -> anyhow::Result<(String, Option<BackupStats>)> {
+) -> anyhow::Result<Outcome> {
+    use crate::sql::plan::{self, Action, Role};
     if databases.is_empty() {
         anyhow::bail!("no databases selected");
     }
@@ -805,6 +801,7 @@ async fn backup_sql_to_pbs(
                 return Ok((
                     "skipped: the failover cluster instance is not active on this node".to_string(),
                     None,
+                    false,
                 ));
             }
             Err(e) => return Err(e),
@@ -813,48 +810,67 @@ async fn backup_sql_to_pbs(
     let (mut chunks, mut uploaded, mut reused, mut bytes) = (0u64, 0u64, 0u64, 0u64);
     let (mut uploaded_bytes, mut stored_bytes) = (0u64, 0u64);
     let mut backed_up = 0u32;
-    // Per-database outcomes: one database's failure (e.g. a log backup on a
-    // database with no anchoring full) must not abandon the rest of the job, and a
-    // skip (not the preferred replica, or SIMPLE recovery) is expected, not a
-    // failure. Collect both so the summary shows exactly what happened.
+    // Per-database outcomes: one database's failure must not abandon the rest of
+    // the job, a skip (not this replica's turn, SIMPLE recovery) is expected, and
+    // a warning is a skip someone should look at. Collect all three so the
+    // summary shows exactly what happened.
     let mut skipped: Vec<String> = Vec::new();
+    let mut warned: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     for db in databases {
-        let decision = crate::sql::probe::backup_decision(&mut gate, db).await?;
-        if !decision.back_up {
-            let reason = format!("[{db}]: not the Always On preferred backup replica");
-            let _ = events
-                .send(Reply::Log {
-                    line: format!("skipping {reason}"),
-                })
-                .await;
-            skipped.push(reason);
-            continue;
-        }
-        // A SIMPLE-recovery database cannot take a transaction-log backup (SQL
-        // Server rejects BACKUP LOG); its log is truncated at each checkpoint, so
-        // this is expected, not a failure. Its recovery cover comes from fulls.
-        if backup_type == SqlBackupType::Log && decision.simple_recovery {
-            let reason =
-                format!("[{db}]: SIMPLE recovery model (no log backups; log is auto-managed)");
-            let _ = events
-                .send(Reply::Log {
-                    line: format!("skipping log backup of {reason}"),
-                })
-                .await;
-            skipped.push(reason);
-            continue;
-        }
-        // A full on an AG secondary must be copy-only (SQL Server rule); logs are
-        // unaffected. A copy-only full plus the log chain still restores fine.
-        let db_copy_only = copy_only || (decision.secondary && backup_type == SqlBackupType::Full);
-        if decision.secondary {
-            let _ = events
-                .send(Reply::Log {
-                    line: format!("[{db}] is an Always On secondary; using a copy-only full"),
-                })
-                .await;
-        }
+        // What this replica does with the database on this run (see sql::plan
+        // for the Always On rules).
+        let state = match crate::sql::probe::db_state(&mut gate, db).await {
+            Ok(state) => state,
+            Err(e) => {
+                let reason = format!("[{db}]: {e:#}");
+                let _ = events
+                    .send(Reply::Log {
+                        line: format!("backup FAILED for {reason}"),
+                    })
+                    .await;
+                failed.push(reason);
+                continue;
+            }
+        };
+        let (backup_type, db_copy_only) = match plan::decide(plan, run, &state) {
+            Action::Skip(why) => {
+                let reason = format!("[{db}]: {why}");
+                let _ = events
+                    .send(Reply::Log {
+                        line: format!("skipping {reason}"),
+                    })
+                    .await;
+                skipped.push(reason);
+                continue;
+            }
+            Action::Backup {
+                kind,
+                copy_only,
+                note,
+            } => {
+                if let Some(note) = note {
+                    let _ = events
+                        .send(Reply::Log {
+                            line: format!("[{db}]: {note}"),
+                        })
+                        .await;
+                }
+                if copy_only
+                    && state.role == Role::Secondary
+                    && plan != plan::PlanKind::SecondaryCopy
+                {
+                    let _ = events
+                        .send(Reply::Log {
+                            line: format!(
+                                "[{db}] is an Always On secondary; using a copy-only full"
+                            ),
+                        })
+                        .await;
+                }
+                (kind, copy_only)
+            }
+        };
         let (group, archive) = sql_group_and_archive(backup_id, db, backup_type);
         // PBS only allows the backup types vm/ct/host; SQL backups use "host"
         // and stay distinct by their per-database group id (log backups get a
@@ -935,10 +951,28 @@ async fn backup_sql_to_pbs(
         let stats = match backup_result {
             Ok(stats) => stats,
             Err(e) => {
-                // This database failed; the others still run. A common cause for a
-                // log backup is no prior full to anchor the chain - the error text
-                // from SQL Server says which. Successful databases stay committed.
-                let reason = format!("[{db}]: {e:#}");
+                // This database failed; the others still run. Successful
+                // databases stay committed.
+                let message = format!("{e:#}");
+                if backup_type == SqlBackupType::Log && plan::is_no_chain_error(&message) {
+                    // A secondary cannot start the chain; the primary's next run
+                    // does. Elsewhere it was not there a moment ago; the next run
+                    // takes a full.
+                    let why = if state.role == Role::Secondary {
+                        plan::NO_CHAIN_ON_SECONDARY
+                    } else {
+                        "no full backup starts the log chain; the next run takes a full backup"
+                    };
+                    let reason = format!("[{db}]: {why}");
+                    let _ = events
+                        .send(Reply::Log {
+                            line: format!("warning: log backup not possible for {reason}"),
+                        })
+                        .await;
+                    warned.push(reason);
+                    continue;
+                }
+                let reason = format!("[{db}]: {message}");
                 let _ = events
                     .send(Reply::Log {
                         line: format!("backup FAILED for {reason}"),
@@ -974,12 +1008,14 @@ async fn backup_sql_to_pbs(
     // Nothing failed and nothing ran: everything was skipped (not the preferred
     // replica, or SIMPLE-recovery logs). Report a no-op, not a backup.
     if backed_up == 0 {
-        let reason = if skipped.is_empty() {
+        let mut reasons = warned.clone();
+        reasons.extend(skipped.iter().cloned());
+        let reason = if reasons.is_empty() {
             "no databases selected".to_string()
         } else {
-            skipped.join("; ")
+            reasons.join("; ")
         };
-        return Ok((format!("skipped: {reason}"), None));
+        return Ok((format!("skipped: {reason}"), None, !warned.is_empty()));
     }
 
     let mut summary = format!(
@@ -988,6 +1024,14 @@ async fn backup_sql_to_pbs(
     );
     if stored_bytes > 0 {
         let _ = write!(summary, ", {} stored", human_bytes(stored_bytes));
+    }
+    if !warned.is_empty() {
+        let _ = write!(
+            summary,
+            "; {} warning(s): {}",
+            warned.len(),
+            warned.join("; ")
+        );
     }
     if !skipped.is_empty() {
         let _ = write!(
@@ -1008,7 +1052,7 @@ async fn backup_sql_to_pbs(
         stored_bytes,
         csum: [0u8; 32],
     };
-    Ok((summary, Some(stats)))
+    Ok((summary, Some(stats), !warned.is_empty()))
 }
 
 async fn backup_sql_to_folder(

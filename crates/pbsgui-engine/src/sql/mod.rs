@@ -10,6 +10,7 @@
 pub mod backupmeta;
 pub mod check;
 pub mod discover;
+pub mod plan;
 pub mod probe;
 pub mod ssrp;
 pub mod vdi;
