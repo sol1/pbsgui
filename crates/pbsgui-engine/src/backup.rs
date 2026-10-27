@@ -122,6 +122,14 @@ pub enum SqlRun {
     Log,
 }
 
+/// How long a secondary's log backups may find no chain before the run fails.
+const NO_CHAIN_ESCALATE_SECS: i64 = 3600;
+
+/// A log run that took a full backup instead (see [`crate::sql::plan`]).
+fn run_is_log_but_full(run: SqlRun, taken: SqlBackupType) -> bool {
+    matches!(run, SqlRun::Log) && taken == SqlBackupType::Full
+}
+
 /// The protection plan as the per-database rules see it (see
 /// [`crate::sql::plan::decide`]).
 fn plan_kind(protection: &SqlProtection) -> crate::sql::plan::PlanKind {
@@ -817,6 +825,9 @@ async fn backup_sql_to_pbs(
     let mut skipped: Vec<String> = Vec::new();
     let mut warned: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
+    // Whether this job has a full from this machine; until it does, a log run on
+    // a primary or standalone instance takes a full first.
+    let mut local_full = crate::sqlsched::last_full(job_id).is_some();
     for db in databases {
         // What this replica does with the database on this run (see sql::plan
         // for the Always On rules).
@@ -833,7 +844,7 @@ async fn backup_sql_to_pbs(
                 continue;
             }
         };
-        let (backup_type, db_copy_only) = match plan::decide(plan, run, &state) {
+        let (backup_type, db_copy_only) = match plan::decide(plan, run, &state, local_full) {
             Action::Skip(why) => {
                 let reason = format!("[{db}]: {why}");
                 let _ = events
@@ -963,6 +974,24 @@ async fn backup_sql_to_pbs(
                     } else {
                         "no full backup starts the log chain; the next run takes a full backup"
                     };
+                    // A secondary waits for the primary to start the chain. If
+                    // that has not happened within the hour, something is wrong
+                    // (no pbsgui or no job on the primary): fail so it is seen.
+                    let since = crate::sqlsched::note_no_chain(job_id, db, unix_now());
+                    if unix_now() - since >= NO_CHAIN_ESCALATE_SECS {
+                        let reason = format!(
+                            "[{db}]: log backups have found no full backup to start the log \
+                             chain for over an hour. Check that pbsgui runs this job on the \
+                             primary replica (see docs/ALWAYS-ON.md)"
+                        );
+                        let _ = events
+                            .send(Reply::Log {
+                                line: format!("backup FAILED for {reason}"),
+                            })
+                            .await;
+                        failed.push(reason);
+                        continue;
+                    }
                     let reason = format!("[{db}]: {why}");
                     let _ = events
                         .send(Reply::Log {
@@ -982,6 +1011,13 @@ async fn backup_sql_to_pbs(
                 continue;
             }
         };
+        crate::sqlsched::clear_no_chain(job_id, db);
+        // A full taken in place of a log backup is this job's full here: record
+        // it so later log runs back up the log instead of repeating the full.
+        if run_is_log_but_full(run, backup_type) {
+            crate::sqlsched::record_full(job_id, unix_now());
+            local_full = true;
+        }
         chunks += stats.chunks;
         uploaded += stats.uploaded;
         reused += stats.reused;

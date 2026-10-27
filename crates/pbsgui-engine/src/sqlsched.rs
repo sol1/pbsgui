@@ -22,6 +22,10 @@ struct State {
     full_attempt: Option<i64>,
     #[serde(default)]
     log_attempt: Option<i64>,
+    /// Per database: since when log backups on this machine have found no
+    /// chain (SQL error 4214), so a lasting problem escalates to a failure.
+    #[serde(default)]
+    no_chain_since: std::collections::BTreeMap<String, i64>,
 }
 
 fn path(job_id: &str) -> PathBuf {
@@ -86,6 +90,23 @@ pub fn record_log(job_id: &str, time: i64) {
     let _ = store(job_id, &s);
 }
 
+/// Note that a log backup of `database` found no chain at `now`, returning
+/// since when that has been the case.
+pub fn note_no_chain(job_id: &str, database: &str, now: i64) -> i64 {
+    let mut s = load(job_id);
+    let since = *s.no_chain_since.entry(database.to_string()).or_insert(now);
+    let _ = store(job_id, &s);
+    since
+}
+
+/// Forget a no-chain episode for `database` (it backed up successfully).
+pub fn clear_no_chain(job_id: &str, database: &str) {
+    let mut s = load(job_id);
+    if s.no_chain_since.remove(database).is_some() {
+        let _ = store(job_id, &s);
+    }
+}
+
 /// Record a full backup ATTEMPT (called after a failed full so the scheduler does
 /// not immediately re-run it; the success anchor is left untouched).
 pub fn record_full_attempt(job_id: &str, time: i64) {
@@ -116,6 +137,7 @@ mod tests {
                 log: Some(900),
                 full_attempt: None,
                 log_attempt: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -126,6 +148,18 @@ mod tests {
         // A real attempt, once recorded, takes precedence over the fallback.
         record_full_attempt(job, 2000);
         assert_eq!(last_full_attempt(job), Some(2000));
+        let _ = std::fs::remove_file(path(job));
+    }
+
+    #[test]
+    fn no_chain_episode_keeps_its_start_until_cleared() {
+        let job = "test-sqlsched-nochain-41c8a0";
+        let _ = std::fs::remove_file(path(job));
+        assert_eq!(note_no_chain(job, "db", 100), 100);
+        assert_eq!(note_no_chain(job, "db", 500), 100);
+        assert_eq!(note_no_chain(job, "other", 500), 500);
+        clear_no_chain(job, "db");
+        assert_eq!(note_no_chain(job, "db", 900), 900);
         let _ = std::fs::remove_file(path(job));
     }
 }

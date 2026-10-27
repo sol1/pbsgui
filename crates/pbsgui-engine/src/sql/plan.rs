@@ -11,11 +11,18 @@
 //! - **Log backups run on the preferred backup replica** (the group's
 //!   `AUTOMATED_BACKUP_PREFERENCE`, default "prefer secondary"). A log backup on
 //!   a secondary is a normal log backup: it truncates the log group-wide.
-//! - **A log run with no chain to extend takes a full instead** on the primary
-//!   or a standalone instance (a new database, a recovery model change, or no
-//!   full yet). This runs even on a primary that is not the preferred replica,
-//!   so a log backup on the secondary can follow. A secondary cannot do this; if
-//!   its log backup finds no chain, the run warns that the primary must take one.
+//! - **A log run takes a full instead** on the primary or a standalone instance
+//!   when there is no chain to extend (a new database, a recovery model change)
+//!   or this job has not taken a full on this machine yet (so PBS never holds
+//!   log backups without a full to restore them onto). This runs even on a
+//!   primary that is not the preferred replica, so a log backup on the secondary
+//!   can follow. A secondary cannot do this; if its log backup finds no chain,
+//!   the run warns that the primary must take one, and fails if that lasts.
+//! - **A read-only database takes no log backups**: nothing changes it, and it
+//!   never shows a log chain, so a full would otherwise be taken every interval.
+//! - **A Basic availability group** (Standard edition) does not allow backups on
+//!   a secondary, so its primary is treated as the preferred replica (see
+//!   [`crate::sql::probe::db_state`]).
 //!
 //! Fulls-only plans keep the simpler rule: back up on the preferred replica, as a
 //! copy-only full on a secondary.
@@ -53,6 +60,8 @@ pub struct DbState {
     /// `sys.fn_hadr_backup_is_preferred_replica`; always true when standalone.
     pub preferred: bool,
     pub simple_recovery: bool,
+    /// The database is set read-only.
+    pub read_only: bool,
     /// A log backup can extend the chain (`last_log_backup_lsn` is set). Only
     /// trusted on a primary or standalone instance, where it is the database's
     /// own state; a secondary's log backup is attempted and its error read.
@@ -78,12 +87,16 @@ pub const FULL_ON_PRIMARY: &str =
 pub const SIMPLE: &str = "SIMPLE recovery model (no log backups; log is auto-managed)";
 pub const PROMOTED: &str =
     "no full backup starts the log chain yet, so taking a full backup instead of a log backup";
+pub const FIRST_FULL: &str =
+    "this job has no full backup from this machine yet, so taking a full backup before log backups";
+pub const READ_ONLY: &str = "read-only database (no log backups; its full backups cover it)";
 pub const NO_CHAIN_ON_SECONDARY: &str =
     "no full backup starts the log chain yet, and a secondary cannot take one; pbsgui on the \
      primary replica takes it on its next run (install pbsgui on every replica with this job)";
 
-/// Decide what to do with one database.
-pub fn decide(plan: PlanKind, run: SqlRun, s: &DbState) -> Action {
+/// Decide what to do with one database. `local_full` says whether this job has
+/// recorded a successful full on this machine.
+pub fn decide(plan: PlanKind, run: SqlRun, s: &DbState, local_full: bool) -> Action {
     let full = |copy_only, note| Action::Backup {
         kind: SqlBackupType::Full,
         copy_only,
@@ -99,8 +112,14 @@ pub fn decide(plan: PlanKind, run: SqlRun, s: &DbState) -> Action {
                 if s.simple_recovery {
                     return Action::Skip(SIMPLE);
                 }
+                if s.read_only {
+                    return Action::Skip(READ_ONLY);
+                }
                 match s.role {
                     Role::Standalone | Role::Primary if !s.log_chain => full(false, Some(PROMOTED)),
+                    Role::Standalone | Role::Primary if !local_full => {
+                        full(false, Some(FIRST_FULL))
+                    }
                     _ if !s.preferred => Action::Skip(NOT_PREFERRED),
                     _ => Action::Backup {
                         kind: SqlBackupType::Log,
@@ -136,6 +155,7 @@ mod tests {
             role,
             preferred,
             simple_recovery: false,
+            read_only: false,
             log_chain,
         }
     }
@@ -154,17 +174,17 @@ mod tests {
     fn standalone_point_in_time() {
         let s = state(Role::Standalone, true, true);
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Full, &s),
+            decide(PlanKind::PointInTime, SqlRun::Full, &s, true),
             backup(Full, false)
         );
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &s),
+            decide(PlanKind::PointInTime, SqlRun::Log, &s, true),
             backup(Log, false)
         );
         // No chain yet (new database): the log run takes a full instead.
         let s = state(Role::Standalone, true, false);
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &s),
+            decide(PlanKind::PointInTime, SqlRun::Log, &s, true),
             Action::Backup {
                 kind: Full,
                 copy_only: false,
@@ -180,20 +200,20 @@ mod tests {
         let secondary = state(Role::Secondary, true, true);
         // Fulls: a normal full on the primary only, never copy-only.
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Full, &primary),
+            decide(PlanKind::PointInTime, SqlRun::Full, &primary, true),
             backup(Full, false)
         );
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Full, &secondary),
+            decide(PlanKind::PointInTime, SqlRun::Full, &secondary, true),
             Action::Skip(FULL_ON_PRIMARY)
         );
         // Logs: on the preferred secondary only.
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &primary),
+            decide(PlanKind::PointInTime, SqlRun::Log, &primary, true),
             Action::Skip(NOT_PREFERRED)
         );
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &secondary),
+            decide(PlanKind::PointInTime, SqlRun::Log, &secondary, true),
             backup(Log, false)
         );
     }
@@ -203,19 +223,19 @@ mod tests {
         let primary = state(Role::Primary, true, true);
         let secondary = state(Role::Secondary, false, true);
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Full, &primary),
+            decide(PlanKind::PointInTime, SqlRun::Full, &primary, true),
             backup(Full, false)
         );
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &primary),
+            decide(PlanKind::PointInTime, SqlRun::Log, &primary, true),
             backup(Log, false)
         );
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Full, &secondary),
+            decide(PlanKind::PointInTime, SqlRun::Full, &secondary, true),
             Action::Skip(FULL_ON_PRIMARY)
         );
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &secondary),
+            decide(PlanKind::PointInTime, SqlRun::Log, &secondary, true),
             Action::Skip(NOT_PREFERRED)
         );
     }
@@ -226,7 +246,7 @@ mod tests {
         // next log run takes the full that starts it.
         let primary = state(Role::Primary, false, false);
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &primary),
+            decide(PlanKind::PointInTime, SqlRun::Log, &primary, true),
             Action::Backup {
                 kind: Full,
                 copy_only: false,
@@ -237,8 +257,48 @@ mod tests {
         // log backup, whose 4214 error becomes a warning.
         let secondary = state(Role::Secondary, true, false);
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &secondary),
+            decide(PlanKind::PointInTime, SqlRun::Log, &secondary, true),
             backup(Log, false)
+        );
+    }
+
+    #[test]
+    fn first_log_run_without_a_local_full_takes_a_full() {
+        // A chain exists in SQL (another tool's full), but PBS has no full from
+        // this job yet: take one rather than logs with nothing to restore onto.
+        let s = state(Role::Standalone, true, true);
+        assert_eq!(
+            decide(PlanKind::PointInTime, SqlRun::Log, &s, false),
+            Action::Backup {
+                kind: Full,
+                copy_only: false,
+                note: Some(FIRST_FULL)
+            }
+        );
+        let primary = state(Role::Primary, false, true);
+        assert!(matches!(
+            decide(PlanKind::PointInTime, SqlRun::Log, &primary, false),
+            Action::Backup { kind: Full, .. }
+        ));
+        // A secondary's fulls run on the primary, so it never waits for one.
+        let secondary = state(Role::Secondary, true, true);
+        assert_eq!(
+            decide(PlanKind::PointInTime, SqlRun::Log, &secondary, false),
+            backup(Log, false)
+        );
+    }
+
+    #[test]
+    fn read_only_databases_take_no_logs() {
+        let mut s = state(Role::Standalone, true, false);
+        s.read_only = true;
+        assert_eq!(
+            decide(PlanKind::PointInTime, SqlRun::Log, &s, true),
+            Action::Skip(READ_ONLY)
+        );
+        assert_eq!(
+            decide(PlanKind::PointInTime, SqlRun::Full, &s, true),
+            backup(Full, false)
         );
     }
 
@@ -247,11 +307,11 @@ mod tests {
         let mut s = state(Role::Primary, true, false);
         s.simple_recovery = true;
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Log, &s),
+            decide(PlanKind::PointInTime, SqlRun::Log, &s, true),
             Action::Skip(SIMPLE)
         );
         assert_eq!(
-            decide(PlanKind::PointInTime, SqlRun::Full, &s),
+            decide(PlanKind::PointInTime, SqlRun::Full, &s, true),
             backup(Full, false)
         );
     }
@@ -261,20 +321,20 @@ mod tests {
         let secondary = state(Role::Secondary, true, true);
         let primary = state(Role::Primary, false, true);
         assert_eq!(
-            decide(PlanKind::RestorePoints, SqlRun::Full, &secondary),
+            decide(PlanKind::RestorePoints, SqlRun::Full, &secondary, true),
             backup(Full, true)
         );
         assert_eq!(
-            decide(PlanKind::RestorePoints, SqlRun::Full, &primary),
+            decide(PlanKind::RestorePoints, SqlRun::Full, &primary, true),
             Action::Skip(NOT_PREFERRED)
         );
         let standalone = state(Role::Standalone, true, true);
         assert_eq!(
-            decide(PlanKind::RestorePoints, SqlRun::Full, &standalone),
+            decide(PlanKind::RestorePoints, SqlRun::Full, &standalone, true),
             backup(Full, false)
         );
         assert_eq!(
-            decide(PlanKind::SecondaryCopy, SqlRun::Full, &standalone),
+            decide(PlanKind::SecondaryCopy, SqlRun::Full, &standalone, true),
             backup(Full, true)
         );
     }

@@ -200,6 +200,7 @@ pub(crate) async fn db_state(
              ELSE 0 END AS int) AS preferred, \
            rs.role_desc AS role, \
            CAST(CASE WHEN d.recovery_model_desc = 'SIMPLE' THEN 1 ELSE 0 END AS int) AS simple, \
+           CAST(d.is_read_only AS int) AS read_only, \
            CAST(CASE WHEN drs.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS int) AS log_chain \
          FROM sys.databases d \
          LEFT JOIN sys.dm_hadr_availability_replica_states rs \
@@ -220,13 +221,41 @@ pub(crate) async fn db_state(
         // SECONDARY, RESOLVING, or no local replica row: never act as primary.
         (true, _) => Role::Secondary,
     };
-    Ok(DbState {
+    let mut state = DbState {
         role,
         // Proceed unless SQL explicitly says this is not the preferred replica.
         preferred: row.get::<i32, _>("preferred") != Some(0),
         simple_recovery: row.get::<i32, _>("simple") == Some(1),
+        read_only: row.get::<i32, _>("read_only") == Some(1),
         log_chain: row.get::<i32, _>("log_chain") == Some(1),
-    })
+    };
+    drop(row);
+    // A Basic availability group (Standard edition) allows no backups on a
+    // secondary, whatever the backup preference says, so only its primary is
+    // the preferred replica.
+    if in_ag && is_basic_ag(client, database).await {
+        state.preferred = state.role == Role::Primary;
+    }
+    Ok(state)
+}
+
+/// Whether `database` is in a Basic availability group. The column only exists
+/// from SQL Server 2016 (where Basic groups were introduced), so a failed query
+/// means no.
+async fn is_basic_ag(client: &mut SqlClient, database: &str) -> bool {
+    let db = database.replace('\'', "''");
+    let query = format!(
+        "SELECT CAST(ag.basic_features AS int) AS basic \
+         FROM sys.databases d \
+         JOIN sys.availability_replicas ar ON ar.replica_id = d.replica_id \
+         JOIN sys.availability_groups ag ON ag.group_id = ar.group_id \
+         WHERE d.name = N'{db}'"
+    );
+    let row = match client.simple_query(query).await {
+        Ok(stream) => stream.into_row().await.ok().flatten(),
+        Err(_) => None,
+    };
+    row.and_then(|r| r.get::<i32, _>("basic")) == Some(1)
 }
 
 /// Estimate the backup size of `database` as its allocated data-file bytes
@@ -369,6 +398,22 @@ mod tests {
                 .unwrap()
                 .log_chain
         );
+
+        // A read-only database is flagged (it never shows a log chain).
+        c.simple_query("ALTER DATABASE pbsgui_chain SET READ_ONLY")
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
+        let s = super::db_state(&mut c, "pbsgui_chain").await.unwrap();
+        assert!(s.read_only);
+        c.simple_query("ALTER DATABASE pbsgui_chain SET READ_WRITE")
+            .await
+            .unwrap()
+            .into_results()
+            .await
+            .unwrap();
 
         // A missing database is an error (reported per database), not a panic.
         assert!(super::db_state(&mut c, "pbsgui_no_such_db").await.is_err());
