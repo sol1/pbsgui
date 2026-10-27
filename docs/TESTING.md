@@ -59,11 +59,35 @@ Record build + date, and pass/fail per row.
 ### SQL - point-in-time
 
 - [ ] Wizard guidance: a SIMPLE-recovery DB is **blocked** with the `ALTER DATABASE ... SET RECOVERY FULL` hint.
-- [ ] Run once manually -> the full anchors the chain; logs then appear on the log interval.
+- [ ] New job on a database with no full yet: the first log interval takes a full instead
+      (run log: "no full backup starts the log chain yet"), then log backups follow.
+- [ ] Run once manually -> a full lands; logs then appear on the log interval.
 - [ ] The restore view shows full points (with sizes) and a point-in-time window with a log count + total.
 - [ ] **Point-in-time correctness** (objective, see below): restore to a chosen moment and verify the data matches that moment.
 - [ ] Edge: restore to "latest"; restore to just after the full (before the first log).
 - [ ] Log truncation: the DB's log file stops growing once log backups run (`DBCC SQLPERF(LOGSPACE)`).
+
+### SQL - Always On availability group
+
+Needs a two-replica group with pbsgui on both, the same job, backup id, and PBS token
+(see [ALWAYS-ON.md](ALWAYS-ON.md)). Start with the default backup preference
+(prefer secondary).
+
+- [ ] A database just added to the group (no full yet): within one log interval the
+      primary's run log shows "taking a full backup instead of a log backup", and the
+      secondary's next log backup succeeds.
+- [ ] Full schedule: the primary takes a normal full (`is_copy_only = 0` in
+      `msdb.dbo.backupset`); the secondary logs "full backups are taken on the Always On
+      primary replica".
+- [ ] Log interval: the secondary takes the log backups; the primary logs "not the Always
+      On preferred backup replica".
+- [ ] `log_reuse_wait_desc` leaves `LOG_BACKUP` after the first log backup, and
+      `DBCC SQLPERF(LOGSPACE)` shows the used log space drop.
+- [ ] Set `AUTOMATED_BACKUP_PREFERENCE = PRIMARY`: fulls and logs both run on the
+      primary; the secondary skips both.
+- [ ] Fail over: the new primary takes the next full, the preferred replica keeps taking
+      logs, and Browse shows one continuous restore window across the failover.
+- [ ] Point-in-time restore to a moment after the failover, from either node.
 
 ### Encryption
 

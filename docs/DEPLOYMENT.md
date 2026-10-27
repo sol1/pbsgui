@@ -92,10 +92,14 @@ For transaction-log management and the protection plans, see the SQL sections of
 ## Always On and Failover Cluster
 
 Install the engine on every replica or node. It coordinates through SQL Server with
-no link between the pbsgui instances. An Always On database is backed up only on the
-preferred backup replica. A Failover Cluster Instance is skipped on whichever node
-is not active. Give each replica's job the same backup id. It defaults to the
-Availability Group name, so all nodes write one continuous chain.
+no link between the pbsgui instances. A Failover Cluster Instance is skipped on
+whichever node is not active.
+
+For an Always On availability group, give each replica the same job and the same
+backup id. It defaults to the availability group name, so all nodes write one
+continuous chain. Point-in-time fulls run on the primary and log backups on the
+group's preferred backup replica. See [ALWAYS-ON.md](ALWAYS-ON.md) for the setup,
+the backup preference, log truncation, and troubleshooting.
 
 Use the same PBS API token on every replica or node. PBS makes the token that first
 writes a snapshot group its owner, and refuses backups into that group from any

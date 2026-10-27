@@ -145,20 +145,33 @@ databases, and back one up.
 
 ### Transaction-log backups
 
-To keep a FULL or BULK_LOGGED database's transaction log from growing without
-bound, schedule log backups:
+The point-in-time protection plan takes scheduled fulls plus log backups on a
+fixed interval. Each log backup (never copy-only) truncates the inactive log. Log
+snapshots go to a separate `-log` snapshot group per database.
 
-1. Run a full backup with copy-only turned off once, so pbsgui owns the backup
-   chain. (A copy-only full does not start a log chain, so `BACKUP LOG` would
-   fail until a regular full exists.)
-2. Create a second job over the same databases with the backup type set to
-   Transaction log and a frequent schedule. Each run takes `BACKUP LOG` (never
-   copy-only), which truncates the inactive log. Log snapshots are stored in a
-   separate `-log` snapshot group.
+Which replica does what, per database and run, is decided in
+`crates/pbsgui-engine/src/sql/plan.rs`, a pure function with unit tests:
 
-If you do not need point-in-time recovery, setting the database to the SIMPLE
-recovery model is the alternative: the log truncates automatically and log
-backups are neither needed nor allowed.
+- Fulls run on a standalone instance or an Always On primary, as normal
+  (chain-starting) backups. A secondary can only take copy-only fulls, which do not
+  start a log chain, so it skips them.
+- Logs run on the preferred backup replica.
+- A log run on a primary or standalone instance whose database has no chain
+  (`sys.database_recovery_status.last_log_backup_lsn` is NULL) takes a full
+  instead. The scheduler therefore does not wait for a local full before log runs.
+- A secondary attempts its log backup and turns SQL error 4214 into a warning.
+
+`probe::db_state` gathers the inputs. Its ignored test runs against a live SQL
+Server:
+
+```sh
+docker run -d --name sqltest -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=<password>' \
+  -p 127.0.0.1:14333:1433 mcr.microsoft.com/mssql/server:2022-latest
+PBSGUI_TEST_SQL=127.0.0.1:14333 PBSGUI_TEST_SQL_SA='<password>' \
+  cargo test -p pbsgui-engine db_state_tracks -- --ignored
+```
+
+Operator guidance for availability groups is in [ALWAYS-ON.md](ALWAYS-ON.md).
 
 ## Continuous integration
 

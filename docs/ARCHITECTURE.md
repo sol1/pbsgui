@@ -38,9 +38,11 @@ Detection runs first and selects the strategy:
 - Standalone: full, differential, and log backups on the instance.
 - Failover Cluster Instance: backups run against the virtual network name; the
   physical node may change on failover.
-- Always On Availability Group: honor the backup preference and
-  `sys.fn_hadr_backup_is_preferred_replica`. On a secondary (before SQL 2025) only
-  COPY_ONLY full and regular log backups are allowed, never differentials.
+- Always On Availability Group: on a secondary (before SQL 2025) only COPY_ONLY
+  full and regular log backups are allowed, never differentials, and a COPY_ONLY
+  full does not start a log chain. So point-in-time fulls run on the primary, and
+  log backups on the replica `sys.fn_hadr_backup_is_preferred_replica` selects.
+  The rules are in `sql/plan.rs`; operator guidance in [ALWAYS-ON.md](ALWAYS-ON.md).
 
 Backups stream over the Virtual Device Interface. A `BACKUP ... TO VIRTUAL_DEVICE`
 statement is issued through a TDS client while a native COM loop on `SQLVDI.dll`

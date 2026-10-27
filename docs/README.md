@@ -39,6 +39,7 @@ pbsgui runs SQL backups two ways.
 | Doc | For | Contents |
 | --- | --- | --- |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Operators | Install and run pbsgui in production. Requirements, single-host setup, the first backup, upgrades. |
+| [ALWAYS-ON.md](ALWAYS-ON.md) | Operators | Always On availability groups. What runs on which replica, the backup preference, log truncation and shrinking, and troubleshooting `LOG_BACKUP`. |
 | [RELAY.md](RELAY.md) | Operators | Deploy relay mode. Topology, ports, credentials, the step-by-step proxy and agent setup, and troubleshooting. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Everyone | Components, the SQL backup strategy, the relay design, and the storage model. |
 | [STATUS.md](STATUS.md) | Everyone | What works, what is in progress, and the roadmap. |
@@ -48,6 +49,8 @@ pbsgui runs SQL backups two ways.
 ## Start here
 
 - Deploying to one SQL Server: read [DEPLOYMENT.md](DEPLOYMENT.md).
+- Backing up an Always On availability group: read [DEPLOYMENT.md](DEPLOYMENT.md),
+  then [ALWAYS-ON.md](ALWAYS-ON.md).
 - Deploying a fleet, or offloading backup CPU: read [DEPLOYMENT.md](DEPLOYMENT.md),
   then [RELAY.md](RELAY.md).
 - Building from source: read [DEVELOPERS.md](DEVELOPERS.md).

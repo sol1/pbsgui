@@ -76,10 +76,12 @@ CI on Windows and exercised manually.
   trap). The engine schedules the full and log cadences independently.
 - **High-availability aware backups.** Install the engine on each node and it
   coordinates through SQL Server, with no connection between the pbsgui instances:
-  an Always On database is backed up only on the preferred backup replica
-  (`sys.fn_hadr_backup_is_preferred_replica`), forcing a copy-only full on a
-  secondary; a Failover Cluster Instance is skipped on whichever node is not the
-  active one. For an Always On database the snapshot group defaults to the
+  for an Always On database, point-in-time fulls run on the primary and log
+  backups on the preferred backup replica
+  (`sys.fn_hadr_backup_is_preferred_replica`), and a database with no log chain
+  gets a full instead of a log backup; fulls-only plans run on the preferred
+  replica (copy-only on a secondary). A Failover Cluster Instance is skipped on
+  whichever node is not the active one. See [ALWAYS-ON.md](ALWAYS-ON.md). For an Always On database the snapshot group defaults to the
   Availability Group name, so every replica's job lands on one continuous chain.
   System databases (master/model/msdb) are offered for backup (tempdb is hidden);
   the wizard explains the restore caveats.

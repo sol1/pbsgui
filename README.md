@@ -108,6 +108,7 @@ administrator-only control socket. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 
 - [docs/](docs/README.md) - index, overview, why pbsgui exists, and the guides below.
 - [DEPLOYMENT.md](docs/DEPLOYMENT.md) - install and run in production.
+- [ALWAYS-ON.md](docs/ALWAYS-ON.md) - back up an Always On availability group.
 - [RELAY.md](docs/RELAY.md) - deploy relay mode (thin agent plus proxy).
 - [STATUS.md](docs/STATUS.md) - what works, what is in progress, and planned.
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - components, the SQL backup strategy, and the relay.
