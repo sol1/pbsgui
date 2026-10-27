@@ -156,10 +156,16 @@ Which replica does what, per database and run, is decided in
   (chain-starting) backups. A secondary can only take copy-only fulls, which do not
   start a log chain, so it skips them.
 - Logs run on the preferred backup replica.
-- A log run on a primary or standalone instance whose database has no chain
-  (`sys.database_recovery_status.last_log_backup_lsn` is NULL) takes a full
-  instead. The scheduler therefore does not wait for a local full before log runs.
-- A secondary attempts its log backup and turns SQL error 4214 into a warning.
+- A log run on a primary or standalone instance takes a full instead when the
+  database has no chain (`sys.database_recovery_status.last_log_backup_lsn` is
+  NULL) or the job has no full recorded on this machine (`sqlsched::last_full`).
+  That full is recorded, so the next run takes a log backup. The scheduler
+  therefore does not wait for a local full before log runs.
+- Read-only databases take no log backups (they never show a chain).
+- A secondary attempts its log backup and turns SQL error 4214 into a warning,
+  and into a failure once it has lasted an hour (`sqlsched::note_no_chain`).
+- In a Basic availability group (no backups on a secondary), only the primary
+  counts as the preferred replica.
 
 `probe::db_state` gathers the inputs. Its ignored test runs against a live SQL
 Server:

@@ -32,11 +32,21 @@ copy-only full backups (before SQL Server 2025), and a copy-only full does not
 start the log chain that log backups extend. A log backup taken on a secondary is
 a normal log backup and truncates the log for the whole group.
 
-If a database has no full backup to start its chain (it was just added to the
-group, was seeded automatically, or had its recovery model changed), pbsgui on the
-primary takes a full backup at its next log interval instead of a log backup, even
-when the primary is not the preferred backup replica. Until then a secondary's log
-backup for that database finishes with a warning, not an error.
+pbsgui on the primary takes a full backup at its next log interval instead of a
+log backup, even when the primary is not the preferred backup replica, in two
+cases:
+
+- The database has no full backup that starts its log chain (it was just added,
+  or its recovery model was changed).
+- The job has not taken a full backup on this machine yet, so PBS would otherwise
+  hold log backups with no full to restore them onto.
+
+Until then a secondary's log backup for that database finishes with a warning,
+not an error. If a secondary still finds no chain after an hour, the run fails,
+because something needs fixing (see [Troubleshooting](#troubleshooting)).
+
+Read-only databases take no log backups. Nothing changes them, so their full
+backups cover them.
 
 The run log on each replica says what it did with each database. These skips are
 normal:
@@ -69,6 +79,10 @@ ALTER AVAILABILITY GROUP [YourGroup] SET (AUTOMATED_BACKUP_PREFERENCE = PRIMARY)
 
 Prefer secondary moves the log backup reads off the primary. Primary is simpler to
 reason about. Both work with pbsgui.
+
+A **Basic availability group** (SQL Server Standard edition) does not allow
+backups on a secondary at all, so pbsgui runs everything on its primary whatever
+the preference says.
 
 Only one tool should take log backups of a database. If another tool also backs
 up the log, each tool's chain has gaps the other filled. Use the "safety copy"
@@ -111,11 +125,14 @@ file and slows the database.
 
 **Log backups fail with error 4214, "no current database backup".** No normal
 full backup starts the log chain. pbsgui on the primary takes one at its next log
-interval. If the warning keeps coming back on a secondary:
+interval. If the warning keeps coming back on a secondary, or the run fails with
+"no full backup to start the log chain for over an hour":
 
-- Make sure pbsgui is installed on the primary with the same job, and that the
-  job is not set to manual.
+- Make sure pbsgui is installed on the primary with the same job.
 - Run the job once on the primary (Run on the job card). That takes the full.
+- If the primary's run log shows log backups or skips but no full, check
+  `log_reuse_wait_desc` and the secondary's synchronization state; a secondary
+  that is far behind may not see the primary's full yet.
 
 **The log keeps growing and shows `LOG_BACKUP`.** Look at the run log on the
 preferred backup replica, which takes the log backups. If that replica has no
@@ -124,10 +141,17 @@ pbsgui, or its job differs, nothing takes them.
 **Backups fail after a failover with a PBS ownership or permission error.** The
 replicas use different PBS API tokens. Use the same token on every replica.
 
+**A backup fails right after a failover because the snapshot is older than the
+last one.** PBS refuses a snapshot older than the newest in its group, so a
+replica whose clock is behind can fail one run after taking over. Keep the
+replicas' clocks in sync (domain members normally are).
+
 **System databases.** `master`, `model`, and `msdb` are not part of the group and
 differ on each node. Back them up with a separate job on each node, using the
 "daily restore points" plan and a **different backup id per node** (for example
 the host name), so the nodes do not share snapshot groups.
+
+**Distributed availability groups** are not supported yet.
 
 **Failover Cluster Instances** are different: one instance moves between nodes.
 pbsgui skips the backup on any node where the instance is not running. See

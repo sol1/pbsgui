@@ -88,6 +88,10 @@ Needs a two-replica group with pbsgui on both, the same job, backup id, and PBS 
 - [ ] Fail over: the new primary takes the next full, the preferred replica keeps taking
       logs, and Browse shows one continuous restore window across the failover.
 - [ ] Point-in-time restore to a moment after the failover, from either node.
+- [ ] Stop pbsgui on the primary, add a database to the group: the secondary warns
+      about the missing chain, then fails the run after an hour.
+- [ ] Basic availability group (Standard edition), if available: fulls and logs both run
+      on the primary.
 
 ### Encryption
 
